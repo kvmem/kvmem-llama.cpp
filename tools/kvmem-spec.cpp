@@ -1,5 +1,6 @@
 #include "kvmem-spec.h"
 #include "llama-kvmem-hooks.h"
+#include "llama-kvmem-diag.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -120,30 +121,28 @@ bool kvmem_spec_start(kvmem_spec_session & sess,
     sess.use_ckpt_dft = false;
     if (sess.use_gdn_replay) {
         sess.use_ckpt_tgt = false;
-        fprintf(stderr, "KVMEM_TRACE spec_ckpt tgt=REPLAY (FP32 GDN records)\n");
+        kvmem_diag("KVMEM_TRACE spec_ckpt tgt=REPLAY (FP32 GDN records)\n");
     } else if (sess.n_rs_tgt > 0) {
         sess.use_ckpt_tgt = false;
-        fprintf(stderr,
-                "KVMEM_TRACE spec_ckpt tgt=RS n_rs_seq=%u (GPU GDN planes; host ckpt if draft > n_rs)\n",
+        kvmem_diag("KVMEM_TRACE spec_ckpt tgt=RS n_rs_seq=%u (GPU GDN planes; host ckpt if draft > n_rs)\n",
                 sess.n_rs_tgt);
     } else if (llama_kvmem_has_recurrent()) {
         sess.use_ckpt_tgt = true;
-        fprintf(stderr,
-                "KVMEM_TRACE spec_ckpt tgt=PARTIAL_ONLY (hybrid GDN; n_rs_seq=0 host fallback)\n");
+        kvmem_diag("KVMEM_TRACE spec_ckpt tgt=PARTIAL_ONLY (hybrid GDN; n_rs_seq=0 host fallback)\n");
     } else if (!opts.kvmem_enabled) {
         sess.use_ckpt_tgt =
                 common_context_can_seq_rm(ctx_tgt) == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
         sess.use_ckpt_dft =
                 common_context_can_seq_rm(sess.ctx_dft) == COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
-        fprintf(stderr, "KVMEM_TRACE spec_ckpt tgt=%d dft=%d (vanilla probe)\n",
+        kvmem_diag("KVMEM_TRACE spec_ckpt tgt=%d dft=%d (vanilla probe)\n",
                 (int) sess.use_ckpt_tgt, (int) sess.use_ckpt_dft);
     } else {
         sess.use_ckpt_tgt = false;
-        fprintf(stderr, "KVMEM_TRACE spec_ckpt tgt=0 (dense KVMem seq_rm)\n");
+        kvmem_diag("KVMEM_TRACE spec_ckpt tgt=0 (dense KVMem seq_rm)\n");
     }
 
     sess.ok = true;
-    fprintf(stderr, "KVMEM_TRACE spec_start type=draft-mtp n_max=%d p_min=%.3f dft=%p\n",
+    kvmem_diag("KVMEM_TRACE spec_start type=draft-mtp n_max=%d p_min=%.3f dft=%p\n",
             opts.n_max, opts.p_min, (void *) sess.ctx_dft);
     return true;
 }
@@ -174,7 +173,7 @@ int kvmem_spec_decode_span(llama_context * ctx,
     int n_pos = pos0;
     while (n_pos < pos1) {
         if (abort && abort()) {
-            fprintf(stderr, "KVMEM_TRACE stream_abort phase=prefill pos=%d what=%s\n",
+            kvmem_diag("KVMEM_TRACE stream_abort phase=prefill pos=%d what=%s\n",
                     n_pos, what ? what : "");
             llama_batch_free(batch);
             return KVMEM_DECODE_ABORT;
@@ -280,7 +279,7 @@ kvmem_spec_gen_stats kvmem_spec_generate(
 
     while (st.n_gen < n_predict && !has_eos) {
         if (abort && abort()) {
-            fprintf(stderr, "KVMEM_TRACE stream_abort phase=spec_gen n_gen=%d\n", st.n_gen);
+            kvmem_diag("KVMEM_TRACE stream_abort phase=spec_gen n_gen=%d\n", st.n_gen);
             break;
         }
         if (draft.empty()) {
@@ -377,8 +376,7 @@ kvmem_spec_gen_stats kvmem_spec_generate(
             }
         }
         const bool restore = host_ckpt && !ids.empty() && ids.size() - 1 < n_draft;
-        fprintf(stderr,
-                "KVMEM_TRACE spec_verify n_draft=%zu n_accept=%zu restore=%d pos=%d ckpt_bytes=%zu n_rs=%u\n",
+        kvmem_diag("KVMEM_TRACE spec_verify n_draft=%zu n_accept=%zu restore=%d pos=%d ckpt_bytes=%zu n_rs=%u\n",
                 n_draft, ids.size() > 0 ? ids.size() - 1 : 0, (int) restore, n_past - 1,
                 ckpt.data_tgt.size(), sess.n_rs_tgt);
 
@@ -476,11 +474,10 @@ kvmem_spec_gen_stats kvmem_spec_generate(
         if (!sess.use_gdn_replay) llama_kvmem_truncate_cached(n_past);
     }
 
-    fprintf(stderr,
-            "KVMEM_TRACE spec_stats n_gen=%d n_drafted=%d n_accept=%d n_restore=%d accept_pct=%.1f\n",
+    kvmem_diag("KVMEM_TRACE spec_stats n_gen=%d n_drafted=%d n_accept=%d n_restore=%d accept_pct=%.1f\n",
             st.n_gen, st.n_drafted, st.n_accept, st.n_restore,
             st.n_drafted > 0 ? 100.0 * st.n_accept / st.n_drafted : 0.0);
-    fprintf(stderr, "KVMEM_GDN_PERF mode=%s verify_calls=%llu committed_rows=%llu verify_ms=%.3f fold_ms=%.3f\n",
+    kvmem_diag("KVMEM_GDN_PERF mode=%s verify_calls=%llu committed_rows=%llu verify_ms=%.3f fold_ms=%.3f\n",
             sess.use_gdn_replay ? "replay" : "snapshots", (unsigned long long) verify_calls,
             (unsigned long long) committed_rows, verify_us / 1000.0, fold_us / 1000.0);
     llama_kvmem_decode_mean_flush();

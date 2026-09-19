@@ -16,6 +16,7 @@
 #include "ggml-backend-impl.h"
 
 #include <cuda_runtime.h>
+#include "llama-kvmem-diag.h"
 
 #include <algorithm>
 #include <cmath>
@@ -125,8 +126,7 @@ llama_memory_kvmem_mtp::llama_memory_kvmem_mtp(
         bytes += kv.second;
     }
     const uint32_t n_layers = (uint32_t) kv_->get_layer_ids().size();
-    fprintf(stderr,
-            "KVMEM_TRACE mtp_pool cells=%u target_cells=%u n_ctx=%u bytes=%zu layers=%u block_tokens=%u"
+    kvmem_diag("KVMEM_TRACE mtp_pool cells=%u target_cells=%u n_ctx=%u bytes=%zu layers=%u block_tokens=%u"
             " type_k=%s type_v=%s k_row_bytes=%zu v_row_bytes=%zu v_trans=%d\n",
             kv_size_, target_->kv_size(), cparams.n_ctx, bytes, n_layers, block_tokens_,
             ggml_type_name(kt->type), ggml_type_name(vt->type), krow, vrow, (int) v_trans_);
@@ -190,8 +190,7 @@ bool llama_memory_kvmem_mtp::fill_from_target(
     }
     pos_queue_.push_back(std::move(pos_note));
     if (trace_ && ubatch.n_tokens > 0) {
-        fprintf(stderr,
-                "KVMEM_TRACE mtp_occupy n=%u first_pos=%d first_slot=%d first_cell=%u "
+        kvmem_diag("KVMEM_TRACE mtp_occupy n=%u first_pos=%d first_slot=%d first_cell=%u "
                 "tgt_slot=%d kv_size=%u\n",
                 ubatch.n_tokens, (int) ubatch.pos[0], (int) first_slot, first_cell,
                 (int) first_slot, kv_size_);
@@ -586,7 +585,7 @@ void llama_memory_kvmem_mtp::follow_retrieval() {
     uint32_t n_host = 0;
     uint32_t n_miss = 0;
     if (trace_) {
-        fprintf(stderr, "KVMEM_TRACE mtp_selected");
+        kvmem_diag("KVMEM_TRACE mtp_selected");
     }
     for (const auto & b : target_->store().blocks()) {
         if (b.gpu_slot < 0 || b.n_tokens == 0) {
@@ -611,8 +610,7 @@ void llama_memory_kvmem_mtp::follow_retrieval() {
     if (trace_) {
         fprintf(stderr, "\n");
     }
-    fprintf(stderr,
-            "KVMEM_TRACE mtp_follow n_gpu=%u n_keep=%u n_host=%u n_writeback=%u n_no_raw=%u seq_pos=[%d,%d]\n",
+    kvmem_diag("KVMEM_TRACE mtp_follow n_gpu=%u n_keep=%u n_host=%u n_writeback=%u n_no_raw=%u seq_pos=[%d,%d]\n",
             n_gpu, n_keep, n_host, n_keep + n_host, n_miss,
             (int) kv_->seq_pos_min(0), (int) kv_->seq_pos_max(0));
 }

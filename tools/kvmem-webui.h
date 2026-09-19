@@ -27,14 +27,32 @@ inline std::filesystem::path kvmem_executable_path(const char * argv0) {
 }
 
 inline bool kvmem_output_limit(const nlohmann::json & body, int limit, int & value, std::string & error) {
+    // An OpenAI-compatible endpoint should be liberal in what it accepts. Clients
+    // routinely ask for more output than this deployment can serve, and some send
+    // JSON `null` or `0` for "let the server decide" (DeepSeek Harness sends
+    // max_completion_tokens). Hard-rejecting those with a 400 breaks clients that
+    // work fine against llama-server, which clamps instead -- and the clamp at the
+    // bottom of this function is the real authority anyway, so rejecting values it
+    // would have clamped was self-contradictory. Only a value we cannot interpret
+    // at all (a string) is still an error.
     const char * key = body.contains("max_tokens") ? "max_tokens" : "max_completion_tokens";
     if (body.contains(key)) {
         const auto & n = body[key];
-        if (!n.is_number_integer() || n.get<double>() < -1 || n.get<double>() > limit || n == 0) {
-            error = std::string(key) + " must be -1 (server default) or an integer in 1.." + std::to_string(limit);
+        if (n.is_number()) {
+            const double requested = n.get<double>();
+            if (requested > (double) limit) {
+                fprintf(stderr, "requested %s=%.0f exceeds the generation limit %d; clamping\n",
+                        key, requested, limit);
+                value = limit;
+            } else if (requested >= 1.0) {
+                value = (int) requested;
+            }
+            // -1, 0 and negative values mean "server default": leave `value` at
+            // whatever the caller already resolved.
+        } else if (!n.is_null()) {
+            error = std::string(key) + " must be a number or null";
             return false;
         }
-        if (n != -1) value = n.get<int>();
     }
     if (value < 1) value = limit;
     value = std::min(value, limit);

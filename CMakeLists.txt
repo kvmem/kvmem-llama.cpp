@@ -62,6 +62,14 @@ if (KVMEM_BUILD_LLAMA)
         llama.cpp/vendor/cpp-httplib)
     target_link_libraries(llama-kvmem-server PRIVATE llama llama-common cpp-httplib mtmd)
     target_compile_features(llama-kvmem-server PRIVATE cxx_std_17)
+
+    # MSVC warns on the POSIX-ish helpers the server uses for the diagnostics
+    # toggle (_putenv_s) and treats those warnings as noise next to real ones.
+    if (MSVC)
+        target_compile_definitions(llama-kvmem-cli    PRIVATE _CRT_SECURE_NO_WARNINGS)
+        target_compile_definitions(llama-kvmem-server PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+
     foreach(tool llama-kvmem-cli llama-kvmem-server)
         target_compile_definitions(${tool} PRIVATE KVMEM_ENABLE_NVME=$<BOOL:${KVMEM_ENABLE_NVME}>)
     endforeach()
