@@ -1,9 +1,8 @@
 #include "llama-kvmem-stagein.h"
 #include "llama-kvmem-transfer.h"
 
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+// CUDA on NVIDIA, HIP on ROCm. Brings in the fp16/bf16 device types too.
+#include "llama-kvmem-gpu.h"
 
 #include <cmath>
 #include <cstdint>

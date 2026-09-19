@@ -306,7 +306,8 @@ int main(int argc, char ** argv) {
             kparams.nvme_dir = nvme_dir.c_str();
         }
         if (dump_kv) {
-#ifdef _WIN32
+#if defined(_WIN32)
+            // _putenv_s always overwrites, which is setenv(..., 1) semantics.
             _putenv_s("KVMEM_DUMP_CAPTURE", "1");
 #else
             setenv("KVMEM_DUMP_CAPTURE", "1", 1);

@@ -4,6 +4,8 @@
 #include "llama-impl.h"
 #include "llama-model.h"
 
+#include "ggml-cuda.h"
+
 #include <algorithm>
 #include <limits>
 #include <cstring>
@@ -20,8 +22,13 @@ static bool use_gdn_replay(const llama_model & model, const llama_cparams & cp) 
     for (uint32_t il = 0; supported && il < h.n_layer(); ++il) {
         if (!h.is_recr(il)) continue;
         auto * dev = model.dev_layer(il);
+        // Compare against the backend's own registry name rather than the
+        // literal "CUDA": the GDN record/fold kernels live in
+        // ggml/src/ggml-cuda/gated_delta_net.cu, which the HIP backend compiles
+        // from the very same source, and GGML_CUDA_NAME is "ROCm" there.
+        // ggml-cuda.cu registers the backend with exactly this string.
         supported = dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_GPU &&
-            std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev)), "CUDA") == 0 && (!device || device == dev);
+            std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev)), GGML_CUDA_NAME) == 0 && (!device || device == dev);
         device = dev;
     }
     if (!supported && mode == 2) throw std::runtime_error("GDN replay requires single-sequence CUDA Qwen 27B with MTP 1-5 and all recurrent layers on one GPU");

@@ -4,7 +4,9 @@
 
 #include <vector>
 
-struct llama_memory_kvmem;
+// Must match the definition in llama-memory-kvmem.h (`class`, not `struct`):
+// the two keywords produce different mangling under the Microsoft C++ ABI.
+class llama_memory_kvmem;
 class llama_memory_kvmem_mtp;
 struct ggml_tensor;
 

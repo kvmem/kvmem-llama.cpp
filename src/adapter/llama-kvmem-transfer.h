@@ -1,8 +1,8 @@
 #pragma once
 
 #include "llama-kvmem-hooks.h"
+#include "llama-kvmem-gpu.h"
 #include "ggml-backend.h"
-#include <cuda_runtime.h>
 
 // Optional KVMEM_PERF accounting at executed copy call sites, not plan entries.
 // Native model/backend transfers outside the adapter are deliberately excluded.
