@@ -34,6 +34,18 @@ public:
     KvMemStore &store() { return store_; }
     const KvMemStore &store() const { return store_; }
     const KvMemPlan &last_plan() const { return last_plan_; }
+    // True while a prepared plan has not been applied yet (prepare_selection /
+    // prepare_prefill_pressure set it, admit_incoming clears it).
+    bool pending() const { return pending_; }
+    // Abandon a prepared plan instead of applying it. The staging half may
+    // already have run, so the caller owns putting its own view of residency
+    // back; this drops the pending marker and the GPU slots the plan had
+    // queued for admit_incoming() to free through the backend, which a caller
+    // that rebuilds its whole free-slot list does not need handed back.
+    void discard_pending() {
+        pending_ = false;
+        pending_gpu_frees_.clear();
+    }
 
     PinnedKvTier *cpu_tier() { return cpu_tier_.get(); }
     NvmeKvTier *nvme_tier() { return nvme_tier_.get(); }

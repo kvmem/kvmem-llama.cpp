@@ -9,15 +9,17 @@
 
 struct ggml_backend_sched;
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <vector>
 
 // MTP draft KV as a lockstep follower of the target slot-pool.
 //
-// kv_size is copied from target (budget + gen_reserve), never recomputed
-// from draft n_ctx. The same block_id maps to the same slot index and the
-// same original pos on the cell. Follower does not alloc/free slots.
+// kv_size and the slot count are copied from target (budget + gen_reserve),
+// never recomputed from draft n_ctx. The same block_id maps to the same slot
+// index and the same original pos on the cell. Follower does not alloc/free
+// slots.
 class llama_memory_kvmem_mtp : public llama_memory_i {
 public:
     llama_memory_kvmem_mtp(
@@ -69,6 +71,11 @@ public:
     uint64_t harvest_perf_nvme_syscalls() const { return perf_nvme_syscalls_; }
     void on_stage_out(uint32_t block_id);
     void harvest_resident_v();
+    // A block with no packed draft K in the mirror is occupied anyway, which
+    // is what the single-store server has always done: the cells hold this
+    // conversation's own decoded draft K. After a store swap they hold the
+    // previous conversation's, so such a block is left out for as long as its
+    // slot is tainted (see slot_tainted_ below).
     void follow_retrieval();
     void detach_target() { target_ = nullptr; }
 
@@ -86,8 +93,50 @@ public:
         if (target_) target_->note_attention_change();
         return kv_->seq_rm_logical(0, p0, p1);
     }
-    void truncate_cached(uint32_t n) { raw_->truncate_to(n); }
-    void invalidate_packed_from(uint32_t n) { raw_->invalidate_packed_from(n); }
+    // raw_ is null between the two halves of a store swap, and stays null for
+    // a conversation whose mirror could not be allocated (attach_conv logs and
+    // continues, since the mirror is an accept-rate input and not a
+    // correctness one). Every deref of it is guarded: the two accessors here,
+    // the early returns in harvest_k(), harvest_v() and write_block_to_gpu(),
+    // the coverage test in follow_retrieval(), and the null checks in clear()
+    // and harvest_flush().
+    void truncate_cached(uint32_t n) { if (raw_) raw_->truncate_to(n); }
+    void invalidate_packed_from(uint32_t n) { if (raw_) raw_->invalidate_packed_from(n); }
+    // Store swap, driven by the target one statement apart from its own, as
+    // truncate_cached above is. The follower mirror is keyed by the target's
+    // block ids, so it only means anything next to the trunk store it was
+    // harvested against. harvest_flush() here is the follower's own write
+    // barrier: on_stage_out() has just memcpy'd packed draft K/V into raw_ and
+    // those writes may still be queued on the store's io thread.
+    std::unique_ptr<kvmem::RawKvStore> swap_raw(std::unique_ptr<kvmem::RawKvStore> in) {
+        harvest_flush();
+        std::unique_ptr<kvmem::RawKvStore> out = std::move(raw_);
+        raw_ = std::move(in);
+        // The detach emptied the draft cells with seq_rm and nothing zeroed
+        // the storage, so every slot still holds the outgoing conversation's
+        // packed draft K until something writes over it. slot_tainted_ is
+        // sized once, in the constructor, so marking the whole pool here
+        // neither allocates nor throws: the trunk's detach calls this after it
+        // has already moved its own runtime and host mirror out, where a throw
+        // would leave the trunk attached with no store at all.
+        std::fill(slot_tainted_.begin(), slot_tainted_.end(), true);
+        return out;
+    }
+    std::unique_ptr<kvmem::RawKvStore> make_raw() const {
+        return std::make_unique<kvmem::RawKvStore>(raw_cfg_);
+    }
+    // Empty the draft cells but keep the mirror, unlike clear(bool) which also
+    // wipes raw_. Called from the target's detach after its own drain, which
+    // is where on_stage_out() mirrors each resident block -- every one of
+    // them, unless this conversation has no mirror to harvest into at all.
+    // pos_queue_ is the only per-ubatch state that can outlive a request
+    // here: pending_capture_ is emptied by harvest_pending() on every ubatch
+    // and register_capture() on the follower is a no-op.
+    void drop_gpu() {
+        if (target_) target_->note_attention_change();
+        (void) kv_->seq_rm(0, -1, -1);
+        pos_queue_.clear();
+    }
 
 private:
     bool fill_from_target(const llama_ubatch & ubatch, llama_kv_cache::slot_info & out);
@@ -95,9 +144,40 @@ private:
     void harvest_k(uint32_t block_id);
     void harvest_v(uint32_t block_id);
 
+    // True while this slot's cells may still hold another conversation's
+    // packed draft K. swap_raw() marks the whole pool and write_block_to_gpu()
+    // clears one slot once a full block of this conversation's packed draft K
+    // has been written over it; a partial block leaves the tail cells as they
+    // were, so its slot stays marked. "The whole pool" is n_slots_ entries,
+    // copied from the target rather than recomputed here: the trunk's pool is
+    // ceil(kv_size_ / block_tokens_), so sizing this with that division
+    // truncated left the highest slot unmarked whenever kv_size_ is not a
+    // whole number of blocks. An index outside the vector would be a layout
+    // disagreement with the trunk; it reads as tainted, which costs draft
+    // context and can never hand the draft layer another conversation's K.
+    // Only follow_retrieval's coverage-miss branch reads this, and it errs
+    // towards leaving a slot marked: the cost is draft context the follower
+    // does not have, never a wrong answer from the target model, which
+    // verifies every drafted token. Every entry is false until the first
+    // store swap, so nothing changes without --kvmem-conversations.
+    bool slot_tainted(int32_t slot) const {
+        if (slot < 0 || (size_t) slot >= slot_tainted_.size()) {
+            return true;
+        }
+        return slot_tainted_[(size_t) slot];
+    }
+    void clear_slot_taint(int32_t slot) {
+        if (slot >= 0 && (size_t) slot < slot_tainted_.size()) {
+            slot_tainted_[(size_t) slot] = false;
+        }
+    }
+
     const llama_model & model_;
     llama_memory_kvmem * target_ = nullptr;
     uint32_t kv_size_ = 0;
+    // The target's slot count, not a recomputation of it: slot_tainted_ is
+    // indexed by the trunk's gpu_slot, so the two must agree exactly.
+    uint32_t n_slots_ = 0;
     uint32_t block_tokens_ = 32;
     uint32_t n_layer_trunk_ = 0;
     uint32_t il_graph_ = 0;
@@ -109,7 +189,9 @@ private:
     bool trace_ = false;
     kvmem::RopeConfig rope_{};
     std::unique_ptr<llama_kv_cache> kv_;
+    kvmem::RawKvStoreConfig raw_cfg_{};
     std::unique_ptr<kvmem::RawKvStore> raw_;
+    std::vector<bool> slot_tainted_;
 
     struct CaptureNode {
         ggml_tensor * t = nullptr;

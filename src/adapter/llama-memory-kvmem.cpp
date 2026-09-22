@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -54,6 +55,93 @@ struct llama_memory_kvmem::GdnReplay {
         }
     }
 };
+
+// One conversation's host KV. Moved out of the memory object at a store swap
+// and moved back in at the next one, so the object is never observable without
+// a store. KvMemRuntime owns NVMe prefetch futures and RawKvStore owns a mutex,
+// a condition variable and an io thread, so both travel as unique_ptr, which is
+// how they are already held.
+struct llama_memory_kvmem::ConvStore {
+    std::unique_ptr<kvmem::KvMemRuntime> runtime;
+    std::unique_ptr<kvmem::RawKvStore>   raw;
+    std::vector<RowPosition>             row_positions;
+    std::vector<std::vector<float>>      q_sum;
+    std::vector<uint32_t>                q_count;
+    // Follower mirror, swapped in lockstep: it is keyed by the trunk's block
+    // ids and is meaningless beside another conversation's store.
+    std::unique_ptr<kvmem::RawKvStore>   mtp_raw;
+    // Block ids that were GPU-resident at detach, ascending.
+    std::vector<uint32_t>                resident;
+};
+
+// Detached stores, keyed by an opaque handle. Handle 0 is the store the
+// constructor built, which is all a default server ever uses: the pool stays
+// empty until llama_kvmem_store_create() asks for a second one.
+struct kvmem_conv_entry {
+    int32_t id = 0;
+    // Null for the active handle: that store's members live on the memory
+    // object itself.
+    std::unique_ptr<llama_memory_kvmem::ConvStore> store;
+};
+
+struct kvmem_conv_pool {
+    llama_memory_kvmem * owner = nullptr;
+    std::vector<kvmem_conv_entry> entries;
+    int32_t active = 0;
+    int32_t next_id = 1;
+};
+
+static kvmem_conv_pool g_conv_pool;
+
+// ~KvMemRuntime does not drain start_prefetch's futures; only std::async's
+// blocking future destructor does. truncate_to(0) waits for them first. Every
+// path that drops a detached bundle goes through here: a bundle's runtime also
+// holds a KvMemBackend pointing at its owner's SlotBackend, so dropping one in
+// place after the owner changed would free against a stale backend.
+static void kvmem_conv_release(std::unique_ptr<llama_memory_kvmem::ConvStore> & store) {
+    if (!store) {
+        return;
+    }
+    if (store->runtime) {
+        store->runtime->truncate_to(0);
+    }
+    store.reset();
+}
+
+static void kvmem_conv_pool_unbind(llama_memory_kvmem * mem) {
+    if (g_conv_pool.owner != mem) {
+        return;
+    }
+    for (auto & e : g_conv_pool.entries) {
+        kvmem_conv_release(e.store);
+    }
+    g_conv_pool = kvmem_conv_pool{};
+}
+
+static kvmem_conv_pool * kvmem_conv_pool_bind(llama_memory_kvmem * mem) {
+    if (!mem) {
+        return nullptr;
+    }
+    if (g_conv_pool.owner != mem) {
+        // Reached only if a second memory object arms while an earlier one
+        // still holds detached bundles. Release them the way destroy and
+        // unbind do rather than dropping them where they lie; unbind() leaves
+        // the pool freshly default-constructed.
+        kvmem_conv_pool_unbind(g_conv_pool.owner);
+        g_conv_pool.owner = mem;
+        g_conv_pool.entries.emplace_back();
+    }
+    return &g_conv_pool;
+}
+
+static kvmem_conv_entry * kvmem_conv_find(int32_t id) {
+    for (auto & e : g_conv_pool.entries) {
+        if (e.id == id) {
+            return &e;
+        }
+    }
+    return nullptr;
+}
 
 void llama_memory_kvmem::set_recurrent(llama_memory_recurrent * recr) {
     recr_ = recr;
@@ -491,11 +579,13 @@ llama_memory_kvmem::llama_memory_kvmem(
     kv_size_ = pool.kv_size;
     n_slots_ = pool.n_slots;
 
-    auto rt_cfg = make_runtime_cfg(
+    // Both store configs are kept as members so a sibling store for another
+    // conversation is configured identically.
+    rt_cfg_ = make_runtime_cfg(
             block_tokens_, pool.budget, g_kvmem_params.sink_tokens, g_kvmem_params.recent_tokens,
             pool.block_bytes);
-    rt_cfg.store.estimated_gpu_block_capacity = pool.cap_blocks;
-    runtime_ = std::make_unique<kvmem::KvMemRuntime>(rt_cfg, &backend_);
+    rt_cfg_.store.estimated_gpu_block_capacity = pool.cap_blocks;
+    runtime_ = std::make_unique<kvmem::KvMemRuntime>(rt_cfg_, &backend_);
 
     if (ext_kv) {
         kv_ = ext_kv;
@@ -551,7 +641,7 @@ llama_memory_kvmem::llama_memory_kvmem(
     query_begin_ = g_kvmem_params.query_begin;
     query_end_ = g_kvmem_params.query_end;
     force_pos_ = g_kvmem_params.force_pos;
-    kvmem::RawKvStoreConfig rcfg;
+    kvmem::RawKvStoreConfig & rcfg = raw_cfg_;
     rcfg.n_layer = n_layer_;
     rcfg.n_embd_k = n_embd_k_;
     rcfg.n_embd_v = n_embd_v_;
@@ -586,7 +676,7 @@ llama_memory_kvmem::llama_memory_kvmem(
     LLAMA_LOG_INFO(
             "%s: KVMem slot-pool cells=%u slots=%u block_tokens=%u budget=%u gen_reserve=%u sink_blocks=%u method=%s harvest_v=%d type_k=%s type_v=%s n_embd_k=%u attn_layers=%u%s\n",
             __func__, kv_size_, n_slots_, block_tokens_, pool.budget, pool.gen_reserve,
-            rt_cfg.store.sink_blocks,
+            rt_cfg_.store.sink_blocks,
             method_ == 1 ? "retrieval" : "recency",
             (int) g_kvmem_params.harvest_v,
             ggml_type_name(type_k_), ggml_type_name(type_v_),
@@ -595,9 +685,9 @@ llama_memory_kvmem::llama_memory_kvmem(
     kvmem_diag("KVMEM_KV_BYTES bytes=%zu cells=%u slots=%u budget=%u pool=%u "
             "ratio=%.2f high=%.2f low=%.2f cap_blocks=%u gpu_total=%llu block_bytes=%llu\n",
             kv_bytes, kv_size_, n_slots_, pool.budget, kv_size_,
-            rt_cfg.store.gpu_memory_ratio,
-            rt_cfg.store.gpu_high_watermark,
-            rt_cfg.store.gpu_low_watermark,
+            rt_cfg_.store.gpu_memory_ratio,
+            rt_cfg_.store.gpu_high_watermark,
+            rt_cfg_.store.gpu_low_watermark,
             pool.cap_blocks,
             (unsigned long long) pool.gpu_total,
             (unsigned long long) pool.block_bytes);
@@ -616,6 +706,7 @@ llama_memory_kvmem::~llama_memory_kvmem() {
         mtp_->detach_target();
         mtp_ = nullptr;
     }
+    kvmem_conv_pool_unbind(this);
     kvmem_capture_unbind(this);
 }
 
@@ -627,11 +718,18 @@ void llama_memory_kvmem::reset_slots() {
     }
 }
 
-void llama_memory_kvmem::reset_policy() {
-    ++attention_epoch_;
+void llama_memory_kvmem::reset_turn_policy() {
     explicit_spans_ = false;
     query_frozen_ = false;
     turn_spans_ = {};
+    retrieval_pinned_ = false;
+    keep_selected_ = false;
+    prefill_capture_ = true;
+}
+
+void llama_memory_kvmem::reset_policy() {
+    ++attention_epoch_;
+    reset_turn_policy();
     row_positions_.clear();
     decode_mean_reset();
     reset_query_acc();
@@ -641,10 +739,8 @@ void llama_memory_kvmem::reset_policy() {
     if (runtime_) {
         runtime_->truncate_to(0);
     }
+    host_mirror_stale_ = false;
     reset_slots();
-    retrieval_pinned_ = false;
-    keep_selected_ = false;
-    prefill_capture_ = true;
 }
 
 void llama_memory_kvmem::begin_cached_turn(bool reset_query) {
@@ -661,6 +757,8 @@ void llama_memory_kvmem::begin_cached_turn(bool reset_query) {
 }
 
 void llama_memory_kvmem::truncate_cached(uint32_t n_past) {
+    // Keyed off the block table alone, so it cannot reach a host mirror the
+    // full-seq_rm branch left behind: see host_mirror_stale_ there.
     if (runtime_ && n_past >= runtime_->store().total_tokens()) return;
     ++attention_epoch_;
     harvest_flush();
@@ -685,6 +783,569 @@ void llama_memory_kvmem::set_replay(bool replay) {
         if (mtp_) mtp_->invalidate_packed_from(begin);
     }
     replay_ = replay;
+}
+
+bool llama_memory_kvmem::conv_swap_supported(std::string & reason) const {
+    if (!runtime_ || !raw_ || !kv_) {
+        reason = "no_store";
+        return false;
+    }
+    // Without flash attention V is never mirrored to host: harvest_gpu_v
+    // returns immediately and RawKvStoreConfig::v_gpu_row_bytes stays 0, so a
+    // drained conversation could not be restaged. A swap drains everything on
+    // every switch, so refuse to arm instead of restaging stale V.
+    if (v_trans_) {
+        reason = "v_trans";
+        return false;
+    }
+    // Each RawKvStore opens its own arena, sized for one conversation and named
+    // by a fixed nvme_file.
+    if (g_kvmem_params.raw_k_nvme) {
+        reason = "raw_k_nvme";
+        return false;
+    }
+    return true;
+}
+
+bool llama_memory_kvmem::conv_can_drain(std::string & reason) const {
+    // A replay hole is described by the GPU snapshot planes and the fold
+    // window, neither of which the server's recurrent byte dump covers.
+    if (replay_) {
+        reason = "replay_in_flight";
+        return false;
+    }
+    if (recr_ && recr_->replay_recording) {
+        reason = "gdn_replay_recording";
+        return false;
+    }
+    // A prepared-but-unapplied plan would strand pending_gpu_frees_. Requests
+    // are serialized and every prepare is applied in the same request, so this
+    // should never fire.
+    if (runtime_ && runtime_->pending()) {
+        reason = "plan_pending";
+        return false;
+    }
+    // The host mirror no longer describes the block table (see seq_rm), so its
+    // packed K/V cannot be trusted to restage this conversation.
+    if (host_mirror_stale_) {
+        reason = "host_mirror_stale";
+        return false;
+    }
+    return true;
+}
+
+std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::make_conv() {
+    auto conv = std::make_unique<ConvStore>();
+    conv->runtime = std::make_unique<kvmem::KvMemRuntime>(rt_cfg_, &backend_);
+    conv->raw = std::make_unique<kvmem::RawKvStore>(raw_cfg_);
+    conv->q_sum.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
+    conv->q_count.assign(n_layer_, 0);
+    if (mtp_) {
+        conv->mtp_raw = mtp_->make_raw();
+    }
+    return conv;
+}
+
+uint32_t llama_memory_kvmem::conv_n_tokens(const ConvStore & conv) const {
+    return conv.runtime ? conv.runtime->store().total_tokens() : 0;
+}
+
+uint64_t llama_memory_kvmem::conv_host_bytes(const ConvStore & conv) const {
+    if (!conv.raw) {
+        return 0;
+    }
+    return (uint64_t) conv.raw->bytes_k() + (uint64_t) conv.raw->bytes_v();
+}
+
+uint64_t llama_memory_kvmem::host_bytes() const {
+    if (!raw_) {
+        return 0;
+    }
+    return (uint64_t) raw_->bytes_k() + (uint64_t) raw_->bytes_v();
+}
+
+std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv() {
+    // Quiesce every writer of raw_, q_sum_ and the GPU cells before either
+    // moves. The order matters and each step closes a different queue:
+    //
+    // 1. The stage-in slab is a process global holding packed K/V aimed at
+    //    cells this store still owns. Land it here, or the incoming store's
+    //    first flush would write these bytes into its own cells.
+    // 2. decode_mean_reset() writes the partial-block running mean into raw_
+    //    and sets decode_mean_block_ = ~0u, which makes the incoming
+    //    conversation take decode_mean_add_range()'s block-change branch and
+    //    zero the process-global mean-K accumulator. decode_mean_print_sum()
+    //    is deliberately not called: it latches once per process.
+    // 3. harvest_flush() waits for the harvest worker queue and both
+    //    CaptureD2hPipe slots under harvest_w_->mu. That mutex is also the
+    //    release/acquire edge for the worker's last write to raw_ and q_sum_
+    //    through this, so the wait must happen even when the pipe looks idle:
+    //    skipping it is a data race on vectors that are about to be moved.
+    //    The pipe itself is kept, as in the destructor's ordering; d2h_free()
+    //    would drop engine-sized staging buffers a swap does not change.
+    // 4. harvest_gpu_v_commit() drains the stage-out slab into raw_ and clears
+    //    harvest_gpu_queued_, but it does not wait for the store's own writes.
+    //    The three existing call sites get away with that only because each
+    //    ends in a raw_ mutation (truncate_to / invalidate_packed_from /
+    //    clear) that waits first. A detach mutates nothing, so it waits here.
+    // The harvest worker is drained, never stopped: after the wait it parks in
+    // harvest_loop() holding no reference to raw_, q_sum_ or cur_pos_.
+    kvmem_stagein_flush_sync(nullptr, nullptr, nullptr, nullptr);
+    decode_mean_reset();
+    harvest_flush();
+    harvest_gpu_v_commit();
+    if (raw_) {
+        raw_->wait_writes();
+    }
+    if (mtp_) {
+        mtp_->harvest_flush();
+    }
+    // The one condition that would corrupt the store being moved: a slot still
+    // in flight means the worker can still call harvest_from_host() and write
+    // raw_ and q_sum_ through this. harvest_flush() rules it out, both by
+    // waiting on the worker and by committing synchronously without one, so
+    // this waits rather than only warning: a warning that walks into the
+    // hazard it names reads as covered and is not.
+    if (d2h_) {
+        for (int slot = 0; slot < 2; ++slot) {
+            if (!d2h_->slots[slot].inflight) {
+                continue;
+            }
+            LLAMA_LOG_WARN("%s: KVMem capture pipe slot %d still in flight at a store detach\n",
+                    __func__, slot);
+            harvest_wait_slot(slot);
+        }
+    }
+    // Rows of the outgoing conversation. An unconsumed ubatch note would make
+    // the incoming conversation's first harvest write to this conversation's
+    // rows, and cur_pos_ is what harvest_from_host() stamps onto them.
+    // prepare_ubatches() refills pos_queue_ on every init_batch, so dropping
+    // it here costs the incoming conversation nothing.
+    //
+    // pending_capture_ and graph_has_* are deliberately left alone: they
+    // describe the llama_context's cached graph, which a swap does not
+    // rebuild. capture_on_new_graph() owns them, harvest_pending() needs
+    // pending_capture_ to survive a reused graph, and capture_can_reuse()
+    // compares graph_has_q_/graph_has_k_ against that same graph.
+    if (!pos_queue_.empty()) {
+        kvmem_diag("KVMEM_STORE_DETACH_PENDING posq=%zu capture=%zu\n",
+                pos_queue_.size(), pending_capture_.size());
+    }
+    pos_queue_.clear();
+    cur_pos_.clear();
+
+    auto conv = std::make_unique<ConvStore>();
+    {
+        auto & store = runtime_->store();
+        // Per-block residency lives inside the bundle (KvMemBlock::gpu_slot)
+        // while the slot pool is engine-side, and every conversation numbers
+        // its rows from 0, so the working set must be fully drained to host.
+        // tier is the residency truth, not gpu_slot: the slot is one field of a
+        // pair KvMemStore::set_block_tier writes together
+        // (kvmem/src/host/kvmem_store.cpp:249-276), so this filters on the half
+        // that names the tier. This is the same set set_selection stages out.
+        for (uint32_t id = 0; id < store.block_count(); ++id) {
+            const kvmem::KvMemBlock & b = store.blocks()[id];
+            if (b.tier == kvmem::KvTier::GPU && b.gpu_slot >= 0 && b.n_tokens > 0) {
+                conv->resident.push_back(id);
+            }
+        }
+        // An empty selection puts every GPU block in stage_out, and
+        // apply_plan_to_kv is the drain half of the sequence relayout already
+        // uses: harvest_gpu_v + mtp_->on_stage_out per block, commit,
+        // spill_outgoing, seq_rm_logical per block, admit_incoming.
+        const kvmem::KvMemPlan plan = runtime_->prepare_selection({});
+        trace_plan("conv_detach", plan);
+        apply_plan_to_kv(plan);
+        // Belt and braces: a detached store carrying a stale gpu_slot would
+        // make gpu_kv_already_resident() and attention_view() read cells that
+        // belong to another conversation. KvMemStore::set_block_tier already
+        // clears the slot on the way off GPU, so this loop finds nothing
+        // unless a block never reached a lower tier. Demote rather than only
+        // clearing the slot: tier GPU with gpu_slot -1 is read three
+        // incompatible ways downstream (stage_in wants a fresh slot,
+        // resident_tokens counts it as absent, set_selection will not stage it
+        // out again), so clearing alone would trade one inconsistent state for
+        // another on a block conv->resident will ask to be restaged.
+        for (uint32_t id = 0; id < store.block_count(); ++id) {
+            const kvmem::KvMemBlock & b = store.blocks()[id];
+            if (b.gpu_slot < 0) {
+                continue;
+            }
+            LLAMA_LOG_WARN("%s: KVMem block %u still held GPU slot %d at tier %d after a full drain\n",
+                    __func__, id, (int) b.gpu_slot, (int) b.tier);
+            store.set_block_tier(id, kvmem::KvTier::CPU, b.cpu_slot, b.nvme_slot);
+        }
+    }
+    // Issued on the borrowed attention cache, not through the hybrid override,
+    // so the recurrent half is deliberately left alone: the server owns that as
+    // a byte snapshot. This also drops an untrimmed speculative tail, which
+    // attention_view() counts as live attention.
+    if (kv_) {
+        (void) kv_->seq_rm(0, -1, -1);
+    }
+    if (mtp_) {
+        mtp_->drop_gpu();
+    }
+    reset_slots();
+    // Server-held attention views and selections must not validate across a
+    // swap, so the epoch stays engine-side and only ever increases.
+    ++attention_epoch_;
+    // Post-detach invariant: nothing of this conversation is left on the GPU,
+    // and the slot pool is whole again for the incoming one.
+    kvmem_diag("KVMEM_STORE_DETACH rows=%u resident=%zu cells_used=%u free_slots=%zu/%u\n",
+            runtime_ ? runtime_->store().total_tokens() : 0, conv->resident.size(),
+            (unsigned) (kv_ ? kv_->get_cells(0).get_used() : 0), free_slots_.size(), n_slots_);
+
+    // The drain above wrote the packed K/V of every resident block through
+    // harvest_gpu_v_commit(), which does not wait for the store's own writes.
+    if (raw_) {
+        raw_->wait_writes();
+    }
+    if (mtp_) {
+        mtp_->harvest_flush();
+    }
+
+    // Nothing from here to the return may throw. Past these two moves this
+    // object owns no store at all and swap_conv's drain catch cannot put them
+    // back: the move-assignments are noexcept, swap_raw() only waits on the
+    // follower's io thread and fills a vector it sized at construction, and
+    // reset_turn_policy() assigns scalars.
+    conv->runtime = std::move(runtime_);
+    conv->raw = std::move(raw_);
+    // One statement after the trunk's own mirror, the way truncate_cached()
+    // drives mtp_->truncate_cached(): the follower's packed draft K/V is keyed
+    // by the trunk's block ids and means nothing beside another store.
+    if (mtp_) {
+        conv->mtp_raw = mtp_->swap_raw(nullptr);
+    }
+    conv->row_positions = std::move(row_positions_);
+    conv->q_sum = std::move(q_sum_);
+    conv->q_count = std::move(q_count_);
+    row_positions_.clear();
+    q_sum_.clear();
+    q_count_.clear();
+    reset_turn_policy();
+    return conv;
+}
+
+bool llama_memory_kvmem::attach_conv(std::unique_ptr<ConvStore> conv) {
+    // The mirror image of detach_conv(). Every member this object owns per
+    // conversation is installed first, in container move-assignments that
+    // cannot throw, so this object owns the incoming conversation before
+    // anything that can throw runs: that is what makes swap_conv's catch able
+    // to reset it to empty instead of losing it. The size repair that follows
+    // the moves does allocate and can throw; reset_query_acc() resizes as well
+    // as zeroes, so the reset_policy() in that catch leaves an accumulator
+    // score_retrieval() and get_query() can index over 0..n_layer_-1, which
+    // they do with no size guard.
+    //
+    // The follower's mirror follows, because acquiring it can throw. It is
+    // keyed by this store's block ids, so a bundle made before the follower
+    // existed has none and gets a fresh one to rebuild at the next stage-out.
+    runtime_ = std::move(conv->runtime);
+    raw_ = std::move(conv->raw);
+    row_positions_ = std::move(conv->row_positions);
+    q_sum_ = std::move(conv->q_sum);
+    q_count_ = std::move(conv->q_count);
+    if (q_sum_.size() != n_layer_ || q_count_.size() != n_layer_) {
+        q_sum_.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
+        q_count_.assign(n_layer_, 0);
+    }
+    if (mtp_) {
+        std::unique_ptr<kvmem::RawKvStore> mirror = std::move(conv->mtp_raw);
+        if (!mirror) {
+            // The follower mirror is an accept-rate input and never a
+            // correctness one, so a failed allocation must not fail the
+            // attach. It does cost this conversation its draft mirror for the
+            // whole of this residency: with the follower's mirror null,
+            // harvest_k() and harvest_v() return at their first guard, so no
+            // stage-out mirrors anything. The allocation is retried at the
+            // next attach of this bundle, because the detach parks a null
+            // mirror (see the class comment in llama-memory-kvmem-mtp.h).
+            try {
+                mirror = mtp_->make_raw();
+            } catch (const std::exception & e) {
+                LLAMA_LOG_WARN("%s: KVMem MTP mirror allocation failed (%s); the follower keeps "
+                        "no packed draft K/V for this conversation\n", __func__, e.what());
+            }
+        }
+        mtp_->swap_raw(std::move(mirror));
+    }
+    ++attention_epoch_;
+    reset_slots();
+    // Not reset_policy(): its destructive half would clear the store just
+    // attached. The server calls llama_kvmem_begin_cached_turn() and
+    // llama_kvmem_set_request_span() after the attach anyway.
+    reset_turn_policy();
+    // runtime_ and raw_ are dereferenced unguarded from here on, and so is
+    // runtime_ in detach_conv(): make_conv() allocates both or throws, and
+    // every other bundle came from a detach that moved two non-null members
+    // out of this object. There is deliberately no null check reporting a
+    // miss: false means "attached, holding no rows the caller may decode
+    // against", and llama_kvmem_store_switch acts on it by naming this store
+    // as the attached one.
+    //
+    // An empty store always arrives beside an empty follower mirror: every
+    // path that empties one (reset_policy here, the refusal in swap_conv)
+    // empties the other. Report false, which is what the return value means
+    // everywhere else: the attached store holds no rows the caller may decode
+    // against. A freshly created store lands here beside an empty payload, so
+    // the server's !restaged branch is a no-op for it; a store the refusal
+    // path wiped lands here beside a payload that still claims rows, and that
+    // is exactly the mismatch the branch exists to catch.
+    if (runtime_->store().total_tokens() == 0) {
+        return false;
+    }
+
+    // write_block_to_gpu() silently skips a layer with no packed bytes, which
+    // would leave live cells holding another conversation's K. This is the same
+    // predicate harvest_full_blocks_async() uses; it must not be dropped.
+    const char * miss = nullptr;
+    {
+        const kvmem::KvMemStore & store = runtime_->store();
+        for (uint32_t id : conv->resident) {
+            if (id >= store.block_count()) {
+                miss = "block_gone";
+                break;
+            }
+            const kvmem::KvMemBlock & b = store.blocks()[id];
+            if (b.n_tokens == 0) {
+                continue;
+            }
+            for (uint32_t il = 0; il < n_layer_ && !miss; ++il) {
+                if (!kvmem_cache_has_layer(kv_, static_cast<int32_t>(il))) {
+                    continue;
+                }
+                if (!raw_->has_k_gpu(id, il, b.n_tokens)) {
+                    miss = "packed_k_missing";
+                } else if (!v_trans_ && !raw_->has_v_gpu(id, il, b.n_tokens)) {
+                    miss = "packed_v_missing";
+                }
+            }
+            if (miss) {
+                break;
+            }
+        }
+    }
+    if (miss) {
+        kvmem_diag("KVMEM_STORE_ATTACH_MISS reason=%s rows=%u resident=%zu\n",
+                miss, runtime_->store().total_tokens(), conv->resident.size());
+        reset_policy();
+        // reset_policy() clears the trunk's mirror only. Clear the follower's
+        // in lockstep so an empty store never sits beside a mirror still
+        // holding draft K/V for block ids the next prefill reuses.
+        if (mtp_) {
+            mtp_->clear(true);
+        }
+        return false;
+    }
+
+    // Nothing sits at tier GPU, so every requested block lands in stage_in and
+    // admit_incoming allocates one slot each through the backend. Slots come
+    // out ascending because alloc_slot pops the back of a list reset_slots
+    // filled n_slots_-1..0, which is the layout attention_view() calls
+    // canonical. Positions need no fixup: the pool keeps original positions and
+    // the packed K in raw_ was harvested already RoPE'd at that position.
+    const kvmem::KvMemPlan plan = runtime_->prepare_selection(conv->resident);
+    trace_plan("conv_attach", plan);
+    apply_plan_to_kv(plan);
+    auto & store = runtime_->store();
+    uint32_t n_raw = 0;
+    uint32_t n_skip = 0;
+    for (uint32_t id : plan.stage_in) {
+        if (id >= store.block_count() || store.blocks()[id].gpu_slot < 0) {
+            continue;
+        }
+        if (gpu_kv_already_resident(id)) {
+            n_skip++;
+            continue;
+        }
+        write_block_to_gpu(id);
+        n_raw++;
+    }
+    kvmem_stagein_flush_sync(retr_.enabled ? &retr_.copy_us : nullptr,
+                             retr_.enabled ? &retr_.rope_us : nullptr,
+                             retr_.enabled ? &retr_.hadamard_us : nullptr,
+                             retr_.enabled ? &retr_.set_us : nullptr);
+    if (mtp_) {
+        // A follower coverage miss leaves its cells empty rather than
+        // labelling them with this block's positions, because the bytes in
+        // them are the previous conversation's draft K. That holds for the
+        // rest of the request and not only for this call: the strictness is a
+        // per-slot mark swap_raw() set above, which follow_retrieval() reads
+        // on the retrieval path too, and which only a full packed write
+        // clears.
+        mtp_->follow_retrieval();
+    }
+    if (trace_) {
+        kvmem_diag("KVMEM_STORE_ATTACH rows=%u blocks=%zu raw=%u skip=%u free_slots=%zu\n",
+                store.total_tokens(), plan.stage_in.size(), n_raw, n_skip, free_slots_.size());
+    }
+    return true;
+}
+
+// Best-effort return to "attached, holding nothing". Both of swap_conv's
+// repair paths call this and neither may throw out of it: the drain path
+// rethrows the drain's own exception afterwards, and the attach path runs
+// after the two bundles have changed hands, where an escape would make
+// llama_kvmem_store_switch's catch skip a handover this object has already
+// made -- parking each conversation's payload beside the other's KV, which is
+// silent wrong-content service rather than a cache miss. So every step runs
+// under its own catch and the whole function is noexcept.
+void llama_memory_kvmem::conv_reset_to_empty(const char * what) noexcept {
+    try {
+        set_replay(false);
+        if (runtime_) {
+            // A prepared-but-unapplied plan would strand its queued slot frees
+            // and refuse the next swap with plan_pending. reset_policy() below
+            // rebuilds the free-slot list those frees would have fed.
+            runtime_->discard_pending();
+        }
+        if (kv_) {
+            // reset_policy() clears the host mirror and the block table but
+            // not the attention cells, so empty them the way detach_conv()
+            // does: apply_plan_to_kv() may already have admitted cells for a
+            // store that is about to be emptied.
+            (void) kv_->seq_rm(0, -1, -1);
+        }
+        // Set before reset_policy(), which clears it again on its way out. A
+        // store whose cells are gone while its block table still reads full is
+        // the one state store_n_tokens() cannot expose, so if the reset below
+        // does not complete, this mark is what stops the half-repaired store
+        // from being carried into another conversation: conv_can_drain()
+        // refuses it and the next swap clears it instead.
+        host_mirror_stale_ = true;
+        reset_slots();
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: KVMem %s repair could not quiesce the active store (%s)\n",
+                __func__, what, e.what());
+    } catch (...) {
+        LLAMA_LOG_ERROR("%s: KVMem %s repair could not quiesce the active store\n",
+                __func__, what);
+    }
+    // reset_policy() -> runtime_->truncate_to(0) -> wait_prefetch() rethrows a
+    // stored NVMe prefetch error exactly once: wait_prefetch() clears the
+    // futures before it rethrows, so the second attempt gets past it and does
+    // empty the block table. Without the retry the store would keep reading
+    // full with a working set that no longer describes it.
+    bool emptied = false;
+    for (int attempt = 1; attempt <= 2 && !emptied; ++attempt) {
+        try {
+            reset_policy();
+            emptied = true;
+        } catch (const std::exception & e) {
+            LLAMA_LOG_ERROR("%s: KVMem %s repair could not empty the active store "
+                    "(%s, attempt %d)\n", __func__, what, e.what(), attempt);
+        } catch (...) {
+            LLAMA_LOG_ERROR("%s: KVMem %s repair could not empty the active store "
+                    "(attempt %d)\n", __func__, what, attempt);
+        }
+    }
+    // The follower mirror is keyed by the trunk's block ids, so an emptied
+    // store must never sit beside a mirror still holding draft K/V for ids the
+    // next prefill reuses.
+    try {
+        if (mtp_) {
+            mtp_->clear(true);
+        }
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: KVMem %s repair could not clear the follower mirror (%s)\n",
+                __func__, what, e.what());
+    } catch (...) {
+        LLAMA_LOG_ERROR("%s: KVMem %s repair could not clear the follower mirror\n",
+                __func__, what);
+    }
+    if (!emptied) {
+        LLAMA_LOG_ERROR("%s: KVMem %s repair left the active store unreset; it is marked "
+                "host_mirror_stale, so the next switch clears it rather than carrying it\n",
+                __func__, what);
+    }
+}
+
+bool llama_memory_kvmem::swap_conv(std::unique_ptr<ConvStore> & conv) {
+    if (!conv) {
+        return false;
+    }
+    std::string reason;
+    if (!conv_can_drain(reason)) {
+        // The outgoing conversation cannot be drained safely. Discard it rather
+        // than leave the GPU holding cells two stores both claim; that is the
+        // same destruction a single-store server does today when a different
+        // conversation arrives. The return value describes the incoming store
+        // only, so the wipe is reported the one way a caller can act on: the
+        // parked handle's llama_kvmem_store_rows() drops to zero, which the
+        // server cross-checks after every switch.
+        LLAMA_LOG_WARN("%s: KVMem store swap cannot drain the active store (%s); clearing it\n",
+                __func__, reason.c_str());
+        set_replay(false);
+        clear(true);
+        // The follower mirror is keyed by the trunk's block ids, and the server
+        // is switching rather than clearing, so it will not clear the draft
+        // context for us the way memory_clear_all() does. Leaving it would let
+        // follow_retrieval() write this conversation's draft K into a block id
+        // the next one re-prefills.
+        if (mtp_) {
+            mtp_->clear(true);
+        }
+    }
+    // All-or-nothing in the handles. detach_conv() moves both bundle members
+    // out in a run of noexcept move-assignments with nothing allocating past
+    // them, so a throw out of detach_conv() moves neither bundle: the caller's
+    // handle still holds the incoming conversation and this object still owns
+    // the outgoing one. The outgoing store's contents are a separate question.
+    // The refusal above may already have cleared them, and the drain can throw
+    // with a plan half applied (spill_outgoing() rethrows a stored prefetch
+    // exception and an NVMe write can fail), which leaves a working set that no
+    // longer describes the store while total_tokens() still reads full -- the
+    // one thing the server's post-switch cross-check cannot see. So empty this
+    // store on that path and let it be read as the cache miss it now is.
+    //
+    // Past the two moves below the outgoing conversation is the caller's, and
+    // nothing from there on throws: the attach's repair is noexcept and its
+    // failure is reported as false. The outgoing bundle used to stay in a local
+    // until the last statement, so a throw inside the attach destroyed a whole
+    // conversation's host KV and left the caller's handle moved-from and null
+    // while the pool still named it.
+    std::unique_ptr<ConvStore> outgoing;
+    try {
+        outgoing = detach_conv();
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: KVMem store drain failed (%s); the active store is reset to empty\n",
+                __func__, e.what());
+        conv_reset_to_empty("drain");
+        throw;
+    } catch (...) {
+        LLAMA_LOG_ERROR("%s: KVMem store drain failed; the active store is reset to empty\n",
+                __func__);
+        conv_reset_to_empty("drain");
+        throw;
+    }
+    std::unique_ptr<ConvStore> incoming = std::move(conv);
+    conv = std::move(outgoing);
+    try {
+        return attach_conv(std::move(incoming));
+    } catch (const std::exception & e) {
+        // occupy_in throws on missing cache row position metadata, and the
+        // staging paths throw on a CUDA failure. attach_conv() takes the
+        // incoming store's members before any of that, so this object owns it:
+        // reset it to empty and keep it active, which is the state the
+        // coverage-miss path above leaves and which the server reads as an
+        // ordinary cache miss from the false return. The reset is noexcept,
+        // and catch (...) is here for the same reason it is: both bundles have
+        // already changed hands, so an escape from this handler would make
+        // llama_kvmem_store_switch's catch skip a handover that already
+        // happened and leave each conversation's payload beside the other's KV.
+        LLAMA_LOG_ERROR("%s: KVMem store attach failed (%s); the incoming store is reset to empty\n",
+                __func__, e.what());
+        conv_reset_to_empty("attach");
+        return false;
+    } catch (...) {
+        LLAMA_LOG_ERROR("%s: KVMem store attach failed; the incoming store is reset to empty\n",
+                __func__);
+        conv_reset_to_empty("attach");
+        return false;
+    }
 }
 
 llama_pos llama_memory_kvmem::recr_pos_max() const {
@@ -1454,6 +2115,16 @@ bool llama_memory_kvmem::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1)
     if (!replay_ &&
         seq_id <= 0 && p0 <= 0 &&
         (p1 < 0 || p1 >= static_cast<llama_pos>(runtime_->store().total_tokens()))) {
+        // Known divergence, deliberately not repaired here so the default
+        // path stays byte-identical: the block table is zeroed while the host
+        // mirror keeps its blocks, and truncate_cached's guard
+        // (n_past >= total_tokens) can no longer reach them. The re-prefilled
+        // block 0 then keeps the previous content's packed K, because both
+        // harvest_gpu_v and harvest_full_blocks_async skip a layer whose
+        // packed K is already present. Record it so a store swap declines to
+        // carry this store rather than restaging those bytes into another
+        // conversation's cells; reset_policy() clears both and the flag.
+        host_mirror_stale_ = true;
         runtime_->truncate_to(0);
         reset_slots();
         retrieval_pinned_ = false;
@@ -2063,6 +2734,16 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
 }
 
 void llama_memory_kvmem::reset_query_acc() {
+    // Repair the size, not only the contents. attach_conv() installs the
+    // incoming conversation's accumulators and then resizes them, and that
+    // resize can throw between the two; reset_policy() calls this to make the
+    // object usable again, and score_retrieval() and get_query() index
+    // q_count_ over 0..n_layer_-1 with no size guard.
+    if (q_sum_.size() != n_layer_ || q_count_.size() != n_layer_) {
+        q_sum_.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
+        q_count_.assign(n_layer_, 0);
+        return;
+    }
     for (auto & s : q_sum_) {
         std::fill(s.begin(), s.end(), 0.0f);
     }
@@ -2142,6 +2823,13 @@ void llama_memory_kvmem::harvest_from_host(int il, char which, const uint8_t * h
         return;
     }
     if (!host || il < 0 || static_cast<uint32_t>(il) >= n_layer_ || cur_pos_.empty()) {
+        return;
+    }
+    // The worker calls this through `this`, and a store swap moves raw_ and
+    // q_sum_ out and back in. detach_conv() drains the pipe first, so the
+    // window is not reachable today; guard it anyway, because the alternative
+    // is a null dereference and an out-of-range write on an empty vector.
+    if (!raw_ || q_sum_.size() != n_layer_ || q_count_.size() != n_layer_) {
         return;
     }
     const uint32_t n = static_cast<uint32_t>(cur_pos_.size());
@@ -3786,4 +4474,158 @@ void llama_kvmem_get_tail_mean(uint32_t row, std::vector<float> & state) {
 
 void llama_kvmem_set_tail_mean(uint32_t row, const std::vector<float> & state) {
     if (auto * mem = kvmem_capture_active()) mem->raw().restore_mean_checkpoint(row, state);
+}
+
+bool llama_kvmem_store_swap_supported(void) {
+    llama_memory_kvmem * mem = kvmem_capture_active();
+    if (!mem) {
+        return false;
+    }
+    std::string reason;
+    return mem->conv_swap_supported(reason);
+}
+
+int32_t llama_kvmem_store_create(void) {
+    llama_memory_kvmem * mem = kvmem_capture_active();
+    if (!mem) {
+        return -1;
+    }
+    std::string reason;
+    if (!mem->conv_swap_supported(reason)) {
+        LLAMA_LOG_WARN("%s: KVMem host-store swap unavailable (%s)\n", __func__, reason.c_str());
+        return -1;
+    }
+    kvmem_conv_pool * pool = kvmem_conv_pool_bind(mem);
+    if (!pool) {
+        return -1;
+    }
+    // Nothing may cross the LLAMA_API boundary: a bundle is a runtime, two
+    // host mirrors and a pinned arena, so allocation failure is a -1 the
+    // server already handles and not an exception httplib would swallow.
+    std::unique_ptr<llama_memory_kvmem::ConvStore> store;
+    try {
+        store = mem->make_conv();
+    } catch (const std::exception & e) {
+        LLAMA_LOG_WARN("%s: KVMem host store allocation failed (%s)\n", __func__, e.what());
+        return -1;
+    }
+    if (!store) {
+        return -1;
+    }
+    kvmem_conv_entry entry;
+    entry.id = pool->next_id++;
+    entry.store = std::move(store);
+    const int32_t id = entry.id;
+    pool->entries.push_back(std::move(entry));
+    kvmem_diag("KVMEM_STORE_CREATE id=%d n_stores=%zu\n", id, pool->entries.size());
+    return id;
+}
+
+bool llama_kvmem_store_switch(int32_t store_id) {
+    llama_memory_kvmem * mem = kvmem_capture_active();
+    if (!mem || g_conv_pool.owner != mem) {
+        return false;
+    }
+    if (store_id == g_conv_pool.active) {
+        return mem->store_n_tokens() > 0;
+    }
+    kvmem_conv_entry * in = kvmem_conv_find(store_id);
+    kvmem_conv_entry * out = kvmem_conv_find(g_conv_pool.active);
+    if (!in || !out || !in->store || out->store) {
+        LLAMA_LOG_ERROR("%s: KVMem store %d is not a detached host store\n", __func__, store_id);
+        return false;
+    }
+    const int64_t t0 = ggml_time_us();
+    const uint32_t out_rows = mem->store_n_tokens();
+    bool restaged = false;
+    try {
+        restaged = mem->swap_conv(in->store);
+    } catch (const std::exception & e) {
+        // swap_conv throws only before it hands either bundle over -- out of
+        // the drain, or out of the clear it runs when the active store cannot
+        // be drained safely -- so both handles and g_conv_pool.active still
+        // name what they named. Past the handover nothing throws: the attach's
+        // repair path is noexcept and reports its failure as false, so this
+        // catch can never run with the two bundles already exchanged, which is
+        // what makes skipping the two assignments below the right repair.
+        // What the handles name is not necessarily unchanged: swap_conv empties
+        // this store both when it cannot be drained safely and when the drain
+        // throws, so store_n_tokens() may now read zero, and that is the one
+        // signal the server acts on. Report the refusal rather than letting the
+        // exception reach httplib, which would swallow it and leave the server
+        // serving against a pool whose active entry no longer describes the
+        // store. catch (...) is here for that last reason: this is an
+        // LLAMA_API boundary, so nothing may cross it, not only what derives
+        // from std::exception.
+        LLAMA_LOG_ERROR("%s: KVMem store swap to %d failed (%s); store %d stays active\n",
+                __func__, store_id, e.what(), (int) g_conv_pool.active);
+        return false;
+    } catch (...) {
+        LLAMA_LOG_ERROR("%s: KVMem store swap to %d failed; store %d stays active\n",
+                __func__, store_id, (int) g_conv_pool.active);
+        return false;
+    }
+    // swap_conv leaves the outgoing conversation in the handle it was given.
+    out->store = std::move(in->store);
+    g_conv_pool.active = store_id;
+    kvmem_diag("KVMEM_STORE_SWAP out=%d in=%d n_stores=%zu out_rows=%u in_rows=%u restaged=%d ms=%.2f\n",
+            out->id, store_id, g_conv_pool.entries.size(), out_rows, mem->store_n_tokens(),
+            (int) restaged, (ggml_time_us() - t0) / 1000.0);
+    return restaged;
+}
+
+int32_t llama_kvmem_store_current(void) {
+    llama_memory_kvmem * mem = kvmem_capture_active();
+    if (!mem) {
+        return -1;
+    }
+    return g_conv_pool.owner == mem ? g_conv_pool.active : 0;
+}
+
+bool llama_kvmem_store_destroy(int32_t store_id) {
+    llama_memory_kvmem * mem = kvmem_capture_active();
+    if (!mem || g_conv_pool.owner != mem || store_id == g_conv_pool.active) {
+        return false;
+    }
+    for (auto it = g_conv_pool.entries.begin(); it != g_conv_pool.entries.end(); ++it) {
+        if (it->id != store_id) {
+            continue;
+        }
+        kvmem_conv_release(it->store);
+        g_conv_pool.entries.erase(it);
+        kvmem_diag("KVMEM_STORE_DESTROY id=%d n_stores=%zu\n", store_id, g_conv_pool.entries.size());
+        return true;
+    }
+    return false;
+}
+
+uint32_t llama_kvmem_store_rows(int32_t store_id) {
+    llama_memory_kvmem * mem = kvmem_capture_active();
+    if (!mem) {
+        return 0;
+    }
+    if (g_conv_pool.owner != mem) {
+        return store_id == 0 ? mem->store_n_tokens() : 0;
+    }
+    if (store_id == g_conv_pool.active) {
+        return mem->store_n_tokens();
+    }
+    const kvmem_conv_entry * e = kvmem_conv_find(store_id);
+    return (e && e->store) ? mem->conv_n_tokens(*e->store) : 0;
+}
+
+uint64_t llama_kvmem_store_bytes(int32_t store_id) {
+    llama_memory_kvmem * mem = kvmem_capture_active();
+    if (!mem) {
+        return 0;
+    }
+    const bool pooled = g_conv_pool.owner == mem;
+    if (!pooled) {
+        return store_id == 0 ? mem->host_bytes() : 0;
+    }
+    if (store_id == g_conv_pool.active) {
+        return mem->host_bytes();
+    }
+    const kvmem_conv_entry * e = kvmem_conv_find(store_id);
+    return (e && e->store) ? mem->conv_host_bytes(*e->store) : 0;
 }

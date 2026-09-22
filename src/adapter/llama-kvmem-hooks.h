@@ -89,6 +89,51 @@ LLAMA_API bool llama_kvmem_remove_logical(struct llama_context * ctx, llama_pos 
 LLAMA_API llama_pos llama_kvmem_model_pos(uint32_t logical_pos);
 LLAMA_API void llama_kvmem_set_media_ranges(const uint32_t * starts, const uint32_t * ends, size_t count);
 LLAMA_API uint32_t llama_kvmem_store_n_tokens(void);
+
+// N host KV stores, one GPU working set, time-multiplexed. The server owns
+// conversation identity, the caps and the LRU; the adapter owns only the
+// mechanism. A process that never calls llama_kvmem_store_create() keeps
+// exactly one store and never reaches any of this, so the default path is
+// unchanged. Every call below must happen under the server's inference lock
+// with no decode of the current request in flight. llama_kvmem_store_switch
+// carries the one hard ordering requirement: it must run before
+// llama_kvmem_set_request_span and before every staging call of the request it
+// maps.
+//
+// False when a swap can never be safe in this configuration: without flash
+// attention V is not mirrored to host, and --kvmem-raw-k-nvme sizes and names
+// one arena per process.
+LLAMA_API bool     llama_kvmem_store_swap_supported(void);
+// New empty host store, or -1 when unavailable. Allocates only the bundle.
+LLAMA_API int32_t  llama_kvmem_store_create(void);
+// Quiesce, drain the GPU working set to host, then rebind the host store and
+// the MTP follower mirror in lockstep. The bool is one claim on one store:
+// true when the incoming store is attached and holds rows that are live on the
+// GPU. False means it holds no rows the caller may decode against, whether it
+// was already empty, its working set could not be rebuilt from host RAM and it
+// was reset, or the swap itself was refused. That is the same claim
+// llama_kvmem_store_n_tokens() > 0 makes, which is what switching to the
+// already-active store reports. A refused switch leaves the previous store
+// active; otherwise the active store is store_id whenever this returns at all.
+// Every refusal logs but one: the guard against an unarmed or foreign memory
+// object returns false with no log line, which a caller holding a handle from
+// llama_kvmem_store_create() on this context cannot reach. Read
+// llama_kvmem_store_current() rather than this bool to learn which store is
+// active. The bool describes the INCOMING store only: use
+// llama_kvmem_store_rows() to check what a parked store still holds.
+// The recurrent half is NOT switched: that state is the server's byte
+// snapshot, and a match is only usable when a recurrent checkpoint exists at
+// or before it.
+LLAMA_API bool     llama_kvmem_store_switch(int32_t store_id);
+// Handle of the active store; 0 is the store built with the memory object.
+LLAMA_API int32_t  llama_kvmem_store_current(void);
+// Free a detached store. Refused for the active one.
+LLAMA_API bool     llama_kvmem_store_destroy(int32_t store_id);
+// Rows held by one store (llama_kvmem_store_n_tokens is the active one).
+LLAMA_API uint32_t llama_kvmem_store_rows(int32_t store_id);
+// Accounted host bytes of one store. Walks blocks times layers under the store
+// mutex: call it once per request or per status report, never per token.
+LLAMA_API uint64_t llama_kvmem_store_bytes(int32_t store_id);
 LLAMA_API llama_pos llama_kvmem_recr_pos_max(void);
 // After MTP verify: keep the first n_keep batch tokens in the running mean (0 = discard).
 LLAMA_API void llama_kvmem_decode_mean_commit(uint32_t n_keep);

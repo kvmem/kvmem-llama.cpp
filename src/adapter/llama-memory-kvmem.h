@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -180,6 +181,36 @@ public:
 
     kvmem::RawKvStore & raw() { return *raw_; }
 
+    // One conversation's host KV, moved out of this object and back in so N
+    // conversations keep their store in host RAM while the single GPU working
+    // set is time-multiplexed between them. Declared here and defined in the
+    // .cpp like GdnReplay above, so the hook header stays free of kvmem types.
+    struct ConvStore;
+    // False when a swap can never be safe in this configuration: without flash
+    // attention V is not mirrored to host, and raw-K NVMe sizes and names one
+    // arena per process.
+    bool conv_swap_supported(std::string & reason) const;
+    std::unique_ptr<ConvStore> make_conv();
+    // Exchange the per-conversation host state. Call only between requests,
+    // under the server's request lock. `conv` must come from make_conv() or an
+    // earlier swap_conv() on this object; on return it holds the outgoing
+    // conversation, drained to host. False means the incoming store holds no
+    // rows live on the GPU: it was empty, or its working set could not be
+    // rebuilt from host RAM and it was reset to empty. Either way the server
+    // reads it as an ordinary cache miss, the same claim store_n_tokens() > 0
+    // makes. Ownership is all-or-nothing, and there is exactly one window: this
+    // can throw only before the handover -- out of the drain, or out of the
+    // clear a store that cannot be drained safely gets -- and then this object
+    // still owns the outgoing store while `conv` still holds the incoming one.
+    // Past the handover nothing throws: a failed attach empties the incoming
+    // store and returns false. Contents are not all-or-nothing -- a store that
+    // cannot be drained safely, or whose drain throws, is emptied rather than
+    // kept, which the caller sees as its row count dropping to zero.
+    bool swap_conv(std::unique_ptr<ConvStore> & conv);
+    uint32_t conv_n_tokens(const ConvStore & conv) const;
+    uint64_t conv_host_bytes(const ConvStore & conv) const;
+    uint64_t host_bytes() const;
+
 private:
     friend struct kvmem_transfer_test_access;
     struct SlotBackend : public kvmem::KvMemBackend {
@@ -207,6 +238,17 @@ private:
     std::vector<uint32_t> retrieval_mandatory() const;
     void occupy_block_cells(uint32_t block_id);
     void reset_slots();
+    // The non-destructive half of reset_policy(): turn/request flags only.
+    void reset_turn_policy();
+    bool conv_can_drain(std::string & reason) const;
+    std::unique_ptr<ConvStore> detach_conv();
+    bool attach_conv(std::unique_ptr<ConvStore> conv);
+    // Best-effort "attached, holding nothing", for swap_conv's two repair
+    // paths. Never throws: the drain path rethrows the drain's own exception
+    // after it, and the attach path runs after both bundles have changed
+    // hands, where an escape would corrupt store identity. `what` names the
+    // path in the log and nothing else.
+    void conv_reset_to_empty(const char * what) noexcept;
     void trace_plan(const char * tag, const kvmem::KvMemPlan & plan) const;
     void write_block_to_gpu(uint32_t block_id);
     void harvest_gpu_v(uint32_t block_id);
@@ -344,6 +386,10 @@ private:
     std::unique_ptr<GdnReplay> gdn_replay_;
     llama_memory_kvmem_mtp * mtp_ = nullptr;
     SlotBackend backend_;
+    // Copies of the configs the constructor computes, so a sibling store for
+    // another conversation is configured identically.
+    kvmem::KvMemRuntimeConfig rt_cfg_{};
+    kvmem::RawKvStoreConfig raw_cfg_{};
     std::unique_ptr<kvmem::KvMemRuntime> runtime_;
     std::unique_ptr<kvmem::RawKvStore> raw_;
     std::vector<int32_t> free_slots_;
@@ -365,6 +411,13 @@ private:
     ggml_type type_v_ = GGML_TYPE_F16;
     bool v_trans_ = false;
     bool replay_ = false;
+    // Set when a full seq_rm zeroes the block table while leaving the host
+    // mirror behind, so raw_ still holds blocks the table no longer owns and
+    // truncate_cached's own guard can no longer reach them. Nothing on the
+    // default path reads this; a store swap refuses to carry such a store and
+    // clears it instead of restaging another turn's packed K. reset_policy()
+    // puts the two back in lockstep at zero and clears it.
+    bool host_mirror_stale_ = false;
     bool retrieval_pinned_ = false;
     bool keep_selected_ = false;
     bool prefill_capture_ = true;

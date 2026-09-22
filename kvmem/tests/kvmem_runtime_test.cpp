@@ -245,8 +245,107 @@ static void test_selection_preview_and_resident_commit() {
     CHECK(rt.commit_resident_selection(selected));
 }
 
+// Drain contract the adapter's host-store swap depends on: an empty selection
+// stages out every GPU-resident block and returns every slot, and re-selecting
+// the same set afterwards asks for all of them back.
+static void test_full_drain_then_restage() {
+    RecordingBackend be;
+    KvMemRuntime rt(make_cfg(), &be);
+    rt.register_append(32 * 3 + 7);
+    const uint32_t n = rt.store().block_count();
+    CHECK(n == 4);
+    std::vector<uint32_t> resident;
+    for (uint32_t id = 0; id < n; ++id) {
+        rt.store().set_block_tier(id, KvTier::GPU);
+        rt.store().set_block_gpu_slot(id, be.alloc_gpu_slot());
+        resident.push_back(id);
+    }
+    be.ops.clear();
+    be.allocs.clear();
+    be.frees.clear();
+
+    const auto drain = rt.prepare_selection({});
+    CHECK(drain.stage_out.size() == n);
+    CHECK(drain.stage_in.empty());
+    CHECK(drain.total_window_tokens == 0);
+    CHECK(rt.pending());
+    rt.finish_reselect();
+    CHECK(!rt.pending());
+    CHECK(be.frees.size() == n);
+    CHECK(be.allocs.empty());
+    for (const auto &b : rt.store().blocks()) {
+        CHECK(b.tier != KvTier::GPU);
+        CHECK(!b.in_working_set);
+        // A detached store must not name a slot another conversation now
+        // holds. set_block_tier clears it on the way off GPU.
+        CHECK(b.gpu_slot == -1);
+    }
+    CHECK(rt.store().total_tokens() == 32 * 3 + 7);
+
+    be.ops.clear();
+    be.frees.clear();
+    const auto restage = rt.prepare_selection(resident);
+    CHECK(restage.stage_in.size() == n);
+    CHECK(restage.stage_out.empty());
+    for (uint32_t i = 0; i < n; ++i) {
+        CHECK(restage.stage_in[i] == resident[i]);
+    }
+    rt.finish_reselect();
+    CHECK(be.allocs.size() == n);
+    CHECK(be.frees.empty());
+    for (uint32_t i = 0; i < n; ++i) {
+        const auto &b = rt.store().blocks()[resident[i]];
+        CHECK(b.tier == KvTier::GPU);
+        CHECK(b.gpu_slot == be.allocs[i]);
+    }
+
+    // The adapter's post-drain guard demotes a block that somehow still names
+    // a GPU slot instead of only clearing the slot, because tier GPU with
+    // gpu_slot -1 is read three incompatible ways downstream (stage_in wants a
+    // fresh slot, resident_tokens counts it as absent, set_selection will not
+    // stage it out again). Pin what that demotion does: the slot goes, the
+    // lower-tier handles stay.
+    const KvMemBlock still_resident = rt.store().blocks()[0];
+    CHECK(still_resident.tier == KvTier::GPU && still_resident.gpu_slot >= 0);
+    rt.store().set_block_tier(0, KvTier::CPU, still_resident.cpu_slot, still_resident.nvme_slot);
+    const KvMemBlock &demoted = rt.store().blocks()[0];
+    CHECK(demoted.tier == KvTier::CPU && demoted.gpu_slot == -1);
+    CHECK(demoted.cpu_slot == still_resident.cpu_slot);
+    CHECK(demoted.nvme_slot == still_resident.nvme_slot);
+}
+
+// A prepared plan the caller abandons instead of applying, which is what the
+// adapter's store swap does when the drain behind it throws. The pending
+// marker must go with the plan: while it is set, conv_can_drain refuses the
+// next swap with plan_pending and the fast resident-commit path stays closed.
+static void test_discard_pending_plan() {
+    RecordingBackend be;
+    KvMemRuntime rt(make_cfg(), &be);
+    rt.register_append(32 * 3 + 7);
+    for (uint32_t id = 0; id < rt.store().block_count(); ++id) {
+        rt.store().set_block_gpu_slot(id, be.alloc_gpu_slot());
+    }
+    const auto selected = rt.preview_reselect();
+    CHECK(rt.commit_resident_selection(selected));
+    be.frees.clear();
+
+    rt.prepare_selection(selected);
+    CHECK(rt.pending());
+    CHECK(!rt.commit_resident_selection(selected));
+    rt.discard_pending();
+    CHECK(!rt.pending());
+    CHECK(rt.commit_resident_selection(selected));
+    // The abandoned plan is gone, not deferred: applying its second half now
+    // hands nothing back through the backend, because the slots it had queued
+    // belong to a caller that rebuilds its whole free-slot list.
+    rt.admit_incoming();
+    CHECK(be.frees.empty());
+}
+
 int main() {
     test_selection_preview_and_resident_commit();
+    test_full_drain_then_restage();
+    test_discard_pending_plan();
     test_stage_out_before_stage_in();
     test_high_overlap_skips_stage_in();
     test_pressure_keeps_sink_and_tail();

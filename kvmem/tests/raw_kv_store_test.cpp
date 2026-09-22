@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #define CHECK(cond)                                                            \
@@ -92,9 +93,104 @@ static void test_sum_only(uint32_t block_tokens) {
     CHECK(raw.bytes_k() == 0 && !raw.has_block(0));
 }
 
+// A host-store swap moves whole mirrors between owners, so two mirrors built
+// from the same config must share nothing: the same block ids hold independent
+// bytes, ownership travels with the object, and a clear on one leaves the other
+// alone. The swap's lockstep between the trunk mirror and the MTP follower's
+// rests on exactly that.
+static void test_sibling_stores_are_independent() {
+    kvmem::RawKvStoreConfig cfg;
+    cfg.n_layer = 1;
+    cfg.n_embd_k = 4;
+    cfg.n_embd_v = 4;
+    cfg.block_tokens = 4;
+    cfg.k_gpu_row_bytes = 6;
+    cfg.v_gpu_row_bytes = 6;
+    auto a = std::make_unique<kvmem::RawKvStore>(cfg);
+    auto b = std::make_unique<kvmem::RawKvStore>(cfg);
+
+    std::vector<uint8_t> pa(24, 0xa1), pb(24, 0xb2), out(24, 0);
+    a->write_layer_k_gpu(0, 4, 0, pa.data());
+    a->write_layer_v_gpu(0, 4, 0, pa.data());
+    b->write_layer_k_gpu(0, 4, 0, pb.data());
+    a->wait_writes();
+    b->wait_writes();
+    CHECK(a->has_k_gpu(0, 0, 4) && b->has_k_gpu(0, 0, 4));
+    CHECK(a->has_v_gpu(0, 0, 4) && !b->has_v_gpu(0, 0, 4));
+    CHECK(a->copy_k_gpu(0, 0, out.data(), 4));
+    CHECK(std::memcmp(out.data(), pa.data(), pa.size()) == 0);
+    CHECK(b->copy_k_gpu(0, 0, out.data(), 4));
+    CHECK(std::memcmp(out.data(), pb.data(), pb.size()) == 0);
+
+    // Detach hands the whole object over; the bytes travel with it.
+    std::unique_ptr<kvmem::RawKvStore> moved = std::move(a);
+    CHECK(!a);
+    CHECK(moved->copy_k_gpu(0, 0, out.data(), 4));
+    CHECK(std::memcmp(out.data(), pa.data(), pa.size()) == 0);
+
+    moved->clear();
+    CHECK(!moved->has_block(0));
+    CHECK(moved->bytes_k() == 0 && moved->bytes_v() == 0);
+    CHECK(b->has_k_gpu(0, 0, 4));
+    CHECK(b->copy_k_gpu(0, 0, out.data(), 4));
+    CHECK(std::memcmp(out.data(), pb.data(), pb.size()) == 0);
+}
+
+// --kvmem-conversations-gb caps the sum of bytes_k() + bytes_v() per store, so
+// that number has to be predictable: it is the packed GPU K/V held for the
+// blocks the store still owns, plus the F32 mean sums, plus the NVMe tail.
+static void test_store_bytes() {
+    kvmem::RawKvStoreConfig cfg;
+    cfg.n_layer = 2;
+    cfg.n_embd_k = 4;
+    cfg.n_embd_v = 4;
+    cfg.block_tokens = 4;
+    cfg.k_gpu_row_bytes = 6;
+    cfg.v_gpu_row_bytes = 6;
+    kvmem::RawKvStore raw(cfg);
+    CHECK(raw.bytes_k() == 0 && raw.bytes_v() == 0);
+
+    const size_t block = size_t(cfg.n_layer) * cfg.block_tokens *
+            size_t(cfg.k_gpu_row_bytes + cfg.v_gpu_row_bytes);
+    std::vector<uint8_t> packed(cfg.block_tokens * cfg.k_gpu_row_bytes, 0x5a);
+    for (uint32_t il = 0; il < cfg.n_layer; ++il) {
+        raw.write_layer_k_gpu(0, cfg.block_tokens, il, packed.data());
+        raw.write_layer_v_gpu(0, cfg.block_tokens, il, packed.data());
+    }
+    raw.wait_writes();
+    // One whole block of packed K and V for every layer, and nothing else:
+    // write_layer_k_gpu does not capture a mean sum.
+    CHECK(raw.bytes_k() + raw.bytes_v() == block);
+
+    for (uint32_t il = 0; il < cfg.n_layer; ++il) {
+        raw.write_layer_k_gpu(cfg.block_tokens, cfg.block_tokens, il, packed.data());
+        raw.write_layer_v_gpu(cfg.block_tokens, cfg.block_tokens, il, packed.data());
+    }
+    raw.wait_writes();
+    CHECK(raw.bytes_k() + raw.bytes_v() == 2 * block);
+
+    // Dropping the second block returns the total to exactly the one-block
+    // value, which is what makes an eviction's accounting exact.
+    raw.truncate_to(cfg.block_tokens);
+    CHECK(raw.bytes_k() + raw.bytes_v() == block);
+
+    // A mean sum is F32 per embedding dimension per layer, on top of the
+    // packed bytes, and is the reason the number is accounted store bytes
+    // rather than pure packed KV.
+    std::vector<float> mean(cfg.block_tokens * cfg.n_embd_k, 1.0f);
+    raw.write_layer_mean_k(0, cfg.block_tokens, 0, mean.data());
+    raw.wait_writes();
+    CHECK(raw.bytes_k() + raw.bytes_v() == block + size_t(cfg.n_embd_k) * sizeof(float));
+
+    raw.clear();
+    CHECK(raw.bytes_k() == 0 && raw.bytes_v() == 0);
+}
+
 int main() {
     test_sum_only(32);
     test_sum_only(128);
+    test_sibling_stores_are_independent();
+    test_store_bytes();
     kvmem::RawKvStoreConfig cfg;
     cfg.n_layer = 2;
     cfg.n_embd_k = 4;
