@@ -75,6 +75,7 @@ struct kvmem_server_options {
     int threads_http = -1;
     bool threads_http_set = false;
     bool list_devices = false;
+    bool anthropic = false;
     std::string device_names;
     int main_gpu = 0;
     bool main_gpu_set = false;
@@ -151,7 +152,9 @@ struct kvmem_server_options {
 
     template<typename Need>
     bool parse(const std::string & arg, const Need & need) {
-        if (arg == "--kvmem-sink-tokens") {
+        if (arg == "--anthropic" || arg == "--no-anthropic") {
+            anthropic = arg == "--anthropic";
+        } else if (arg == "--kvmem-sink-tokens") {
             sink_tokens = kvmem_cli_int(arg.c_str(), need(arg.c_str()));
         } else if (arg == "--kvmem-trace" || arg == "--no-kvmem-trace") {
             trace = arg == "--kvmem-trace" ? 1 : 0;

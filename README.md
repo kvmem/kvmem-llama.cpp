@@ -465,6 +465,12 @@ progress-reporting approach from [PR #9](https://github.com/kvmem/kvmem-llama.cp
 - `GET /v1/models`
 - `POST /v1/chat/completions` (sampling, stream, tools, optional images)
 
+`--anthropic` additionally enables experimental `POST /v1/messages` and
+`POST /v1/messages/count_tokens`. It is off by default. The Messages adapter has
+its own request validation, response format and SSE encoder; existing OpenAI
+routes retain their format. See [Anthropic-compatible API](docs/anthropic-api.md)
+for supported features, client examples and regression tests.
+
 No auth or TLS unless an API key is set. Binds `127.0.0.1` by default. To serve
 on the LAN, pass `--host 0.0.0.0` to the server or to the launchers
 (`scripts/start-iq3.sh --host 0.0.0.0`; Windows: `start-iq3.ps1 -ListenHost 0.0.0.0`),
