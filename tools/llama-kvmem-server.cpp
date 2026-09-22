@@ -13,6 +13,7 @@
 #include "kvmem-server-env.h"
 #include "kvmem-vision.h"
 #include "kvmem-prefill-policy.h"
+#include "kvmem-conversation-store.h"
 
 #include "chat.h"
 #include "common.h"
@@ -35,8 +36,10 @@
 #include <cstring>
 #include <functional>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -79,7 +82,8 @@ static void print_usage(const char * argv0) {
             "  -a, --alias NAME           model name exposed by the API\n"
             "  --api-key KEY[,KEY...]     allowed API keys\n"
             "  --api-key-file PATH        one key per line; blank/# lines ignored\n"
-            "  -np, --parallel N          only 1 is currently supported\n"
+            "  -np, --parallel N          only 1 is currently supported; see\n"
+            "                            --kvmem-conversations for several conversations\n"
             "  -lm, --load-mode MODE      auto | none | mmap | mlock | mmap+mlock | dio\n"
             "  --mmap / --no-mmap         legacy aliases for load-mode mmap / none\n"
             "  --mlock                   legacy alias for load-mode mlock\n"
@@ -122,6 +126,10 @@ static void print_usage(const char * argv0) {
             "  --kvmem-nvme-dir PATH      NVMe directory (default /tmp/kvmem_nvme)\n"
             "  --kvmem-harvest-v          prefill D2H V with raw-K (default off; RAM until NVMe flush)\n"
             "  --kvmem-raw-k-nvme         store raw-K and V on NVMe (needs --kvmem-nvme-gb)\n"
+            "  --kvmem-conversations N    live host KV stores, time-multiplexed on one GPU\n"
+            "                            working set (default 1 = today's single store)\n"
+            "  --kvmem-conversations-gb GB cap total accounted host store bytes, evicting the\n"
+            "                            least recently used conversation (0 = count cap only)\n"
             "  --kv-dtype NAME            GPU KV cache type for K and V: f16 | f32 | q8_0 | q5_0 | q4_0 (default q8_0)\n"
             "  -ctk, --cache-type-k TYPE  GPU K cache type (llama.cpp name; default q8_0)\n"
             "  -ctv, --cache-type-v TYPE  GPU V cache type (quantized: independently q8_0 | q5_0 | q4_0)\n"
@@ -210,6 +218,70 @@ struct MultimodalQuery {
     llama_kvmem_query_state state;
 };
 
+// N host KV stores, one GPU working set, time-multiplexed
+// (--kvmem-conversations). ServerState keeps holding the ACTIVE conversation's
+// payload under the field names it already uses; kvmem_conversation holds the
+// payload of every conversation, and the active entry's payload members are
+// empty while they are on loan to ServerState. Metadata (client_id, stored) is
+// always authoritative in the entry, never in ServerState.
+//
+// conversation_swap() below is the single list of conversation-scoped fields. A
+// new one added to ServerState and forgotten there would leak state across
+// conversations, so the struct and the swap belong in view of each other.
+struct kvmem_conversation {
+    std::string client_id;  // bound kvmem.conversation_id; empty = inferred
+    uint32_t stored = 0;    // llama_kvmem_store_n_tokens() at the last commit
+    std::vector<llama_token> cached_tokens;
+    std::shared_ptr<kvmem_prompt> cached_prompt;
+    std::vector<MultimodalCheckpoint> mm_checkpoints;
+    int mm_live_row = 0;
+    std::shared_ptr<const MultimodalCheckpointData> mm_live_checkpoint;
+    std::shared_ptr<const MultimodalQuery> mm_query;
+    std::vector<uint8_t> gdn_ckpt;
+    std::vector<uint8_t> gdn_carry, gdn_query_carry;
+    int gdn_ckpt_pos = -1;
+    std::vector<uint8_t> gdn_ckpt_query;
+    int gdn_ckpt_query_pos = -1;
+    int last_query_begin = -1;
+    int last_query_end = -1;
+    std::string last_user_text;
+    int last_n_gen = 0;
+};
+
+struct kvmem_conv_counts {
+    int count = 1;
+    int max = 1;
+    int active = 0;
+    uint64_t bytes = 0;
+    uint64_t bytes_max = 0;
+    uint64_t extends = 0;
+    uint64_t forks = 0;
+    // Requests that planned a different conversation and stayed on the
+    // attached one. Neither an extend nor a fork: nothing was forked, parked
+    // or created.
+    uint64_t refusals = 0;
+    uint64_t resets = 0;
+    uint64_t evictions = 0;
+    uint64_t switches = 0;
+};
+
+// /slots never takes the inference lock, and kvmem_server_progress resets its
+// payload per task, so these sticky counters are published rather than read.
+class kvmem_conv_stats {
+public:
+    void publish(const kvmem_conv_counts & counts) {
+        std::lock_guard<std::mutex> lock(mu_);
+        data_ = counts;
+    }
+    kvmem_conv_counts snapshot() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return data_;
+    }
+private:
+    mutable std::mutex mu_;
+    kvmem_conv_counts data_;
+};
+
 struct ServerState {
     std::mutex mu;
     kvmem_server_progress progress;
@@ -275,6 +347,17 @@ struct ServerState {
     std::string last_user_text;
     std::string turn_last_user;
     int last_n_gen = 0;
+    // Multi-conversation host stores. max_stores <= 1 (the default) keeps conv
+    // empty, conv_active at -1 and every conversation_* helper an early return.
+    kvmem_store_limits conv_limits;
+    kvmem_store_table conv_table;
+    std::map<int, kvmem_conversation> conv;
+    int conv_active = -1;
+    uint64_t conv_clock = 0;
+    bool conv_budget_warned = false;
+    std::string turn_conversation_id;
+    kvmem_conv_counts conv_counts;
+    kvmem_conv_stats conv_stats;
 };
 
 struct StreamIo {
@@ -408,6 +491,238 @@ static int common_token_prefix(const std::vector<llama_token> & a,
     return i;
 }
 
+// Exchange the active conversation's payload with `conv`. Called twice per
+// switch: once to park the outgoing conversation, once to install the incoming
+// one. Swapping is an involution, so calling it twice on the same entry undoes
+// it, which is how a refused switch is rolled back.
+static void conversation_swap(ServerState & st, kvmem_conversation & conv) {
+    st.cached_tokens.swap(conv.cached_tokens);
+    st.cached_prompt.swap(conv.cached_prompt);
+    st.mm_checkpoints.swap(conv.mm_checkpoints);
+    std::swap(st.mm_live_row, conv.mm_live_row);
+    st.mm_live_checkpoint.swap(conv.mm_live_checkpoint);
+    st.mm_query.swap(conv.mm_query);
+    st.gdn_ckpt.swap(conv.gdn_ckpt);
+    st.gdn_carry.swap(conv.gdn_carry);
+    st.gdn_query_carry.swap(conv.gdn_query_carry);
+    std::swap(st.gdn_ckpt_pos, conv.gdn_ckpt_pos);
+    st.gdn_ckpt_query.swap(conv.gdn_ckpt_query);
+    std::swap(st.gdn_ckpt_query_pos, conv.gdn_ckpt_query_pos);
+    std::swap(st.last_query_begin, conv.last_query_begin);
+    std::swap(st.last_query_end, conv.last_query_end);
+    st.last_user_text.swap(conv.last_user_text);
+    std::swap(st.last_n_gen, conv.last_n_gen);
+}
+
+// Accounted host bytes of one conversation: the adapter's raw K/V store plus
+// the server-side recurrent checkpoints and token history. RawKvStore walks
+// blocks times layers under its own mutex, so this runs once per request, at
+// the commit, and once more for an eviction's trace line. Selection reads the
+// figure the last commit stored in the table instead of recomputing it.
+static uint64_t conversation_bytes(const ServerState & st, int id) {
+    const kvmem_store_table::entry * held = st.conv_table.find(id);
+    if (!held) {
+        return 0;
+    }
+    uint64_t bytes = st.kparams.enabled ? llama_kvmem_store_bytes(held->store_id) : 0;
+    const auto entry = st.conv.find(id);
+    if (entry == st.conv.end()) {
+        return bytes;
+    }
+    const bool active = id == st.conv_active;
+    const auto & checkpoints = active ? st.mm_checkpoints : entry->second.mm_checkpoints;
+    std::set<const MultimodalCheckpointData *> unique;
+    for (const auto & checkpoint : checkpoints) {
+        if (checkpoint.data && unique.insert(checkpoint.data.get()).second) {
+            bytes += checkpoint.data->bytes();
+        }
+    }
+    const auto & tokens = active ? st.cached_tokens : entry->second.cached_tokens;
+    bytes += (uint64_t) tokens.size() * sizeof(llama_token);
+    return bytes;
+}
+
+// Describe one live conversation for the selection policy, reading that
+// conversation's own payload: ServerState's fields when it is the attached one,
+// the parked entry otherwise.
+static kvmem_store_match conversation_match(const ServerState & st, int id, const kvmem_prompt & prompt) {
+    kvmem_store_match match;
+    match.id = id;
+    const kvmem_store_table::entry * held = st.conv_table.find(id);
+    const auto entry = st.conv.find(id);
+    if (!held || entry == st.conv.end()) {
+        return match;
+    }
+    const kvmem_conversation & conv = entry->second;
+    const bool active = id == st.conv_active;
+    match.used = held->used;
+    // The accounted figure from that conversation's last commit, not a fresh
+    // walk: llama_kvmem_store_bytes takes the store mutex and walks blocks
+    // times layers, and this runs once per live store on the prefill latency
+    // path. Only the attached conversation's footprint can have moved since,
+    // and conversation_commit refreshes exactly that one.
+    match.bytes = held->bytes;
+    match.client_id = conv.client_id;
+    match.rows = (int) (active ? st.cached_tokens.size() : conv.cached_tokens.size());
+    match.last_n_gen = active ? st.last_n_gen : conv.last_n_gen;
+    if (st.vision || st.query_policy_user) {
+        // Default path: the media-aware prefix and the recurrent checkpoint
+        // rows run_prefill_multimodal would use (kvmem-multimodal-server.h:242-256).
+        const auto & cached = active ? st.cached_prompt : conv.cached_prompt;
+        match.lcp = cached ? (int) prompt.common_prefix(*cached) : 0;
+        match.live_row = active ? st.mm_live_row : conv.mm_live_row;
+        for (const auto & checkpoint : (active ? st.mm_checkpoints : conv.mm_checkpoints)) {
+            match.ckpt_rows.push_back(checkpoint.row);
+        }
+    } else {
+        // Legacy path: the token prefix, gated by the rows the store actually
+        // holds and by a GDN snapshot at or before the match point, which is
+        // gdn_sync_to's consider() pair.
+        const auto & cached = active ? st.cached_tokens : conv.cached_tokens;
+        match.lcp = common_token_prefix(cached, prompt.tokens);
+        const uint32_t stored = active
+                ? (st.kparams.enabled ? llama_kvmem_store_n_tokens() : (uint32_t) st.cached_tokens.size())
+                : conv.stored;
+        match.live_row = (int) stored;
+        if (!llama_kvmem_has_recurrent()) {
+            match.ckpt_rows.push_back(match.lcp);
+        } else {
+            const int gen_start = active ? st.gdn_ckpt_pos : conv.gdn_ckpt_pos;
+            const int query = active ? st.gdn_ckpt_query_pos : conv.gdn_ckpt_query_pos;
+            const bool have_gen = !(active ? st.gdn_ckpt : conv.gdn_ckpt).empty();
+            const bool have_query = !(active ? st.gdn_ckpt_query : conv.gdn_ckpt_query).empty();
+            if (gen_start >= 0 && have_gen) {
+                match.ckpt_rows.push_back(gen_start + 1);
+            }
+            if (query >= 0 && have_query) {
+                match.ckpt_rows.push_back(query + 1);
+            }
+        }
+    }
+    return match;
+}
+
+// Least recently used conversation that is not the attached one.
+static int conversation_lru_victim(const ServerState & st) {
+    for (int id : st.conv_table.lru_order()) {
+        if (id != st.conv_active) {
+            return id;
+        }
+    }
+    return -1;
+}
+
+// Frees one parked conversation and reports whether it actually went. Never
+// the attached one: llama_memory_clear reaches the attached host store, so an
+// inactive store is released through the adapter handle instead, and a table
+// row dropped without that release would leave a host store nothing can reach.
+static bool conversation_evict(ServerState & st, int id, const char * reason) {
+    if (id == st.conv_active) {
+        return false;
+    }
+    const kvmem_store_table::entry * held = st.conv_table.find(id);
+    if (!held) {
+        return false;
+    }
+    const uint32_t rows = st.kparams.enabled ? llama_kvmem_store_rows(held->store_id) : 0;
+    const uint64_t bytes = conversation_bytes(st, id);
+    const int32_t store_id = held->store_id;
+    if (st.kparams.enabled && !llama_kvmem_store_destroy(store_id)) {
+        // Dropping the row anyway would leave the bundle in the adapter's pool
+        // with nothing naming it: one runtime with its pinned arena and two
+        // host mirrors, leaked for the life of the process. Report the refusal
+        // so the caller's skip path runs.
+        LOG_WRN("srv    KVMEM conv=%d store=%d refused destroy; row kept\n", id, (int) store_id);
+        return false;
+    }
+    st.conv_table.erase(id);
+    st.conv.erase(id);
+    ++st.conv_counts.evictions;
+    kvmem_diag("KVMEM_TRACE store_evict id=%d rows=%u bytes=%llu reason=%s\n",
+            id, rows, (unsigned long long) bytes, reason);
+    return true;
+}
+
+// Drop a parked conversation's payload, keeping only its identity. The store
+// it described no longer holds those rows, so the next request that selects it
+// must take an ordinary cache miss rather than resume a checkpoint against KV
+// that was never restored. Assigning a default entry is deliberate: it keeps
+// this complete as kvmem_conversation grows.
+static void conversation_drop_payload(kvmem_conversation & conv) {
+    kvmem_conversation kept;
+    kept.client_id = conv.client_id;
+    conv = std::move(kept);
+}
+
+static void conversation_publish(ServerState & st) {
+    if (st.conv_limits.max_stores <= 1) {
+        return;
+    }
+    st.conv_counts.count = st.conv_table.count();
+    st.conv_counts.max = st.conv_limits.max_stores;
+    st.conv_counts.active = st.conv_active;
+    st.conv_counts.bytes = st.conv_table.bytes_total();
+    st.conv_counts.bytes_max = st.conv_limits.max_bytes;
+    st.conv_stats.publish(st.conv_counts);
+}
+
+// Runs after the reply is sent, when the conversation's footprint is final for
+// the turn, so eviction stays off the latency path.
+static void conversation_enforce_budget(ServerState & st) {
+    if (st.conv_limits.max_stores <= 1) {
+        return;
+    }
+    while (st.conv_table.count() > st.conv_limits.max_stores) {
+        const int victim = conversation_lru_victim(st);
+        if (victim < 0 || !conversation_evict(st, victim, "lru")) {
+            break;
+        }
+    }
+    while (st.conv_limits.max_bytes != 0 && st.conv_table.bytes_total() > st.conv_limits.max_bytes) {
+        const int victim = conversation_lru_victim(st);
+        if (victim < 0) {
+            // The attached conversation alone exceeds the cap. Report it and
+            // serve the request: that reproduces today's uncapped single-store
+            // behavior instead of failing a request the server would serve.
+            if (!st.conv_budget_warned) {
+                st.conv_budget_warned = true;
+                LOG_WRN("srv    KVMEM one conversation exceeds --kvmem-conversations-gb (bytes=%llu cap=%llu); nothing evicted\n",
+                        (unsigned long long) st.conv_table.bytes_total(),
+                        (unsigned long long) st.conv_limits.max_bytes);
+            }
+            break;
+        }
+        if (!conversation_evict(st, victim, "bytes")) {
+            break;
+        }
+    }
+}
+
+static void conversation_commit(ServerState & st, uint32_t stored) {
+    if (st.conv_limits.max_stores <= 1) {
+        return;
+    }
+    const auto entry = st.conv.find(st.conv_active);
+    if (entry == st.conv.end()) {
+        return;
+    }
+    entry->second.stored = stored;
+    if (!st.turn_conversation_id.empty()) {
+        // One id names one conversation: a client that reuses an id after its
+        // own context was compacted must not leave two stores answering to it.
+        for (auto & other : st.conv) {
+            if (other.first != st.conv_active && other.second.client_id == st.turn_conversation_id) {
+                other.second.client_id.clear();
+            }
+        }
+        entry->second.client_id = st.turn_conversation_id;
+    }
+    st.conv_table.touch(st.conv_active, ++st.conv_clock);
+    st.conv_table.set_bytes(st.conv_active, conversation_bytes(st, st.conv_active));
+    conversation_enforce_budget(st);
+    conversation_publish(st);
+}
+
 static void memory_clear_all(ServerState & st) {
     llama_memory_t mem = llama_get_memory(st.ctx);
     if (mem) {
@@ -442,6 +757,220 @@ static void memory_clear_all(ServerState & st) {
     st.last_query_end = -1;
     st.last_user_text.clear();
     st.last_n_gen = 0;
+    // Clears the attached conversation only: llama_memory_clear reaches the
+    // host store that is bound right now, and every st.* field above is that
+    // conversation's payload.
+    if (!st.conv.empty()) {
+        const auto entry = st.conv.find(st.conv_active);
+        if (entry != st.conv.end()) {
+            entry->second.stored = 0;
+        }
+        ++st.conv_counts.resets;
+    }
+}
+
+// Pick the conversation this request continues and attach its host store.
+// Called once per request, under the inference lock, after the prompt is
+// parsed and validated and before anything reads or writes KVMem state.
+//
+// With --kvmem-conversations absent this returns before touching anything:
+// no table, no bookkeeping, no store switch, no policy, no trace. Default
+// behavior is then identical by construction rather than by argument.
+static void conversation_begin_request(ServerState & st, const kvmem_prompt & prompt,
+                                       const std::string & client_id) {
+    if (st.conv_limits.max_stores <= 1) {
+        return;
+    }
+    if (st.conv.find(st.conv_active) == st.conv.end()) {
+        return; // never armed, or arming failed at startup
+    }
+    const int eval_end = (int) prompt.tokens.size() - (st.spec.ok ? 1 : 0);
+    std::vector<kvmem_store_match> matches;
+    matches.reserve(st.conv_table.entries().size());
+    for (const auto & held : st.conv_table.entries()) {
+        matches.push_back(conversation_match(st, held.id, prompt));
+    }
+    // cache_reset is deliberately not a separate action: the policy still maps
+    // the request to a conversation, and the fork path below clears that one
+    // store. One client resetting its own history must not wipe another
+    // client's store.
+    kvmem_store_limits limits = st.conv_limits;
+    limits.attached = st.conv_active;
+    const kvmem_store_plan plan = kvmem_store_select(matches, eval_end, st.spec.ok,
+            client_id, limits);
+    const bool allocating = plan.action == kvmem_store_action::fresh && plan.id < 0;
+    // Two of the conditions the switch needs are already knowable: the
+    // previous request's rows must be committed, and conv_active must name the
+    // store the adapter actually has attached. Check them before the plan is
+    // executed, because a refusal after the fact would have destroyed an LRU
+    // victim and created a store for a conversation the request then does not
+    // move to. resolve() is pure and plan.evict never names plan.id, so asking
+    // it here gives the same answer it gives below.
+    const kvmem_store_table::entry * attached = st.conv_table.find(st.conv_active);
+    const int32_t attached_store = attached ? attached->store_id : -1;
+    const bool would_switch = allocating || st.conv_table.resolve(plan) != st.conv_active;
+    const bool refused = would_switch &&
+            (!st.mm_committed || attached_store != llama_kvmem_store_current());
+    if (refused) {
+        LOG_WRN("srv    KVMEM store switch refused action=%s conv=%d committed=%d parked=%d active=%d\n",
+                kvmem_store_action_name(plan.action), st.conv_table.resolve(plan),
+                (int) st.mm_committed, (int) attached_store, (int) llama_kvmem_store_current());
+    }
+    if (!refused) {
+        const int room = (int) matches.size() - st.conv_limits.max_stores + (allocating ? 1 : 0);
+        int evicted = 0;
+        for (int id : plan.evict) {
+            if (!conversation_evict(st, id, evicted < room ? "lru" : "bytes")) {
+                // The policy excludes both the target and the attached store, so
+                // this is unreachable. Never fall back to dropping the row: the
+                // adapter handle would survive with nothing naming it.
+                LOG_WRN("srv    KVMEM eviction plan named conv=%d, which cannot be released; skipped\n", id);
+                continue;
+            }
+            ++evicted;
+        }
+    }
+    // Eviction is executed above, one entry at a time, so resolve() only names
+    // the target and rejects a stale id from an earlier plan. A refused plan
+    // stays on the attached conversation and neither evicts nor allocates; the
+    // caps it declined to enforce are enforced again at the next turn that
+    // commits. That is not necessarily this one: conversation_commit() runs
+    // only from commit_cached(), so a turn that fails after the mapping never
+    // re-measures, and the byte overage stays until some later turn commits.
+    int target = refused ? st.conv_active : st.conv_table.resolve(plan);
+    // Every way this request can end up on the attached conversation after
+    // planning another one. None of them forks, parks or creates anything, so
+    // none of them may be counted as a fork.
+    bool fell_back = refused;
+    bool force_reset = false;
+    if (!refused && allocating) {
+        const int32_t store_id = llama_kvmem_store_create();
+        if (store_id >= 0) {
+            target = st.conv_table.add(store_id);
+            st.conv.emplace(target, kvmem_conversation{});
+        } else {
+            // No further host store available. Reuse the least recently used
+            // one, cleared below once the switch has actually attached it.
+            target = conversation_lru_victim(st);
+            force_reset = target >= 0;
+        }
+    }
+    if (target < 0 || st.conv.find(target) == st.conv.end()) {
+        target = st.conv_active; // stale plan id: fall back to today's path
+        force_reset = false;
+        fell_back = true;
+    }
+    bool switched = false;
+    bool restaged = false;
+    if (target != st.conv_active) {
+        const int parked_id = st.conv_active;
+        const kvmem_store_table::entry * parked = st.conv_table.find(parked_id);
+        const int32_t parked_store = parked ? parked->store_id : -1;
+        const kvmem_store_table::entry * held = st.conv_table.find(target);
+        const auto outgoing = st.conv.find(parked_id);
+        const auto incoming = st.conv.find(target);
+        // st.mm_committed and the conv_active/adapter-active agreement were
+        // checked above, before the plan was executed, and nothing since can
+        // have changed the adapter's active store: store_create appends and
+        // store_destroy refuses the active id. What is left to check is a
+        // table entry or a payload row this switch needs and cannot find. On
+        // any of those the switch would report success without moving anything
+        // (llama_kvmem_store_switch short-circuits a switch to the active
+        // store) and both failure detectors below would read clean while this
+        // conversation decoded against another one's KV.
+        if (!held || outgoing == st.conv.end() || incoming == st.conv.end()) {
+            // A handle the adapter does not know, or a row the table and the
+            // payload map disagree about. Stay where we are rather than switch
+            // on ambiguous state.
+            LOG_WRN("srv    KVMEM store switch refused conv=%d held=%d outgoing=%d incoming=%d\n",
+                    target, (int) (held != nullptr), (int) (outgoing != st.conv.end()),
+                    (int) (incoming != st.conv.end()));
+            target = st.conv_active;
+            force_reset = false;
+            fell_back = true;
+        } else {
+            conversation_swap(st, outgoing->second);
+            restaged = llama_kvmem_store_switch(held->store_id);
+            if (llama_kvmem_store_current() == held->store_id) {
+                conversation_swap(st, incoming->second);
+                st.conv_active = target;
+                // The context's recurrent state still belongs to the previous
+                // conversation, so multimodal_restore's live short-circuit
+                // must not skip the restore (kvmem-multimodal-server.h:84).
+                st.mm_live_checkpoint.reset();
+                switched = true;
+                ++st.conv_counts.switches;
+                if (!restaged && (st.mm_live_row > 0 || !st.cached_tokens.empty())) {
+                    // Attached but holding no rows: either this store was
+                    // already empty or the adapter could not rebuild its
+                    // working set from host RAM. The payload would claim rows
+                    // the KV no longer has, so drop it and let prefill take
+                    // its ordinary cache-miss path.
+                    kvmem_diag("KVMEM_TRACE store_stale id=%d rows=%d reason=working_set_not_rebuilt\n",
+                            target, st.mm_live_row);
+                    memory_clear_all(st);
+                    force_reset = false; // already empty, and resets count once
+                }
+                // The switch clears the outgoing store when the adapter cannot
+                // drain it safely, and the bool above describes the incoming
+                // store only. Cross-check what the parked handle still holds
+                // instead of trusting it: a payload claiming rows its store no
+                // longer has would resume a checkpoint against KV that was
+                // never restored, and nothing later reconciles the two.
+                if (parked_store >= 0 && llama_kvmem_store_rows(parked_store) == 0 &&
+                    !outgoing->second.cached_tokens.empty()) {
+                    kvmem_diag("KVMEM_TRACE store_wiped id=%d rows=%d reason=outgoing_not_drainable\n",
+                            parked_id, (int) outgoing->second.cached_tokens.size());
+                    conversation_drop_payload(outgoing->second);
+                }
+            } else {
+                // Nothing moved. Put the previous conversation back and let
+                // prefill decide against it, as a single-store server would.
+                conversation_swap(st, outgoing->second);
+                LOG_WRN("srv    KVMEM store switch failed conv=%d store=%d\n",
+                        target, (int) held->store_id);
+                // The same cross-check the success branch runs, for the same
+                // reason: swap_conv() clears the outgoing store before the
+                // attach whenever it cannot be drained, so a throw out of the
+                // attach leaves this branch restoring a payload that claims
+                // rows the store no longer has. The outgoing conversation is
+                // the attached one again here, so its payload lives in st.*.
+                if (parked_store >= 0 && llama_kvmem_store_rows(parked_store) == 0 &&
+                    !st.cached_tokens.empty()) {
+                    kvmem_diag("KVMEM_TRACE store_wiped id=%d rows=%d reason=switch_failed\n",
+                            parked_id, (int) st.cached_tokens.size());
+                    memory_clear_all(st);
+                }
+                target = st.conv_active;
+                force_reset = false;
+                fell_back = true;
+            }
+        }
+    }
+    if (force_reset) {
+        // Clear the reused store here rather than through
+        // st.mm_reset_requested: only run_prefill_multimodal consumes that
+        // flag, so on the legacy retrieval path it would never be read and the
+        // prefill would extend a live conversation's rows with an unrelated
+        // prompt, truncating its tail with no eviction accounting. This
+        // clears the attached store and its payload and counts the reset.
+        kvmem_diag("KVMEM_TRACE store_reuse id=%d reason=no_store_available\n", target);
+        memory_clear_all(st);
+    }
+    st.conv_table.touch(target, ++st.conv_clock);
+    if (fell_back) {
+        ++st.conv_counts.refusals;
+    } else if (plan.action == kvmem_store_action::extend && target == plan.id) {
+        ++st.conv_counts.extends;
+    } else {
+        ++st.conv_counts.forks;
+    }
+    conversation_publish(st);
+    kvmem_diag("KVMEM_TRACE store_select action=%s id=%d lcp=%d keep=%d stores=%zu "
+            "bytes=%llu reason=%s switched=%d restaged=%d\n",
+            kvmem_store_action_name(plan.action), target, plan.lcp, plan.keep,
+            st.conv_table.entries().size(), (unsigned long long) st.conv_table.bytes_total(),
+            plan.reason, (int) switched, (int) restaged);
 }
 
 // Persist GDN after a successful prefill (eval_end-1) for the next turn's
@@ -476,9 +1005,11 @@ static void commit_cached(ServerState & st, const std::vector<llama_token> & pro
     st.last_n_gen = (int) gen.size();
     if (st.vision || st.query_policy_user) multimodal_commit(st, gen);
     else st.cached_prompt = st.active_prompt->with_generated(gen);
+    const uint32_t stored = llama_kvmem_store_n_tokens();
+    conversation_commit(st, stored);
     kvmem_diag("KVMEM_TRACE cache_commit n_prompt=%d n_gen=%d n_cached=%d stored=%u\n",
             (int) prompt.size(), (int) gen.size(), (int) st.cached_tokens.size(),
-            llama_kvmem_store_n_tokens());
+            stored);
 }
 
 static int decode_span(llama_context * ctx, const llama_token * toks, int pos0, int pos1, int n_batch,
@@ -1111,6 +1642,7 @@ struct ChatRequest {
     int query_begin = -1;
     int query_end = -1;
     std::string force_substr;
+    std::string conversation_id;
     bool enable_thinking = false;
     std::map<std::string, std::string> template_kwargs;
     int reasoning_budget_tokens = -1;
@@ -1515,6 +2047,14 @@ static bool parse_chat_request(const json & body, ChatRequest & out, std::string
                 out.force_substr = k["pin"][0].get<std::string>();
             }
         }
+        // Optional, never required, and never a reason to fail a request: this
+        // key was unrecognized at v0.16.0-rc3, so a client that sends one must
+        // still be served, and kvmem_store_client_id drops a value the policy
+        // cannot use instead of rejecting it. Ignored entirely with one host
+        // store, where conversation identity is the token prefix itself.
+        if (k.contains("conversation_id") && k["conversation_id"].is_string()) {
+            out.conversation_id = kvmem_store_client_id(k["conversation_id"].get<std::string>());
+        }
     }
     if (!kvmem_chat_template_override(body, out.enable_thinking, out.template_kwargs, err)) {
         return false;
@@ -1790,6 +2330,17 @@ int main(int argc, char ** argv) {
         }
     }
     st.kparams.sink_tokens = static_cast<uint32_t>(options.sink_tokens);
+    // Cross-checks on the two new flags, thrown so they reach the
+    // "invalid arguments (source=...)" printer below the way every other
+    // rejection here does. Neither can fire without one of the flags, so the
+    // default path prints nothing new.
+    if (options.conversations > 1 && !st.kparams.enabled) {
+        throw std::invalid_argument("--kvmem-conversations > 1 requires KVMem; drop --no-kvmem");
+    }
+    if (options.conversation_bytes != 0 && options.conversations <= 1) {
+        throw std::invalid_argument("--kvmem-conversations-gb caps the host stores that "
+                                    "--kvmem-conversations N creates; pass N > 1 or drop the cap");
+    }
     // Some pinned llama.cpp trace sites test presence rather than the value.
     // Normalize "0"/empty and CLI-off to an absent variable before loading models.
     const bool trace = options.trace == -1 ? kvmem_diag_enabled() : options.trace != 0;
@@ -1989,6 +2540,40 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // Arm the multi-conversation host stores only now: the adapter refuses the
+    // swap in configurations it cannot drain back from host RAM, and flash
+    // attention is resolved inside llama_init_from_model, not at parse time.
+    if (options.conversations > 1) {
+        if (!llama_kvmem_store_swap_supported()) {
+            LOG_WRN("srv    KVMEM --kvmem-conversations %d unavailable in this configuration; "
+                    "using one host store\n", options.conversations);
+        } else {
+            st.conv_limits.max_stores = options.conversations;
+            st.conv_limits.max_bytes = options.conversation_bytes;
+            st.conv_active = st.conv_table.add(llama_kvmem_store_current());
+            st.conv.emplace(st.conv_active, kvmem_conversation{});
+            st.conv_table.touch(st.conv_active, ++st.conv_clock);
+            conversation_publish(st);
+            LOG_INF("srv    KVMEM conversations=%d host_bytes_max=%llu\n",
+                    options.conversations, (unsigned long long) st.conv_limits.max_bytes);
+            // Every host store builds its own runtime, so the pinned arena
+            // --kvmem-cpu-gb sizes and the tier --kvmem-nvme-gb sizes are
+            // allocated once per store, not once per process. The server owns
+            // the conversation caps and the adapter is never told the store
+            // count, so say what those two numbers now mean rather than
+            // quietly dividing them.
+            if (st.kparams.cpu_bytes || st.kparams.nvme_bytes) {
+                const double gib = 1024.0 * 1024.0 * 1024.0;
+                LOG_WRN("srv    KVMEM --kvmem-cpu-gb and --kvmem-nvme-gb are per host store: "
+                        "%d stores commit up to %.1f GiB pinned (allocated and zero-filled as "
+                        "stores are created) and overcommit %.1f GiB NVMe (sparse, unlinked)\n",
+                        options.conversations,
+                        options.conversations * (double) st.kparams.cpu_bytes / gib,
+                        options.conversations * (double) st.kparams.nvme_bytes / gib);
+            }
+        }
+    }
+
     httplib::Server svr;
     svr.set_read_timeout(options.timeout, 0);
     svr.set_write_timeout(options.timeout, 0);
@@ -2049,7 +2634,7 @@ int main(int argc, char ** argv) {
             chat_template_caps[cap.first] = cap.second;
         }
     }
-    const json props = {
+    json props = {
         // upstream get_res_props fields
         // 中文：上游 /props 返回的标准字段，UI 依赖这些键渲染模型信息
         {"default_generation_settings", {{"params", default_params}, {"n_ctx", n_ctx}}},
@@ -2079,6 +2664,11 @@ int main(int argc, char ** argv) {
                           {"reasoning_budget_tokens", st.reasoning_budget_default}, {"chat_template_kwargs", kwargs}}},
             {"sampling", {{"thinking", thinking_params}, {"non_thinking", plain_params}}}}}
     };
+    // Capability probe, present only when the feature is on, so /props is
+    // byte-identical without the flag.
+    if (st.conv_limits.max_stores > 1) {
+        props["kvmem"]["conversations"] = st.conv_limits.max_stores;
+    }
     svr.Get("/props", [props](const httplib::Request &, httplib::Response & res) {
         res.set_header("Cache-Control", "no-store");
         res.set_content(props.dump(), "application/json");
@@ -2112,6 +2702,23 @@ int main(int argc, char ** argv) {
             {"prompt", ""},
             {"generated", ""},
         };
+        // N host stores do not make the server concurrent: total_slots stays 1
+        // and there is still exactly one inference slot.
+        if (st.conv_limits.max_stores > 1) {
+            const auto conv = st.conv_stats.snapshot();
+            slot["kvmem"] = {{"conversations", {
+                {"count", conv.count},
+                {"max", conv.max},
+                {"active", conv.active},
+                {"bytes", conv.bytes},
+                {"bytes_max", conv.bytes_max},
+                {"extends", conv.extends},
+                {"forks", conv.forks},
+                {"refusals", conv.refusals},
+                {"resets", conv.resets},
+                {"evictions", conv.evictions},
+                {"switches", conv.switches}}}};
+        }
         if (busy && req.has_param("fail_on_no_slot")) {
             res.status = 503;
             res.set_content(json{{"error", json{
@@ -2226,7 +2833,6 @@ int main(int argc, char ** argv) {
             res.set_content("{\"error\":\"prompt + max_tokens exceeds n_ctx\"}", "application/json");
             return;
         }
-
         int qbegin = cr.query_begin;
         int qend = cr.query_end;
         st.turn_query_exact = false;
@@ -2259,6 +2865,49 @@ int main(int argc, char ** argv) {
             res.set_content(json{{"error", e.what()}}.dump(), "application/json");
             return;
         }
+        // Sampler construction and its probe sit here, above the conversation
+        // mapping, because both of their failures answer 400. They read cr,
+        // formatted, st.model and st.spec only, none of which the mapping
+        // below touches.
+        common_params_sampling sparams = make_chat_sampling(st.vocab, formatted, cr);
+        if (!kvmem_chat_reasoning_budget_supported(sparams, cr.enable_thinking, err)) {
+            res.status = 400;
+            res.set_content(json{{"error", err}}.dump(), "application/json");
+            return;
+        }
+        bool use_spec = st.spec.ok;
+        if (use_spec && !sparams.grammar.empty()) {
+            try {
+                common_params_sampling probe = sparams;
+                common_sampler_ptr test(common_sampler_init(st.model, probe));
+                if (!test) {
+                    use_spec = false;
+                }
+            } catch (const std::exception & e) {
+                fprintf(stderr, "KVMEM_TRACE spec sampler init failed (%s); greedy fallback\n", e.what());
+                use_spec = false;
+            }
+        }
+        if ((st.vision || st.query_policy_user) && st.spec.ok && !use_spec) {
+            res.status = 400;
+            res.set_content("{\"error\":\"MTP sampler could not initialize for this request\"}", "application/json");
+            return;
+        }
+        // Map this request onto a conversation and attach its host store.
+        // Every validation of this handler answers above this line, the MTP
+        // sampler probe last, so a request rejected for its shape never parks
+        // a conversation, creates a store or evicts an LRU victim. What can
+        // still answer 400 below is a prefill failure (st.mm_error_status),
+        // and that one happens inside this conversation's own prefill: the
+        // store it names is the one the request was mapped to, so there is no
+        // switch to undo. Still above every llama_kvmem_* call of the request,
+        // in particular llama_kvmem_set_request_span below and the checkpoint
+        // selection in run_prefill_multimodal. Nothing between the query-span
+        // derivation and here reads a field conversation_swap() exchanges.
+        // No-op with one host store.
+        st.turn_conversation_id = cr.conversation_id;
+        conversation_begin_request(st, *parsed_prompt, cr.conversation_id);
+
         const int force = force_pos_from_substr(st.vocab, toks, cr.force_substr);
         st.kparams.query_begin = qbegin;
         st.kparams.query_end = qend;
@@ -2294,12 +2943,6 @@ int main(int argc, char ** argv) {
         llama_context * ctx = st.ctx;
         const llama_vocab * vocab = st.vocab;
 
-        common_params_sampling sparams = make_chat_sampling(vocab, formatted, cr);
-        if (!kvmem_chat_reasoning_budget_supported(sparams, cr.enable_thinking, err)) {
-            res.status = 400;
-            res.set_content(json{{"error", err}}.dump(), "application/json");
-            return;
-        }
         kvmem_diag("KVMEM_TRACE sampling thinking=%d temperature=%.6g top_p=%.6g top_k=%d min_p=%.6g "
                 "presence_penalty=%.6g frequency_penalty=%.6g repetition_penalty=%.6g seed=%u\n",
                 (int) cr.enable_thinking, sparams.temp, sparams.top_p, sparams.top_k, sparams.min_p,
@@ -2317,26 +2960,6 @@ int main(int argc, char ** argv) {
                 sparams.reasoning_budget_forced.size());
         const bool parse_tools = !cr.tools.empty() &&
                 cr.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
-
-        bool use_spec = st.spec.ok;
-        if (use_spec && !sparams.grammar.empty()) {
-            try {
-                common_params_sampling probe = sparams;
-                common_sampler_ptr test(common_sampler_init(st.model, probe));
-                if (!test) {
-                    use_spec = false;
-                }
-            } catch (const std::exception & e) {
-                fprintf(stderr, "KVMEM_TRACE spec sampler init failed (%s); greedy fallback\n", e.what());
-                use_spec = false;
-            }
-        }
-
-        if ((st.vision || st.query_policy_user) && st.spec.ok && !use_spec) {
-            res.status = 400;
-            res.set_content("{\"error\":\"MTP sampler could not initialize for this request\"}", "application/json");
-            return;
-        }
 
         json request_params = default_params;
         request_params["n_predict"] = cr.max_tokens;

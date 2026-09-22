@@ -51,6 +51,16 @@ try:
         ['--split-mode', 'row'], ['--device', 'CUDA0,CUDA1'],
         ['--tensor-split', '1,1'], ['--no-kvmem', '--device', 'CUDA0,CUDA1'],
         ['--no-kvmem', '--split-mode', 'row'],
+        ['--kvmem-conversations', '0'], ['--kvmem-conversations', '-1'],
+        ['--kvmem-conversations', '1.5'], ['--kvmem-conversations', '2x'],
+        ['--kvmem-conversations'], ['--kvmem-conversations', '2147483648'],
+        ['--kvmem-conversations-gb', 'nan'], ['--kvmem-conversations-gb', 'inf'],
+        ['--kvmem-conversations-gb', '-1'], ['--kvmem-conversations-gb', '1x'],
+        # Cross-checks, not value parsing: the cap needs N > 1 to cap, and
+        # several host stores need KVMem. Both throw, so both print the same
+        # "invalid arguments (source=...)" line the loop below asserts on.
+        ['--kvmem-conversations-gb', '24'],
+        ['--no-kvmem', '--kvmem-conversations', '2'],
     ]
     for flags in invalid:
         r = subprocess.run([a.server, '-m', '__nonexistent__.gguf', *flags], env=env,
@@ -63,7 +73,9 @@ try:
                   ['-t', '2', '-tb', '3', '-ub', '64', '-fa', 'on', '-np', '1'],
                   ['--alias', 'test-model', '--load-mode', 'none'],
                   ['--predict', '256', '-s', '123', '-mm', 'projector.gguf', '--no-webui'],
-                  ['--timeout', '60', '--threads-http', '2', '--device', 'none']]:
+                  ['--timeout', '60', '--threads-http', '2', '--device', 'none'],
+                  ['--kvmem-conversations', '1'],
+                  ['--kvmem-conversations', '8', '--kvmem-conversations-gb', '24']]:
         r = subprocess.run([a.server, '-m', '__nonexistent__.gguf', *flags], env=env,
                            capture_output=True, timeout=20)
         check('accept ' + ' '.join(flags), b'failed to load model' in r.stderr)
@@ -176,6 +188,16 @@ try:
                         normalized = ''.join(text.strip().strip('。.!').split())
                         check('inference ' + expected, status == 200 and normalized == expected)
                         check('response alias', response.get('model') == 'compat-model')
+                    # kvmem.conversation_id was an unrecognized key before
+                    # multi-conversation support, so a client that sends one
+                    # must still be served on a default single-store server,
+                    # whatever it sends. The value is dropped, never rejected.
+                    for bad in [123, '', 'a' * 129, 'has space', None]:
+                        payload = {'messages': [{'role': 'user', 'content': 'What is 2+3? Answer with the number only.'}],
+                                   'max_tokens': 4, 'reasoning_effort': 'none', 'temperature': 0,
+                                   'stream': False, 'kvmem': {'conversation_id': bad}}
+                        status, body = request('/v1/chat/completions', json.dumps(payload).encode(), headers)
+                        check(f'unusable conversation_id ignored {bad!r}', status == 200)
                     payload = {'messages': [{'role': 'user', 'content': 'What is 2+3? Answer with the number only.'}],
                                'max_tokens': 32, 'reasoning_effort': 'none', 'temperature': 0, 'stream': True}
                     status, body = request('/v1/chat/completions', json.dumps(payload).encode(), headers)

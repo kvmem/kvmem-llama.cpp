@@ -87,5 +87,48 @@ int main() {
     check(kvmem_config_key("-ngl") == "--n-gpu-layers");
     check(kvmem_config_key("--path") == "--ui-dir");
     check(kvmem_config_key("--no-mmap") == "--load-mode");
+    // Multi-conversation host stores: absent flags must reproduce the
+    // single-store server, so the struct defaults are part of the contract.
+    check(kvmem_server_options{}.conversations == 1);
+    check(kvmem_server_options{}.conversation_bytes == 0);
+    check(o.conversations == 1 && o.conversation_bytes == 0);
+    for (const char * value : {"1", "2", "8", "64", "2147483647"}) {
+        parse("--kvmem-conversations", value);
+        check(o.conversations == std::stoi(value));
+    }
+    for (const char * value : {"0", "-1", "1.5", "2x", "", " 2", "2147483648", "9999999999999999999999"})
+        rejects([&] { parse("--kvmem-conversations", value); });
+    rejects([&] { o.parse("--kvmem-conversations", [](const char *) -> const char * {
+        throw std::invalid_argument("missing value");
+    }); });
+    parse("--kvmem-conversations-gb", "0");
+    check(o.conversation_bytes == 0);
+    parse("--kvmem-conversations-gb", "0.5");
+    check(o.conversation_bytes == 536870912ull);
+    parse("--kvmem-conversations-gb", "24");
+    check(o.conversation_bytes == 24ull << 30);
+    for (const char * value : {"-1", "nan", "inf", "1x", "", " 1", "1048577"})
+        rejects([&] { parse("--kvmem-conversations-gb", value); });
+    rejects([&] { o.parse("--kvmem-conversations-gb", [](const char *) -> const char * {
+        throw std::invalid_argument("missing value");
+    }); });
+    check(kvmem_config_key("--kvmem-conversations") == "--kvmem-conversations");
+    check(kvmem_config_key("--kvmem-conversations-gb") == "--kvmem-conversations-gb");
+    // Request-independent stderr on the default path must stay what
+    // v0.16.0-rc3 printed. The -np rejection is the one message this feature
+    // was tempted to extend; the pointer to --kvmem-conversations belongs in
+    // print_usage, where changed output is expected.
+    for (const char * flag : {"-np", "--parallel"}) {
+        bool threw = false;
+        try {
+            o.parse(flag, [](const char *) { return "2"; });
+        } catch (const std::invalid_argument & e) {
+            threw = true;
+            check(std::string(e.what()) ==
+                  "KVMem supports --parallel 1 only; automatic/multiple slots are not implemented");
+        }
+        check(threw);
+        parse(flag, "1");
+    }
     std::puts("server options: passed");
 }
