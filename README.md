@@ -341,7 +341,7 @@ MODEL=/path/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf \
   MMPROJ=/path/mmproj-Qwen3.8-27B-Q5_K-MIX.gguf scripts/start-iq3.sh --dry-run
 ```
 
-GPU selection honors `CUDA_VISIBLE_DEVICES`; otherwise it chooses a 5060 Ti or the only GPU. Ambiguous multi-GPU setups require an explicit selection. `MODEL`, `MMPROJ`, `MMPROJ_DEVICE`, `HOST` and `PORT` can override recipe defaults. MTP3 and ReplaySSM are server defaults; override with `SPEC_DRAFT_N_MAX` and `KVMEM_MTP_STATE` if needed. CUDA libraries come from the build directory, caller environment or the toolkit recorded during compilation; use `CUDA_HOME` or `LD_LIBRARY_PATH` for a custom installation. An existing matching service is reused; switching configuration requires `--restart`, which only stops this project's server.
+GPU selection honors `CUDA_VISIBLE_DEVICES`; otherwise it chooses a 5060 Ti or the only GPU. On a multi-GPU machine, either select one GPU explicitly (for example `--device CUDA0`) or run a **layer split across several GPUs** (`--device CUDA0,CUDA1 --split-mode layer`) - see the 2-GPU layer split section above. `MODEL`, `MMPROJ`, `MMPROJ_DEVICE`, `HOST` and `PORT` can override recipe defaults. MTP3 and ReplaySSM are server defaults; override with `SPEC_DRAFT_N_MAX` and `KVMEM_MTP_STATE` if needed. CUDA libraries come from the build directory, caller environment or the toolkit recorded during compilation; use `CUDA_HOME` or `LD_LIBRARY_PATH` for a custom installation. An existing matching service is reused; switching configuration requires `--restart`, which only stops this project's server.
 
 ### llama.cpp-compatible KV cache flags
 
@@ -359,18 +359,23 @@ that sets both types. Arguments apply from left to right; the last assignment
 to each component wins. Setting only `-ctk` does not change V (both default to
 `q8_0`), so specify both when changing precision.
 
-Supported types are `f16`, `f32`, `q8_0`, `q5_0` and `q4_0`.
-K and V may independently select `q8_0`, `q5_0` or `q4_0`: all nine
-quantized pairs are accepted. Float/quantized pairs such as `q8_0/f16` remain
-rejected before model loading. Models that require shared K/V types still
-cannot use mixed precision; execution also depends on backend kernel support.
+Supported types are `f16`, `f32`, `q8_0`, `q5_0`, `q4_0`, and the TurboQuant
+codecs `turbo8`, `turbo4`, `turbo3_tcq` and `turbo2_tcq` (plus the non-TCQ
+`turbo2`/`turbo3`). K and V may independently select `q8_0`, `q5_0` or `q4_0`:
+all nine quantized pairs are accepted. Float/quantized pairs such as
+`q8_0/f16` remain rejected before model loading, and a TurboQuant type must be
+used on both sides (`-ctk turbo3_tcq -ctv turbo3_tcq`); mixed TurboQuant/other
+pairs are rejected before model loading. Models that require shared K/V types
+still cannot use mixed precision; execution also depends on backend kernel
+support.
 
 GPU validation covers the common `q8_0/q8_0`, `q5_0/q5_0`, `q4_0/q4_0`
 pairs and mixed **`q8_0/q4_0`**. Q8/Q4 additionally passed cache save/restore,
-MTP replay and long-context checks on CUDA. The other five mixed quantized
-pairs are enabled with argument-parsing checks only; they have not received
-full inference, quality or performance validation. ROCm/Vulkan combinations
-have not been validated here.
+MTP replay and long-context checks on CUDA, and the TurboQuant codecs were
+validated on CUDA (2x Tesla V100, sm_70 - see the perplexity table above). The
+other five mixed quantized pairs are enabled with argument-parsing checks only;
+they have not received full inference, quality or performance validation.
+ROCm/Vulkan combinations have not been validated here.
 
 ```text
 llama-kvmem-server -m model.gguf -ctk q8_0 -ctv q4_0
