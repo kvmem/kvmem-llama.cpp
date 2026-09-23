@@ -4,7 +4,7 @@
 
 **Bonsai KV defaults:** target K/V Q8_0; when MTP is explicitly enabled, draft K/V F16. The launcher accepts `-DraftKvType` to override the draft cache independently of `-KvType`; server/CLI accept `--spec-kv-dtype`. See the [F16 memory comparison](docs/bonsai-mtp1-f16-5060-comparison.md).
 
-**Release status:** prism.3 follows the previous Bonsai **GitHub release draft** workflow, with runtime ZIP, matching source ZIP, validation and SHA256 files. Draft assets require repository access; this is not a public stable release. The rc3 benchmarks and IQ3/IQ4 recipes below describe the previous baseline, not Bonsai.
+**Release status:** [Download the prism.3 release draft](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/untagged-dc32bcd5452cb4233a04), with runtime ZIP, matching source ZIP, validation and SHA256 files. Draft assets require repository access; this follows the previous Bonsai draft workflow and is not a public stable release. The rc3 benchmarks and IQ3/IQ4 recipes below describe the previous baseline, not Bonsai.
 
 **Other prebuilt downloads:** [Windows x64 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Linux / WSL2 x86_64 (rc1)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc1)
 
