@@ -28,6 +28,63 @@ Current milestone: [`v0.16.0-rc3`](docs/milestones/v0.16.0-rc3.md) (pre-release)
 
 Version: **0.16.0-rc3**. See the [English / 中文 release notes](docs/releases/v0.16.0-rc3.md) for CUDA build choices and measured results.
 
+## TurboQuant KV codecs and 2-GPU layer split
+
+This contribution integrates the TurboQuant KV cache codec family and adds
+multi-GPU (2x Tesla V100) layer-split support.
+
+### TurboQuant KV codecs
+
+Seven additional KV cache data types are selectable with the usual
+`-ctk` / `-ctv` flags. A narrower KV type frees VRAM on a fixed budget, which
+leaves more room for the GPU working set that KVMem actually attends over.
+
+| `-ctk` / `-ctv` | approx. KV bits | notes |
+|---|---|---|
+| `turbo8` | ~8.1 | near-lossless |
+| `turbo4` | ~4.1 | small loss |
+| **`turbo3_tcq`** | **~3.1** | trellis-coded, best quality per byte |
+| `turbo2_tcq` | ~2.1 | aggressive |
+| `turbo2` / `turbo3` | - | non-TCQ variants |
+
+Implementation:
+
+- `ggml`: new types, block layouts, type traits, CPU reference
+  quantize/dequantize, WHT (Hadamard) rotation and mean-sub tables.
+- `ggml-cuda`: encode (`set_rows`), decode (`get_rows`), and a Flash-Attention
+  path that materializes turbo K/V back to f16 through the inverse WHT before
+  the native f16 attention kernel, so no graph-level change is required.
+
+Measured perplexity (2x Tesla V100, Qwen3.8-27B, 1024 ctx x 6 chunks):
+
+| KV type | PPL |
+|---|---|
+| f16 | 1.430 |
+| turbo8 | 1.429 |
+| turbo4 | 1.572 |
+| **turbo3_tcq** | **1.323** |
+| turbo2_tcq | 1.486 |
+
+`turbo3_tcq` matches the f16 baseline on greedy generation while using roughly
+one fifth of the KV bytes. TurboQuant originates from the buun-llama-cpp work;
+this is a port and integration for the KVMem tree.
+
+### 2-GPU layer split
+
+KVMem now runs with `--split-mode layer` across two GPUs:
+
+- the recurrent (GDN) layers are folded per device instead of requiring every
+  recurrent layer on a single GPU, so layer split and MTP can be combined;
+- the KVMem stager gained a per-device path (`KVMEM_MG_SAFE=1`) so a 2-GPU
+  context stages KV in and out without aliasing the Q/K/V work buffers.
+
+Example (2x V100):
+
+```
+-ngl all --split-mode layer --device CUDA0,CUDA1
+-ctk turbo3_tcq -ctv turbo3_tcq
+```
+
 ## How KVMem works
 
 Completed KV blocks are stored in host RAM. For each agent step, KVMem retrieves relevant blocks using the current query and places them in chronological order in a bounded GPU working set. Previously computed KV is reused across turns.

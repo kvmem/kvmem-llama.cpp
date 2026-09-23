@@ -12,6 +12,11 @@
 bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed = 0);
 void kvmem_stagein_gpu_free();
 
+// KVMEM multi-GPU safe mode: true when KVMEM_MG_SAFE is set. Forces the
+// device-aware fallbacks for stage-in/out/harvest so layer-split inference can
+// run on several CUDA devices.
+bool kvmem_mg_safe();
+
 bool kvmem_stagein_fwht_ok(int nrot);
 bool kvmem_stagein_quant_ok(ggml_type ty);
 

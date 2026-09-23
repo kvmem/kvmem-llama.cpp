@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -316,7 +317,26 @@ __global__ void meank_add_bf16(const uint8_t * k, float * acc, int tok0, int n_k
 
 }  // namespace
 
+// KVMEM multi-GPU "safe mode" (development switch).
+//
+// The fast stage-in/out/harvest paths keep their scratch (streams, events,
+// staging buffers) on a single CUDA device. With layer-split inference the KV
+// tensors live on several devices, so those paths must be bypassed and the
+// adapter falls back to the device-aware ggml_backend_tensor_get/set paths.
+//
+// Set KVMEM_MG_SAFE=1 to force the device-safe fallbacks on every tier.
+bool kvmem_mg_safe() {
+    static const bool v = [] {
+        const char * e = std::getenv("KVMEM_MG_SAFE");
+        return e && e[0] && e[0] != '0';
+    }();
+    return v;
+}
+
 bool kvmem_stagein_gpu_ready(size_t n_f32, size_t n_packed) {
+    if (kvmem_mg_safe()) {
+        return true;
+    }
     if (n_f32 == 0) {
         return false;
     }
@@ -605,6 +625,9 @@ bool kvmem_stagein_quantize(ggml_type ty, void * gpu_dst, int64_t n_rows, int64_
 }
 
 bool kvmem_stagein_h2d_bytes(void * gpu_dst, const void * host, size_t n) {
+    if (kvmem_mg_safe()) {
+        return false;
+    }
     if (!gpu_dst || !host || n == 0) {
         return n == 0;
     }
@@ -819,6 +842,9 @@ bool kvmem_stagein_enqueue_k(
 
 bool kvmem_stagein_enqueue_v(const void * packed, size_t nbytes, uint8_t * dst,
                              int64_t * set_us) {
+    if (kvmem_mg_safe()) {
+        return false;
+    }
     if (!packed || !dst || nbytes == 0) {
         return false;
     }
@@ -840,6 +866,9 @@ bool kvmem_stagein_enqueue_v(const void * packed, size_t nbytes, uint8_t * dst,
 }
 
 bool kvmem_stageout_enqueue(const void * gpu_src, size_t nbytes) {
+    if (kvmem_mg_safe()) {
+        return false;
+    }
     if (!gpu_src || nbytes == 0 || !g_st.items.empty()) {
         return false;
     }
@@ -964,6 +993,9 @@ void kvmem_stageout_clear() {
 
 bool kvmem_d2d_batched(const void * const * src, void * const * dst,
                        const size_t * nbytes, int n) {
+    if (kvmem_mg_safe()) {
+        return false;
+    }
     if (n <= 0) {
         return true;
     }
@@ -998,6 +1030,9 @@ bool kvmem_d2d_batched(const void * const * src, void * const * dst,
 }
 
 bool kvmem_meank_ready(uint32_t n_layer, uint32_t n_embd) {
+    if (kvmem_mg_safe()) {
+        return false;
+    }
     if (n_layer == 0 || n_embd == 0) {
         return false;
     }

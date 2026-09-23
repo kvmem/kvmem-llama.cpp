@@ -9,10 +9,12 @@ struct kvmem_server_devices {
     std::vector<float> split;
 
     void apply(const kvmem_server_options & options, llama_model_params & params) {
-        if (options.device_names.find(',') != std::string::npos || options.tensor_split.size() > 1 ||
+        // KVMEM multi-GPU (layer split) experiment: multiple --device names are now
+        // accepted. ROW/TENSOR split and multi-proportion --tensor-split stay rejected.
+        if (options.tensor_split.size() > 1 ||
                 (options.split_mode_set && (options.split_mode == LLAMA_SPLIT_MODE_ROW ||
                                            options.split_mode == LLAMA_SPLIT_MODE_TENSOR)))
-            throw std::invalid_argument("multi-GPU is not supported yet; select one --device (see --list-devices)");
+            throw std::invalid_argument("unsupported split mode; use --split-mode layer with --device CUDA0,CUDA1");
         if (!options.device_names.empty()) {
             if (options.device_names != "none") {
                 size_t start = 0;
@@ -68,7 +70,9 @@ struct kvmem_server_devices {
             }
             count = rpc + (discrete ? discrete : integrated);
         }
-        if (count > 1 && params.n_gpu_layers != 0 && params.split_mode != LLAMA_SPLIT_MODE_NONE)
-            throw std::invalid_argument("multi-GPU is not supported yet; select one --device or use --split-mode none --main-gpu INDEX");
+        if (count > 1 && params.n_gpu_layers != 0 &&
+                params.split_mode != LLAMA_SPLIT_MODE_NONE &&
+                params.split_mode != LLAMA_SPLIT_MODE_LAYER)
+            throw std::invalid_argument("multi-GPU supports layer split only; use --split-mode layer");
     }
 };
