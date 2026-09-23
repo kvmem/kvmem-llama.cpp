@@ -201,20 +201,23 @@ yet accept every `llama-server` option.
 | `-np`, `--parallel` | Only `1` is supported. Automatic or multiple slots produce an error. |
 | `-to`, `--timeout` | HTTP read/write timeout in seconds; KVMem retains its 1800-second default. |
 | `--threads-http` | HTTP worker count; <= 0 selects automatically. This does not enable parallel inference slots. |
-| `-dev`, `--device`; `--list-devices` | Select one offload device (for example `CUDA0`), or `none` for CPU; list devices without loading a model. |
-| `-mg`, `--main-gpu`; `-sm`, `--split-mode` | Select a single GPU using `--split-mode none --main-gpu INDEX`. `layer` is accepted only when offloading to at most one device. |
+| `-dev`, `--device`; `--list-devices` | Select one or more offload devices (for example `CUDA0` or `CUDA0,CUDA1`), or `none` for CPU; list devices without loading a model. |
+| `-mg`, `--main-gpu`; `-sm`, `--split-mode` | `--split-mode layer` spreads the model and its KV over the selected devices (see below); `--split-mode none --main-gpu INDEX` pins everything to one GPU. `row` and `tensor` split remain unsupported. |
 | `-ts`, `--tensor-split` | A single proportion is accepted; multi-device proportions are rejected. |
 
 Additional upstream aliases: `--usage` = `--help`, `--predict` = `--n-predict`,
 `-s` = `--seed`, `-mm` = `--mmproj`, `--no-webui` = `--no-ui`, and
 `--path` = `--ui-dir`.
 
-**Multi-GPU operation is not supported yet**, including with `--no-kvmem`.
-Multiple `--device` names, multiple `--tensor-split` entries, and `row`/`tensor`
-split modes fail before model loading. When automatic discovery sees multiple
-GPUs, select one with `--device CUDA0`, use `--split-mode none --main-gpu INDEX`,
-or expose one GPU through `CUDA_VISIBLE_DEVICES`. Indices refer to the visible
-device list (and to the selected device list when `--device` is supplied).
+**Multi-GPU layer split is supported.** Select several devices and use
+`--split-mode layer` (for example `--device CUDA0,CUDA1 --split-mode layer`) to
+spread the model over two or more GPUs. The recurrent (GDN) layers are folded
+once per device, and the KVMem stager keeps a per-device path (`KVMEM_MG_SAFE=1`)
+so a multi-GPU context stages KV in and out without aliasing the Q/K/V work
+buffers. `--no-kvmem` with more than one device, `row`/`tensor` split modes and
+multiple `--tensor-split` entries remain unsupported and fail before model
+loading. Indices refer to the visible device list (and to the selected device
+list when `--device` is supplied).
 
 Threads, physical batch size and Flash Attention settings propagate to MTP.
 Existing model, host/port, context, sampling, chat-template, vision and KV-cache
