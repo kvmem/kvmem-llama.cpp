@@ -1,3 +1,61 @@
+> [!IMPORTANT]
+>
+> **该 kvmem-llama.cpp 分支使用 PrismML 分支的 llama.cpp, 提供该分支的低比特格式与运行时功能。**
+> 
+> 支持运行模型 [Bonsai 2](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf)，其他模型请使用主线版本。
+> 「[模型下载地址](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/tree/main)」
+> 
+> **显存需求**：最低 8G
+> 
+> - 8G 显存用户请使用 Ternary-Bonsai-2-27B-PTQ1_0.gguf。
+> 
+> - 12G 及以上显存推荐使用 Ternary-Bonsai-2-27B-PQ2_0.gguf 以获得更快的推理速度。
+> 
+> **内存需求**：最低 16G
+> 
+> -  256K 上下文约10.5G运行内存，可在16g内存机器运行。
+> 
+> **推理速度**：
+> 
+> 使用 16g 内存，8g 显存的 RTX4060 笔记本推理，Prefill 200+ token/s，Decode 20+ token/s
+>
+> **推荐参数**：
+> 
+> ```bash
+> -c 262144 -ngl 99 --kv-dtype q8_0 --load-mode none \
+>  --kvmem-budget 20480 --kvmem-gen-reserve 8192 --kvmem-block-tokens 32 \
+>  --port 8080 -ub 128 -b 512
+> ```
+> 
+> ---
+> **This is a fork version of kvmem-llama.cpp using PrismML fork of llama.cpp, providing the fork's low-bit formats and runtime features.**
+> 
+> Supports running the [Bonsai 2](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf) model. For other models, please use the mainline version.
+> 「[Download](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/tree/main)」
+>
+> **VRAM requirements**: minimum 8 GB
+>
+> - Users with 8 GB VRAM should use Ternary-Bonsai-2-27B-PTQ1_0.gguf.
+>
+> - Users with 12 GB VRAM or more are recommended to use Ternary-Bonsai-2-27B-PQ2_0.gguf for faster inference speed.
+>
+> **Memory requirements**: minimum 16 GB
+>
+> - 256K context, about 10.5 GB runtime memory. Can run on a 16 GB memory machine.
+>
+> **Inference speed**:
+>
+> Using an RTX 4060 laptop with 16 GB memory and 8 GB VRAM for inference: Prefill 200+ token/s, Decode 20+ token/s.
+>
+> **Recommended parameters**:
+>
+> ```bash
+> --c 262144 -ngl 99 --kv-dtype q8_0  --load-mode none\
+>  --kvmem-budget 20480 --kvmem-gen-reserve 8192 --kvmem-block-tokens 32 \
+>  --port 8080 -ub 128 -b 512
+> ```
+> 
+---
 # KVMem + llama.cpp
 
 **Prebuilt downloads:** [Windows x64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Linux / WSL2 x86_64 (rc1)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc1) · [Windows / Linux ROCm (beta)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta)
@@ -101,7 +159,7 @@ scripts/apply-patches.sh
 scripts/build-cuda.sh
 ```
 
-The submodule is ggml-org/llama.cpp at pin `b81c99b`. `scripts/apply-patches.sh` applies `patches/llama-kvmem-current.patch` (or `multimodal-upgrade.patch` on an older KVMem tree). Running it twice is safe. Do **not** apply numbered `0001`–`0004` together with the cumulative patch. See [patches/README.md](patches/README.md).
+The submodule pins the KVMem integration branch `kvmem/prism` of the llama.cpp fork, based on PrismML `prism` `9a9394a`. `scripts/apply-patches.sh` applies `patches/llama-kvmem-current.patch`, the cumulative diff against `9a9394a` (or `multimodal-upgrade.patch` on an older KVMem tree). Running it twice is safe. Do **not** apply numbered `0001`–`0004` together with the cumulative patch. See [patches/README.md](patches/README.md).
 
 `scripts/build-cuda.sh` sets `GGML_CUDA_FA_ALL_QUANTS=ON` (needed for `--kv-dtype q5_0` on hybrid models). Binaries: `build/bin/llama-kvmem-server`.
 

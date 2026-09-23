@@ -1,22 +1,77 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6d8a7e8bb..883cc278f 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -127,6 +127,11 @@
- 
+@@ -128,6 +128,11 @@ option(LLAMA_SANITIZE_UNDEFINED "llama: enable undefined sanitizer" OFF)
  # utils
  option(LLAMA_BUILD_COMMON "llama: build common utils library" ${LLAMA_STANDALONE})
-+
+ 
 +# KVMem out-of-tree adapter (kvmem_llamacpp). Off by default so a vanilla
 +# submodule build stays bit-identical to upstream.
 +option(LLAMA_KVMEM "llama: compile KVMem memory adapter" OFF)
 +set(LLAMA_KVMEM_ROOT "" CACHE PATH "kvmem_llamacpp root (libkvmem + src/adapter)")
- 
++
  # extra artifacts
  option(LLAMA_BUILD_TESTS     "llama: build tests"                                                                ${LLAMA_STANDALONE})
+ option(LLAMA_BUILD_TOOLS     "llama: build tools"                                                                ${LLAMA_STANDALONE})
+diff --git a/common/reasoning-budget.cpp b/common/reasoning-budget.cpp
+index 4884299f3..e2a68dad1 100644
+--- a/common/reasoning-budget.cpp
++++ b/common/reasoning-budget.cpp
+@@ -185,6 +185,21 @@ static void common_reasoning_budget_apply(struct llama_sampler * smpl, llama_tok
+     }
+ }
+ 
++void common_reasoning_budget_accept_prefill(struct llama_sampler * smpl, llama_token token) {
++    auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
++    if (ctx->state != REASONING_BUDGET_FORCING) {
++        common_reasoning_budget_accept(smpl, token);
++        return;
++    }
++    // A prompt can contain whitespace or continued reasoning after the budget
++    // is exhausted. Only an actual end tag closes it; output forcing is pending.
++    const int32_t match = ctx->end_matcher.advance(token);
++    if (match >= 0) {
++        ctx->state = REASONING_BUDGET_DONE;
++        ctx->end_match = match;
++    }
++}
++
+ static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
+     auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
+     ctx->state = REASONING_BUDGET_IDLE;
+diff --git a/common/reasoning-budget.h b/common/reasoning-budget.h
+index 1b89a04c4..87584c815 100644
+--- a/common/reasoning-budget.h
++++ b/common/reasoning-budget.h
+@@ -43,6 +43,9 @@ struct llama_sampler * common_reasoning_budget_init(
+ 
+ common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl);
+ 
++// Read prompt tokens without consuming the forced output sequence.
++void common_reasoning_budget_accept_prefill(struct llama_sampler * smpl, llama_token token);
++
+ // The end sequence that transitioned the sampler to DONE, or nullptr if none
+ // was recorded. Cleared when a new start sequence re-arms the sampler.
+ const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl);
+diff --git a/common/sampling.cpp b/common/sampling.cpp
+index 06dea1e1c..bc33776a7 100644
+--- a/common/sampling.cpp
++++ b/common/sampling.cpp
+@@ -317,7 +317,7 @@ struct common_sampler * common_sampler_init(
+             params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
+ 
+         for (const auto & token : prefill_tokens) {
+-            llama_sampler_accept(rbudget, token);
++            common_reasoning_budget_accept_prefill(rbudget, token);
+             LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
+         }
+     }
 diff --git a/common/speculative.cpp b/common/speculative.cpp
+index 9b28b3188..2faf28033 100644
 --- a/common/speculative.cpp
 +++ b/common/speculative.cpp
-@@ -1332,6 +1332,9 @@
+@@ -2044,6 +2044,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
      std::vector<llama_sampler *> backend_chains;
  
      int32_t n_embd = 0;
@@ -26,7 +81,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
  
      // One MTP draft driver, three modes (set once in the ctor):
      //   is_mem_shared (gemma4): shares the target KV, runs all heads in one graph.
-@@ -1386,6 +1389,11 @@
+@@ -2098,6 +2101,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          // TODO: fix, how to call without malloc
          batch.token = (llama_token *) malloc(sizeof(llama_token) * n_b);
  
@@ -38,7 +93,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
          smpls.resize(n_seq);
          for (auto & s : smpls) {
              common_params_sampling sparams;
-@@ -1414,7 +1422,10 @@
+@@ -2126,7 +2134,10 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          llama_set_embeddings_nextn(ctx_tgt, true, /*masked*/ false);
          llama_set_embeddings_nextn(ctx_dft, true, /*masked*/ true);
  
@@ -50,7 +105,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
          chain_heads   = n_mtp_layers > 1 && !is_mem_shared;
  
          if (chain_heads) {
-@@ -1464,7 +1475,8 @@
+@@ -2175,7 +2186,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          }
  
          auto * ctx_dft = this->params.ctx_dft;
@@ -60,7 +115,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
  
          if (pos_max < N - 1 && !is_mem_shared) {
              SPC_WRN("ctx_dft pos_max=%d < N-1=%d - "
-@@ -1480,10 +1492,7 @@
+@@ -2191,10 +2203,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
              return true;
          }
  
@@ -72,7 +127,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
  
          const int32_t n_tokens = batch_in.n_tokens;
  
-@@ -1514,7 +1523,8 @@
+@@ -2225,7 +2234,8 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
              common_batch_clear(batch);
  
              for (int k = 0; k < n_tokens; ++k) {
@@ -82,7 +137,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
              }
  
              // shift the tgt embeddings to the right by one position
-@@ -1540,6 +1550,13 @@
+@@ -2251,6 +2261,13 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                  set_h(i_batch_beg[seq_id], pending_h[seq_id].data());
              }
  
@@ -96,7 +151,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
              auto * mem_dft = llama_get_memory(ctx_dft);
  
              bool ok = true;
-@@ -1555,7 +1572,7 @@
+@@ -2266,7 +2283,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                      llama_set_nextn_layer_offset(ctx_dft, head);
                  }
  
@@ -105,7 +160,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
                  if (rc != 0) {
                      SPC_ERR("llama_decode(ctx_dft) head=%d failed rc=%d (pos=%d)\n",
                              head, (int) rc, (int) batch_in.pos[0]);
-@@ -1579,6 +1596,9 @@
+@@ -2290,6 +2307,9 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
  
              const int32_t n_rows = i_batch_end[seq_id] - i_batch_beg[seq_id] + 1;
              verify_h_rows[seq_id] = n_rows;
@@ -115,7 +170,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
              verify_h[seq_id].resize((size_t) n_rows * n_embd);
  
              for (int32_t i = 0; i < n_rows; ++i) {
-@@ -1616,6 +1636,7 @@
+@@ -2327,6 +2347,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
              common_sampler_reset(smpls[seq_id].get());
  
              common_batch_add(batch, dp.id_last, dp.n_past, { seq_id }, true);
@@ -123,7 +178,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
              std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, pending_h[seq_id].data(), row_bytes);
  
              i_last[seq_id] = batch.n_tokens - 1;
-@@ -1705,6 +1726,7 @@
+@@ -2416,6 +2437,7 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                      for (int t = 0; t < n_rows; ++t) {
                          const llama_token tok = (t == 0) ? dp.id_last : result[t - 1];
                          common_batch_add(batch, tok, dp.n_past + t, { seq_id }, t == n_rows - 1);
@@ -131,7 +186,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
                          std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd,
                                      chain_h[seq_id].data() + (size_t) t * n_embd, row_bytes);
                      }
-@@ -1712,9 +1734,11 @@
+@@ -2423,9 +2445,11 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
                      // note: with shared memory (e.g. Gemma4 assistants) we use the same position for all draft tokens
                      // ref: https://github.com/huggingface/transformers/blob/effde20942e3f82a1b97449f60b3a48c5ff96145/docs/source/en/model_doc/gemma4_assistant.md?plain=1#L36-L37
                      common_batch_add(batch, id, dp.n_past, { seq_id }, true);
@@ -143,7 +198,7 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
                      std::memcpy(batch.embd + (size_t) (batch.n_tokens - 1) * n_embd, h_row, row_bytes);
                  }
  
-@@ -1755,9 +1779,28 @@
+@@ -2466,9 +2490,28 @@ struct common_speculative_impl_draft_mtp : public common_speculative_impl {
          }
  
          const int32_t i_h = std::min<int32_t>(n_accepted, n_rows - 1);
@@ -173,9 +228,10 @@ diff --git a/common/speculative.cpp b/common/speculative.cpp
  
  // state of self-speculation (simple implementation, not ngram-map)
 diff --git a/common/speculative.h b/common/speculative.h
+index d1a724d51..d5d6eaf49 100644
 --- a/common/speculative.h
 +++ b/common/speculative.h
-@@ -69,6 +69,7 @@
+@@ -60,6 +60,7 @@ struct common_speculative_draft_params {
  
      // the generated draft from the last _draft() call
      llama_tokens * result;
@@ -184,9 +240,10 @@ diff --git a/common/speculative.h b/common/speculative.h
  
  common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);
 diff --git a/ggml/include/ggml-cuda.h b/ggml/include/ggml-cuda.h
+index 1cd81eeae..4665d07f2 100644
 --- a/ggml/include/ggml-cuda.h
 +++ b/ggml/include/ggml-cuda.h
-@@ -42,6 +42,23 @@
+@@ -42,6 +42,23 @@ GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
  
  GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
  
@@ -211,9 +268,10 @@ diff --git a/ggml/include/ggml-cuda.h b/ggml/include/ggml-cuda.h
  }
  #endif
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index d875a15ed..6f5c96ca2 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
-@@ -590,6 +590,8 @@
+@@ -596,6 +596,8 @@ extern "C" {
  
          GGML_OP_GLU,
  
@@ -222,7 +280,7 @@ diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
          GGML_OP_COUNT,
      };
  
-@@ -2594,6 +2596,7 @@
+@@ -2593,6 +2595,7 @@ extern "C" {
      // the output packs the attention scores [S_v, H_v, n_tokens, n_seqs] followed by K state
      // snapshots, most-recent first (slot 0 = final state, slot s = state s tokens back). K == 1
      // keeps only the final state; when n_tokens < K only slots 0..n_tokens-1 are written.
@@ -231,9 +289,10 @@ diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
              struct ggml_context * ctx,
              struct ggml_tensor  * q,
 diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index 9cd2c2d39..1f1ac0c3e 100644
 --- a/ggml/src/ggml-cpu/ggml-cpu.c
 +++ b/ggml/src/ggml-cpu/ggml-cpu.c
-@@ -2082,6 +2082,7 @@
+@@ -2078,6 +2078,7 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
                  ggml_compute_forward_solve_tri(params, tensor);
              } break;
          case GGML_OP_GATED_DELTA_NET:
@@ -241,7 +300,7 @@ diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
              {
                  ggml_compute_forward_gated_delta_net(params, tensor);
              } break;
-@@ -2281,6 +2282,7 @@
+@@ -2277,6 +2278,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
          case GGML_OP_COUNT_EQUAL:
          case GGML_OP_SOLVE_TRI:
          case GGML_OP_GATED_DELTA_NET:
@@ -249,7 +308,7 @@ diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
          case GGML_OP_DSV4_HC_COMB:
          case GGML_OP_DSV4_HC_PRE:
          case GGML_OP_DSV4_HC_POST:
-@@ -3023,10 +3025,11 @@
+@@ -3008,10 +3010,11 @@ struct ggml_cplan ggml_graph_plan(
                          cur = ggml_type_size(node->type)*(n_tasks + node->src[0]->ne[0]*n_tasks);
                      } break;
                  case GGML_OP_GATED_DELTA_NET:
@@ -263,16 +322,21 @@ diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
                      } break;
                  case GGML_OP_COUNT:
 diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
+index 4fc7514bb..1005462c6 100644
 --- a/ggml/src/ggml-cpu/ops.cpp
 +++ b/ggml/src/ggml-cpu/ops.cpp
-@@ -10934,15 +10934,15 @@
+@@ -10810,7 +10810,7 @@ static void ggml_compute_forward_gated_delta_net_one_chunk(
  
      // K (snapshot slot count) is an op param; state holds s0 only [S_v, S_v, H, n_seqs].
      const int64_t K = ggml_get_op_params_i32(dst, 0);
 -    GGML_ASSERT(K >= 1);
 +    GGML_ASSERT(K >= 0);
-     // per-seq stride in floats (seq s starts at state + s * seq_stride)
-     const int64_t state_seq_stride = src_state->nb[3] / sizeof(float);
+     // rows mode (src[6] set): state is a 2D cache view (D, n_rows) and each
+     // sequence's live state is read at row rows[seq] -- no gathered scratch.
+     const ggml_tensor * src_rows = dst->src[6];
+@@ -10819,11 +10819,11 @@ static void ggml_compute_forward_gated_delta_net_one_chunk(
+     const int64_t state_seq_stride = src_rows ? 0 : (int64_t) (src_state->nb[3] / sizeof(float));
+     const int64_t state_row_size   = src_rows ? (int64_t) (src_state->nb[1] / sizeof(float)) : 0;
  
 -    const int64_t per_thread = S_v + (K > 1 ? S_v * S_v : 0);
 +    const int64_t per_thread = S_v + (K != 1 ? S_v * S_v : 0);
@@ -284,7 +348,7 @@ diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
  
      // output layout: [attn_scores | new_states]
      // attn_scores: S_v * H * n_tokens * n_seqs    floats
-@@ -10976,7 +10976,7 @@
+@@ -10857,7 +10857,7 @@ static void ggml_compute_forward_gated_delta_net_one_chunk(
  
          // For K=1, write directly to the single output slot to avoid an extra memcpy at the end.
          // For K>1, work in scratch and copy out per-token when the slot is in range.
@@ -294,6 +358,7 @@ diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
              : state_out_base + (iv3 * H + iv1) * S_v * S_v;
  
 diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_delta_net.cu
+index 5cf6968a6..57a13a820 100644
 --- a/ggml/src/ggml-cuda/gated_delta_net.cu
 +++ b/ggml/src/ggml-cuda/gated_delta_net.cu
 @@ -1,4 +1,5 @@
@@ -301,8 +366,8 @@ diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_de
 +#include "ggml-cuda.h"
  #include "ggml-cuda/common.cuh"
  
- template <int S_v, bool KDA, bool keep_rs_t>
-@@ -43,7 +44,9 @@
+ static __global__ void gdn_precompute_exp(const float * g, float * g_exp, int64_t n) {
+@@ -60,7 +61,9 @@ gated_delta_net_cuda(const float * q,
      // output state layout (per-slot D * n_seqs) — same per-(seq,head) offset as before.
      const int64_t state_in_offset      = sequence * H * S_v * S_v + h_idx * S_v * S_v;
      const int64_t state_out_offset     = (sequence * H + h_idx) * S_v * S_v;
@@ -310,36 +375,33 @@ diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_de
 +    if (K > 0) {
 +        state += state_out_offset;
 +    }
-     curr_state += state_in_offset + col * S_v;
+     curr_state += state_in_offset;
      attn_data += (sequence * n_tokens * H + h_idx) * S_v;
  
-@@ -84,23 +87,14 @@
-         if constexpr (!KDA) {
-             const float g_val = expf(*g_t);
- 
--            // kv[col] = (S^T @ k)[col] = sum_i S[i][col] * k[i]
--            float kv_shard = 0.0f;
--#pragma unroll
--            for (int r = 0; r < rows_per_lane; r++) {
--                kv_shard += s_shard[r] * k_reg[r];
--            }
--            float kv_col = warp_reduce_sum<warp_size>(kv_shard);
--
--            // delta[col] = (v[col] - g * kv[col]) * beta
--            float delta_col = (v_t[col] - g_val * kv_col) * beta_val;
-+            const float delta_col = gdn_delta_f32<rows_per_lane, warp_size>(s_shard, k_reg, g_val, v_t[col], beta_val);
- 
-             // fused: S[i][col] = g * S[i][col] + k[i] * delta[col]
-             // attn[col] = (S^T @ q)[col] = sum_i S[i][col] * q[i]
-             float attn_partial = 0.0f;
+@@ -116,19 +119,13 @@ gated_delta_net_cuda(const float * q,
+             // Each warp owns one or more columns and reuses the common q/k registers.
  #pragma unroll
-             for (int r = 0; r < rows_per_lane; r++) {
--                s_shard[r]  = g_val * s_shard[r] + k_reg[r] * delta_col;
-+                s_shard[r]  = gdn_update_f32(s_shard[r], k_reg[r], g_val, delta_col);
-                 attn_partial += s_shard[r] * q_reg[r];
-             }
+             for (int c = 0; c < cols_per_warp; ++c) {
+-                float kv_shard = 0.0f;
+-#pragma unroll
+-                for (int r = 0; r < rows_per_lane; r++) {
+-                    kv_shard += s_shard[c][r] * k_reg[r];
+-                }
+-                float kv_col = warp_reduce_sum<warp_size>(kv_shard);
+-
+-                float delta_col = (v_t[col + c] - g_val * kv_col) * beta_val;
++                const float delta_col = gdn_delta_f32<rows_per_lane, warp_size>(
++                        s_shard[c], k_reg, g_val, v_t[col + c], beta_val);
  
-@@ -284,7 +278,7 @@
+                 float attn_partial = 0.0f;
+ #pragma unroll
+                 for (int r = 0; r < rows_per_lane; r++) {
+-                    s_shard[c][r]  = g_val * s_shard[c][r] + k_reg[r] * delta_col;
++                    s_shard[c][r]  = gdn_update_f32(s_shard[c][r], k_reg[r], g_val, delta_col);
+                     attn_partial += s_shard[c][r] * q_reg[r];
+                 }
+ 
+@@ -322,7 +319,7 @@ static void ggml_cuda_op_gated_delta_net_impl(
  
      // K (snapshot slot count) is an op param; state holds s0 only [S_v, S_v, H, n_seqs].
      const int K = ggml_get_op_params_i32(dst, 0);
@@ -348,7 +410,7 @@ diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_de
  
      // recurrent state -> gdn_out tail (after attention scores), or the cache when fusing
      float * state_d           = dst_d + S_v * H * n_tokens * n_seqs;
-@@ -325,3 +319,63 @@
+@@ -379,3 +376,63 @@ void ggml_cuda_op_gated_delta_net_fused_cache(
          ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_cuda_gated_delta_net_fused_cache cache) {
      ggml_cuda_op_gated_delta_net_impl(ctx, dst, &cache);
  }
@@ -413,12 +475,13 @@ diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_de
 +    return cudaGetLastError() == cudaSuccess;
 +}
 diff --git a/ggml/src/ggml-cuda/gated_delta_net.cuh b/ggml/src/ggml-cuda/gated_delta_net.cuh
+index f9bf43706..05adbb46c 100644
 --- a/ggml/src/ggml-cuda/gated_delta_net.cuh
 +++ b/ggml/src/ggml-cuda/gated_delta_net.cuh
-@@ -1,5 +1,21 @@
+@@ -1,6 +1,22 @@
  #include "common.cuh"
  #include "ggml.h"
-+
+ 
 +template <int rows, int width>
 +static __device__ __forceinline__ float gdn_delta_f32(
 +        const float (&state)[rows], const float (&key)[rows], float decay, float value, float beta) {
@@ -434,13 +497,15 @@ diff --git a/ggml/src/ggml-cuda/gated_delta_net.cuh b/ggml/src/ggml-cuda/gated_d
 +static __device__ __forceinline__ float gdn_update_f32(float state, float key, float decay, float delta) {
 +    return decay * state + key * delta;
 +}
- 
++
  // fused-kernel recurrent-state output; strides in elements (per-seq stride is always D, set in-kernel)
  struct ggml_cuda_gated_delta_net_fused_cache {
+     float * data;        // rollback slot 0
 diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index 7536a5d2a..205394423 100644
 --- a/ggml/src/ggml-cuda/ggml-cuda.cu
 +++ b/ggml/src/ggml-cuda/ggml-cuda.cu
-@@ -2375,6 +2375,7 @@
+@@ -2378,6 +2378,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
              ggml_cuda_op_gated_linear_attn(ctx, dst);
              break;
          case GGML_OP_GATED_DELTA_NET:
@@ -448,18 +513,19 @@ diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
              ggml_cuda_op_gated_delta_net(ctx, dst);
              break;
          case GGML_OP_DSV4_HC_COMB:
-@@ -5477,6 +5478,7 @@
+@@ -5572,6 +5573,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
          case GGML_OP_RWKV_WKV7:
              return true;
          case GGML_OP_GATED_DELTA_NET:
 +        case GGML_OP_GATED_DELTA_NET_RECORD:
-             //TODO: enable once MUSA compiler is solved https://github.com/ggml-org/llama.cpp/pull/19504#issuecomment-4018634327
- #ifdef GGML_USE_MUSA
-             return false;
+             // rows-indexed state read (src[6]) not implemented on CUDA yet;
+             // reject so it falls back instead of silently reading src[5] as a scratch
+             if (op->src[6] != NULL) {
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index fa2a9c44f..cd3cacfbb 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
-@@ -1098,9 +1098,10 @@
+@@ -1114,9 +1114,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
      "OPT_STEP_SGD",
  
      "GLU",
@@ -471,7 +537,7 @@ diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
  
  static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "none",
-@@ -1213,9 +1214,10 @@
+@@ -1229,9 +1230,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
      "sgd(x)",
  
      "glu(x)",
@@ -483,7 +549,7 @@ diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
  
  static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
  
-@@ -6339,14 +6341,14 @@
+@@ -6346,14 +6348,14 @@ struct ggml_tensor * ggml_gated_delta_net(
      GGML_ASSERT(state->ne[1] == S_v);
      GGML_ASSERT(state->ne[2] == H);
      GGML_ASSERT(state->ne[3] == n_seqs);
@@ -501,9 +567,10 @@ diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
      result->src[1] = k;
      result->src[2] = v;
 diff --git a/include/llama.h b/include/llama.h
+index deb1e1282..1bc8dab9e 100644
 --- a/include/llama.h
 +++ b/include/llama.h
-@@ -268,6 +268,10 @@
+@@ -265,6 +265,10 @@ extern "C" {
          int32_t      *  n_seq_id;
          llama_seq_id ** seq_id;
          int8_t       *  logits;   // TODO: rename this to "output"
@@ -515,9 +582,10 @@ diff --git a/include/llama.h b/include/llama.h
  
      enum llama_model_kv_override_type {
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index c6df19f2e..73ea0ba1a 100644
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -63,6 +63,41 @@
+@@ -62,6 +62,41 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
  
  target_link_libraries(llama PUBLIC ggml)
  
@@ -560,9 +628,10 @@ diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
      set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
      target_compile_definitions(llama PRIVATE LLAMA_BUILD)
 diff --git a/src/llama-batch.cpp b/src/llama-batch.cpp
+index 2b98a552f..106ce11f4 100644
 --- a/src/llama-batch.cpp
 +++ b/src/llama-batch.cpp
-@@ -758,6 +758,8 @@
+@@ -758,6 +758,8 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
  
      udata->token     .resize(n_tokens);
      udata->embd      .resize(n_embd_all);
@@ -571,33 +640,34 @@ diff --git a/src/llama-batch.cpp b/src/llama-batch.cpp
      udata->pos       .resize(n_pos_all);
      udata->n_seq_id  .resize(n_tokens);
      udata->seq_id    .resize(n_tokens);
-@@ -776,6 +778,12 @@
- 
+@@ -777,6 +779,12 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
          if (batch.embd) {
              memcpy(udata->embd.data() + i*n_embd, batch.embd + (int64_t) idxs[i]*n_embd, n_embd*sizeof(float));
-+        }
+         }
 +        if (batch.embd_nextn) {
 +            memcpy(udata->embd_nextn.data() + i*n_embd, batch.embd_nextn + (int64_t) idxs[i]*n_embd, n_embd*sizeof(float));
 +        }
 +        if (batch.logical_pos) {
 +            udata->logical_pos[i] = batch.logical_pos[idxs[i]];
-         }
++        }
  
          for (size_t j = 0; j < (size_t)n_pos_per_embd; ++j) {
-@@ -833,6 +841,9 @@
-         /*.output       =*/ udata->output.data(),
+             // if we are using M-RoPE
+@@ -834,6 +842,9 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
          /*.data         =*/ std::move(udata),
      };
-+
+ 
 +    res.logical_pos = batch.logical_pos ? res.data->logical_pos.data() : nullptr;
 +    res.embd_nextn = batch.embd_nextn ? res.data->embd_nextn.data() : nullptr;
- 
++
      if (debug > 0) {
          LLAMA_LOG_DEBUG("%s: added ubatch to split:\n", __func__);
+ 
 diff --git a/src/llama-batch.h b/src/llama-batch.h
+index a3d1889d4..dcba8c198 100644
 --- a/src/llama-batch.h
 +++ b/src/llama-batch.h
-@@ -54,6 +54,8 @@
+@@ -54,6 +54,8 @@ struct llama_ubatch {
      struct data_t {
          std::vector<llama_token>    token;
          std::vector<float>          embd;
@@ -606,7 +676,7 @@ diff --git a/src/llama-batch.h b/src/llama-batch.h
          std::vector<llama_pos>      pos;
          std::vector<int32_t>        n_seq_id;
          std::vector<llama_seq_id *> seq_id;      // these point into the seq_id_data below
-@@ -66,6 +68,8 @@
+@@ -66,6 +68,8 @@ struct llama_ubatch {
  
      // the llama_ubatch pointers above point to this data if set. otherwise - point to external non-owning data
      std::shared_ptr<data_t> data;
@@ -616,10 +686,11 @@ diff --git a/src/llama-batch.h b/src/llama-batch.h
  
  // a helper for sanitizing, fulfilling and splitting a batch
 diff --git a/src/llama-context.cpp b/src/llama-context.cpp
+index cc8c004eb..bdc49ef75 100644
 --- a/src/llama-context.cpp
 +++ b/src/llama-context.cpp
-@@ -12,6 +12,9 @@
- #include "llama-ext.h"
+@@ -16,6 +16,9 @@
+ #include "llama-model.h"
  #include "llama-sampler.h"
  #include "llama.h"
 +#if defined(LLAMA_KVMEM)
@@ -628,20 +699,20 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
  
  #include <cinttypes>
  #include <cmath>
-@@ -141,6 +144,12 @@
-     cparams.cb_eval_user_data = params.cb_eval_user_data;
+@@ -218,6 +221,12 @@ llama_context::llama_context(
  
      cparams.ctx_other = nullptr;
-+
+ 
 +    // MTP draft context needs the target so KVMem can size the follower
 +    // slot-pool from the target pool instead of n_ctx.
 +    if (params.ctx_type == LLAMA_CONTEXT_TYPE_MTP) {
 +        cparams.ctx_other = params.ctx_other;
 +    }
- 
++
      // TODO: more generic
      if (model.arch == LLM_ARCH_GEMMA4_ASSISTANT) {
-@@ -1344,7 +1353,12 @@
+         if (params.ctx_other == nullptr) {
+@@ -1545,7 +1554,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
      // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
      const auto gparams = graph_params(res, ubatch, mctx, gtype);
  
@@ -655,7 +726,7 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
          //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
  
          // with pipeline parallelism, the previous graph_compute_async may still be running
-@@ -1363,6 +1377,9 @@
+@@ -1564,6 +1578,9 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
  
          //const auto t_start_us = ggml_time_us();
  
@@ -665,18 +736,19 @@ diff --git a/src/llama-context.cpp b/src/llama-context.cpp
          gf = model.build_graph(gparams);
  
          //LLAMA_LOG_INFO("graph build time: %.3f ms\n", (ggml_time_us() - t_start_us)/1000.0);
-@@ -1396,6 +1413,10 @@
-         ret = status;
+@@ -1598,6 +1615,10 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
          return nullptr;
      }
-+
+ 
 +#if defined(LLAMA_KVMEM)
 +    llama_kvmem_harvest_ubatch(sched.get(), gtype == LLM_GRAPH_TYPE_DECODER_MTP);
 +#endif
- 
++
      ret = GGML_STATUS_SUCCESS;
  
+     return res;
 diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
+index 99f263e32..a21f5ea67 100644
 --- a/src/llama-graph.cpp
 +++ b/src/llama-graph.cpp
 @@ -15,6 +15,9 @@
@@ -689,7 +761,7 @@ diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
  
  #include <cassert>
  #include <cmath>
-@@ -104,13 +107,11 @@
+@@ -150,13 +153,11 @@ void llm_graph_input_embd_h::set_input(const llama_ubatch * ubatch) {
          ggml_backend_tensor_set(embd, ubatch->embd, 0, n_tokens*n_embd*ggml_element_size(h));
      }
  
@@ -706,7 +778,7 @@ diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
      }
  }
  
-@@ -119,7 +120,7 @@
+@@ -165,7 +166,7 @@ bool llm_graph_input_embd_h::can_reuse(const llm_graph_params & params) {
  
      res &= (!params.ubatch.token) || (tokens && tokens->ne[0] == params.ubatch.n_tokens);
      res &= (!params.ubatch.embd)  || (embd   && embd->ne[1]   == params.ubatch.n_tokens);
@@ -715,7 +787,7 @@ diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
  
      return res;
  }
-@@ -1500,6 +1501,88 @@
+@@ -1535,6 +1536,88 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
      }
  }
  
@@ -805,9 +877,10 @@ diff --git a/src/llama-graph.cpp b/src/llama-graph.cpp
  
  ggml_tensor * llm_graph_context::build_cvec(
 diff --git a/src/llama-graph.h b/src/llama-graph.h
+index e85c1aa20..26e8d157a 100644
 --- a/src/llama-graph.h
 +++ b/src/llama-graph.h
-@@ -819,6 +819,7 @@
+@@ -897,6 +897,7 @@ struct llm_graph_params {
              ubatch.n_seq_tokens == other.ubatch.n_seq_tokens &&
              ubatch.n_seqs       == other.ubatch.n_seqs &&
              ubatch.n_seqs_unq   == other.ubatch.n_seqs_unq &&
@@ -815,11 +888,10 @@ diff --git a/src/llama-graph.h b/src/llama-graph.h
              (
                  (!ubatch.token && !other.ubatch.token) ||
                  (!ubatch.embd  && !other.ubatch.embd)  ||
-@@ -1039,6 +1040,15 @@
-     virtual ~llm_graph_context() = default;
+@@ -1146,6 +1147,15 @@ struct llm_graph_context {
  
      void cb(ggml_tensor * cur, const char * name, int il) const;
-+
+ 
 +    // KVMem: side-channel copies. No-ops unless LLAMA_KVMEM is enabled and
 +    // llama_kvmem_get_params()->enabled. Q is copied only when the ubatch
 +    // overlaps the retrieval query span. V is copied in prefill only with
@@ -828,13 +900,15 @@ diff --git a/src/llama-graph.h b/src/llama-graph.h
 +    void kvmem_capture_k(ggml_tensor * k_prerope, int il) const;
 +    void kvmem_capture_q(ggml_tensor * q, int il) const;
 +    void kvmem_capture_v(ggml_tensor * v, int il) const;
- 
++
      //
      // common
+     //
 diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
+index 3df5cedd0..3daff1a78 100644
 --- a/src/llama-kv-cache.cpp
 +++ b/src/llama-kv-cache.cpp
-@@ -379,6 +379,31 @@
+@@ -380,6 +380,31 @@ void llama_kv_cache::clear(bool data) {
      }
  }
  
@@ -866,18 +940,29 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
  bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
      // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
      if (other) {
-@@ -1130,8 +1155,9 @@
+@@ -1131,11 +1156,16 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch &
  
              cells.pos_set(idx, ubatch.pos[i]);
  
--            if (ubatch.is_pos_2d() || ubatch.token || hparams.ple_n_heads > 0) {
-+            if (ubatch.is_pos_2d() || ubatch.token || ubatch.logical_pos || hparams.ple_n_heads > 0) {
-                 llama_kv_cell_ext ext;
+-            if (ubatch.is_pos_2d()) {
+-                llama_kv_cell_ext ext {
+-                    /*.x =*/ ubatch.pos[i + ubatch.n_tokens*2],
+-                    /*.y =*/ ubatch.pos[i + ubatch.n_tokens],
+-                };
++            if (ubatch.is_pos_2d() || ubatch.logical_pos) {
++                llama_kv_cell_ext ext;
++
 +                ext.logical_pos = ubatch.logical_pos ? ubatch.logical_pos[i] : ubatch.pos[i];
++
++                if (ubatch.is_pos_2d()) {
++                    ext.x = ubatch.pos[i + ubatch.n_tokens*2];
++                    ext.y = ubatch.pos[i + ubatch.n_tokens];
++                }
++
+                 cells.ext_set(idx, ext);
+             }
  
-                 if (ubatch.is_pos_2d()) {
-                     ext.x = ubatch.pos[i + ubatch.n_tokens*2];
-@@ -1157,23 +1183,30 @@
+@@ -1145,23 +1175,30 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch &
          }
      }
  
@@ -888,16 +973,6 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 -        if (seq_pos_max_rm[s] == -1) {
 -            continue;
 -        }
--
--        GGML_ASSERT(s < seq_to_stream.size());
--
--        auto & cells = v_cells[seq_to_stream[s]];
--
--        if (cells.seq_pos_min(s) <= seq_pos_max_rm[s]) {
--            LLAMA_LOG_DEBUG("%s: purging positions [%d, %d] of sequence %d from KV cache\n",
--                    __func__, cells.seq_pos_min(s), seq_pos_max_rm[s], s);
--
--            seq_rm(s, cells.seq_pos_min(s), seq_pos_max_rm[s] + 1);
 +    // SWA reuses cells by sliding the window; overwriting a cell means every
 +    // position below the overwritten one is gone, so purge the gap. Non-SWA
 +    // (including KVMem's bounded slot-pool) may hold holes: resurrected blocks
@@ -911,34 +986,40 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 +            if (seq_pos_max_rm[s] == -1) {
 +                continue;
 +            }
-+
+ 
+-        GGML_ASSERT(s < seq_to_stream.size());
 +            GGML_ASSERT(s < seq_to_stream.size());
-+
+ 
+-        auto & cells = v_cells[seq_to_stream[s]];
 +            auto & cells = v_cells[seq_to_stream[s]];
-+
+ 
+-        if (cells.seq_pos_min(s) <= seq_pos_max_rm[s]) {
+-            LLAMA_LOG_DEBUG("%s: purging positions [%d, %d] of sequence %d from KV cache\n",
+-                    __func__, cells.seq_pos_min(s), seq_pos_max_rm[s], s);
 +            if (cells.seq_pos_min(s) <= seq_pos_max_rm[s]) {
 +                LLAMA_LOG_DEBUG("%s: purging positions [%d, %d] of sequence %d from KV cache\n",
 +                        __func__, cells.seq_pos_min(s), seq_pos_max_rm[s], s);
-+
+ 
+-            seq_rm(s, cells.seq_pos_min(s), seq_pos_max_rm[s] + 1);
 +                seq_rm(s, cells.seq_pos_min(s), seq_pos_max_rm[s] + 1);
 +            }
          }
      }
  
-@@ -1239,6 +1272,12 @@
-     const int32_t ikv = map_layer_ids.at(il);
- 
+@@ -1229,6 +1266,12 @@ ggml_tensor * llama_kv_cache::get_k_storage(int32_t il) const {
      return layers[ikv].k;
-+}
-+
+ }
+ 
 +ggml_tensor * llama_kv_cache::get_v_storage(int32_t il) const {
 +    const int32_t ikv = map_layer_ids.at(il);
 +
 +    return layers[ikv].v;
- }
- 
++}
++
  const llama_kv_cells & llama_kv_cache::get_cells(llama_seq_id seq_id) const {
-@@ -1610,7 +1649,16 @@
+     GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
+ 
+@@ -1792,7 +1835,16 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
  
              auto & idxs = seq_idxs[seq_id];
  
@@ -956,11 +1037,10 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
                  if (seq_srct.find(seq_id) != seq_srct.end()) {
                      const uint32_t srct = seq_srct[seq_id];
  
-@@ -1695,6 +1743,26 @@
-                 continue;
+@@ -1878,6 +1930,26 @@ static void set_input_kq_mask_impl(const args_set_input_kq_mask & args, T * data
  skip:
                  data[idst + j] = mask_drop;
-+            }
+             }
 +            if (getenv("KVMEM_TRACE") && i + 1 == ubatch->n_tokens && ubatch->n_tokens > 1) {
 +                int keep = 0;
 +                llama_pos nmin = INT32_MAX;
@@ -980,13 +1060,15 @@ diff --git a/src/llama-kv-cache.cpp b/src/llama-kv-cache.cpp
 +                        "KVMEM_TRACE mask last_pos=%d n_kv=%d keep=%d holes=%d keep_pos=[%d,%d]\n",
 +                        (int) p1, (int) n_kv, keep, (int) holes,
 +                        nmin == INT32_MAX ? -1 : (int) nmin, (int) nmax);
-             }
++            }
          }
      }
+ }
 diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
+index 4d2229b90..6922e7a94 100644
 --- a/src/llama-kv-cache.h
 +++ b/src/llama-kv-cache.h
-@@ -165,8 +165,10 @@
+@@ -163,8 +163,10 @@ public:
  
      std::vector<uint32_t> get_layer_ids() const;
      ggml_tensor * get_k_storage(int32_t il) const;
@@ -995,21 +1077,24 @@ diff --git a/src/llama-kv-cache.h b/src/llama-kv-cache.h
      const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
 +    bool seq_rm_logical(llama_seq_id seq_id, llama_pos p0, llama_pos p1);
  
-     // state_read, plus the cells the restored tokens were placed in
-     // a cache that mirrors another one (the qwen4exp indexer) must not search for its own cells: two searches agree only by luck
+     //
+     // graph_build API
 diff --git a/src/llama-kv-cells.h b/src/llama-kv-cells.h
+index fddd31a0b..fdcaf6eee 100644
 --- a/src/llama-kv-cells.h
 +++ b/src/llama-kv-cells.h
-@@ -18,6 +18,7 @@
-     // when tok = LLAMA_TOKEN_NULL when the cell is produced by embedding input (i.e. multimodal)
-     // use case: n-gram embeddings hash
-     llama_token tok = LLAMA_TOKEN_NULL;
-+    llama_pos logical_pos = -1;
+@@ -15,6 +15,8 @@ struct llama_kv_cell_ext {
+     llama_pos x = 0;
+     llama_pos y = 0;
  
++    llama_pos logical_pos = -1;
++
      // return true if the current 2D spatial position is greater than other
      bool is_2d_gt(llama_pos ox, llama_pos oy) const {
+         return (y > oy) || (y == oy && x > ox);
 diff --git a/src/llama-kvmem-factory.h b/src/llama-kvmem-factory.h
 new file mode 100644
+index 000000000..8493b3ea6
 --- /dev/null
 +++ b/src/llama-kvmem-factory.h
 @@ -0,0 +1,16 @@
@@ -1030,9 +1115,10 @@ new file mode 100644
 +        const llama_cparams & cparams);
 +#endif
 diff --git a/src/llama-memory-hybrid.cpp b/src/llama-memory-hybrid.cpp
+index 42c7381a9..35aab9ea7 100644
 --- a/src/llama-memory-hybrid.cpp
 +++ b/src/llama-memory-hybrid.cpp
-@@ -29,7 +29,8 @@
+@@ -29,7 +29,8 @@ llama_memory_hybrid::llama_memory_hybrid(
                       bool   unified,
                              /* layer filters */
      const layer_filter_cb & filter_attn,
@@ -1042,7 +1128,7 @@ diff --git a/src/llama-memory-hybrid.cpp b/src/llama-memory-hybrid.cpp
      hparams(model.hparams),
      mem_attn(new llama_kv_cache(
          model,
-@@ -61,7 +62,8 @@
+@@ -61,7 +62,8 @@ llama_memory_hybrid::llama_memory_hybrid(
          n_rs_seq,
          filter_recr == nullptr ?
              [&](int32_t il) { return hparams.is_recr(il); }
@@ -1053,9 +1139,10 @@ diff --git a/src/llama-memory-hybrid.cpp b/src/llama-memory-hybrid.cpp
  
  llama_memory_context_ptr llama_memory_hybrid::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {
 diff --git a/src/llama-memory-hybrid.h b/src/llama-memory-hybrid.h
+index 484eafb74..488c7a15e 100644
 --- a/src/llama-memory-hybrid.h
 +++ b/src/llama-memory-hybrid.h
-@@ -39,7 +39,8 @@
+@@ -39,7 +39,8 @@ public:
                       bool   unified,
                              /* layer filters */
      const layer_filter_cb & filter_attn = nullptr,
@@ -1066,9 +1153,10 @@ diff --git a/src/llama-memory-hybrid.h b/src/llama-memory-hybrid.h
      ~llama_memory_hybrid() = default;
  
 diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
+index e2990972e..82a0ef87f 100644
 --- a/src/llama-memory-recurrent.cpp
 +++ b/src/llama-memory-recurrent.cpp
-@@ -25,14 +25,19 @@
+@@ -25,14 +25,19 @@ llama_memory_recurrent::llama_memory_recurrent(
                   uint32_t   mem_size,
                   uint32_t   n_seq_max,
                   uint32_t   n_rs_seq,
@@ -1090,24 +1178,25 @@ diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
      rs_idx.assign(n_seq_max, 0);
  
      cells.clear();
-@@ -52,7 +57,7 @@
+@@ -51,7 +56,8 @@ llama_memory_recurrent::llama_memory_recurrent(
+         auto it = ctx_map.find(buft);
          if (it == ctx_map.end()) {
              ggml_init_params params = {
-                 // r and s per layer, plus the separate PLE conv row where the model has one
--                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer*ggml_tensor_overhead()),
-+                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u) + (replay ? REPLAY_COUNT : 0))*n_layer*ggml_tensor_overhead(),
+-                /*.mem_size   =*/ size_t(2u*n_layer*ggml_tensor_overhead()),
++                // r and s per layer, plus the replay scratch tensors
++                /*.mem_size   =*/ size_t((2u + (replay ? REPLAY_COUNT : 0))*n_layer*ggml_tensor_overhead()),
                  /*.mem_buffer =*/ NULL,
                  /*.no_alloc   =*/ true,
              };
-@@ -73,6 +78,7 @@
+@@ -71,6 +77,7 @@ llama_memory_recurrent::llama_memory_recurrent(
+ 
      r_l.resize(n_layer);
      s_l.resize(n_layer);
-     p_l.resize(n_layer);
 +    replay_l.resize(n_layer, {});
  
      for (int i = 0; i < n_layer; i++) {
          if (filter && !filter(i)) {
-@@ -98,7 +104,7 @@
+@@ -96,13 +103,22 @@ llama_memory_recurrent::llama_memory_recurrent(
              throw std::runtime_error("failed to create ggml context for rs cache");
          }
  
@@ -1116,10 +1205,10 @@ diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
          ggml_tensor * r = ggml_new_tensor_2d(ctx, type_r, hparams.n_embd_r(), n_rows);
          ggml_tensor * s = ggml_new_tensor_2d(ctx, type_s, hparams.n_embd_s(), n_rows);
          ggml_format_name(r, "cache_r_l%d", i);
-@@ -106,6 +112,15 @@
+         ggml_format_name(s, "cache_s_l%d", i);
          r_l[i] = r;
          s_l[i] = s;
- 
++
 +        if (replay) {
 +            const int64_t widths[REPLAY_COUNT] = {2048, 6144, 48, 48, 10240};
 +            for (int j = 0; j < REPLAY_COUNT; ++j) {
@@ -1128,20 +1217,18 @@ diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
 +                replay_l[i][j] = record;
 +            }
 +        }
-+
-         // the PLE history needs its own row: Meta must mirror it while the delta-net conv state next door stays split
-         if (hparams.ple_conv_state() > 0 && hparams.is_ple(i)) {
-             ggml_tensor * p = ggml_new_tensor_2d(ctx, type_r, hparams.ple_conv_state(), n_rows);
-@@ -131,7 +146,7 @@
-         const size_t memory_size_p = size_p_bytes();
+     }
  
-         LLAMA_LOG_INFO("%s: size = %7.2f MiB (%6u cells, %3d layers, %2u seqs %2u rs_seq), R (%s): %7.2f MiB, S (%s): %7.2f MiB, P (%s): %7.2f MiB\n", __func__,
--                (float)(memory_size_r + memory_size_s + memory_size_p) / (1024.0f * 1024.0f), mem_size, n_layer, n_seq_max, n_rs_seq,
-+                (float)(memory_size_r + memory_size_s + memory_size_p) / (1024.0f * 1024.0f), mem_size, n_layer, n_seq_max, this->n_rs_seq,
+     // allocate tensors and initialize the buffers to avoid NaNs in the padding
+@@ -121,13 +137,16 @@ llama_memory_recurrent::llama_memory_recurrent(
+         const size_t memory_size_s = size_s_bytes();
+ 
+         LLAMA_LOG_INFO("%s: size = %7.2f MiB (%6u cells, %3d layers, %2u seqs %2u rs_seq), R (%s): %7.2f MiB, S (%s): %7.2f MiB\n", __func__,
+-                (float)(memory_size_r + memory_size_s) / (1024.0f * 1024.0f), mem_size, n_layer, n_seq_max, n_rs_seq,
++                (float)(memory_size_r + memory_size_s) / (1024.0f * 1024.0f), mem_size, n_layer, n_seq_max, this->n_rs_seq,
                  ggml_type_name(type_r), (float)memory_size_r / (1024.0f * 1024.0f),
-                 ggml_type_name(type_s), (float)memory_size_s / (1024.0f * 1024.0f),
-                 ggml_type_name(type_r), (float)memory_size_p / (1024.0f * 1024.0f));
-@@ -139,6 +154,9 @@
+                 ggml_type_name(type_s), (float)memory_size_s / (1024.0f * 1024.0f));
+     }
  }
  
  void llama_memory_recurrent::clear(bool data) {
@@ -1151,7 +1238,7 @@ diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
      for (int32_t i = 0; i < (int32_t) size; ++i) {
          cells[i].pos = -1;
          cells[i].seq_id.clear();
-@@ -479,6 +497,12 @@
+@@ -468,6 +487,12 @@ llama_memory_context_ptr llama_memory_recurrent::init_update(llama_context * lct
  }
  
  bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches) {
@@ -1164,7 +1251,7 @@ diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
      // simply remember the full state because it is very small for this type of cache
      // TODO: optimize
      auto org_cells = cells;
-@@ -765,6 +789,9 @@
+@@ -742,6 +767,9 @@ size_t llama_memory_recurrent::size_s_bytes() const {
  
  void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
      GGML_UNUSED(flags);
@@ -1174,7 +1261,7 @@ diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
  
      std::vector<std::pair<uint32_t, uint32_t>> cell_ranges; // ranges, from inclusive, to exclusive
      std::vector<std::pair<uint32_t, uint32_t>> cell_ranges_data; // logical source row ranges
-@@ -846,6 +873,9 @@
+@@ -823,6 +851,9 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
  
  void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
      GGML_UNUSED(flags);
@@ -1184,7 +1271,7 @@ diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
  
      uint32_t cell_count;
      io.read(&cell_count, sizeof(cell_count));
-@@ -873,6 +903,7 @@
+@@ -850,6 +881,7 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
      if (n_rs_seq != 0) {
          set_rs_idx(seq_id, 0);
      }
@@ -1192,7 +1279,7 @@ diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
  }
  
  void llama_memory_recurrent::state_write_meta(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges, llama_seq_id seq_id) const {
-@@ -1291,6 +1322,48 @@
+@@ -1243,6 +1275,48 @@ uint32_t llama_memory_recurrent_context::get_size() const {
      return mem->size;
  }
  
@@ -1242,6 +1329,7 @@ diff --git a/src/llama-memory-recurrent.cpp b/src/llama-memory-recurrent.cpp
      return mem->r_l[il];
  }
 diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
+index b13b7b748..fbd8ee188 100644
 --- a/src/llama-memory-recurrent.h
 +++ b/src/llama-memory-recurrent.h
 @@ -5,6 +5,7 @@
@@ -1252,7 +1340,7 @@ diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
  #include <set>
  #include <vector>
  
-@@ -24,7 +25,8 @@
+@@ -24,7 +25,8 @@ public:
                       uint32_t   mem_size,
                       uint32_t   n_seq_max,
                       uint32_t   n_rs_seq,
@@ -1262,11 +1350,10 @@ diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
  
      ~llama_memory_recurrent() = default;
  
-@@ -72,6 +74,14 @@
- 
+@@ -73,6 +75,14 @@ public:
      // number of recurrent-state snapshots per seq for rollback; tensors are widened to (1 + n_rs_seq) groups
      uint32_t n_rs_seq = 0;
-+
+ 
 +    enum replay_kind { REPLAY_K, REPLAY_V, REPLAY_G, REPLAY_B, REPLAY_CONV, REPLAY_COUNT };
 +    uint32_t replay_capacity = 0;
 +    bool replay_recording = false;
@@ -1274,10 +1361,11 @@ diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
 +    std::vector<std::array<ggml_tensor *, REPLAY_COUNT>> replay_l;
 +    bool replay_begin(llama_pos start, uint32_t width);
 +    void replay_finish(uint32_t n_keep);
- 
++
      // per-seq rollback index
      std::vector<uint32_t> rs_idx;
-@@ -108,6 +118,11 @@
+ 
+@@ -108,6 +118,11 @@ public:
  
      std::vector<mem_cell> cells;
  
@@ -1289,7 +1377,7 @@ diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
      // per layer
      std::vector<ggml_tensor *> r_l;
      std::vector<ggml_tensor *> s_l;
-@@ -170,6 +185,9 @@
+@@ -167,6 +182,9 @@ public:
      uint32_t get_head() const;
      int32_t  get_rs_z() const;
      uint32_t get_size() const;
@@ -1300,17 +1388,18 @@ diff --git a/src/llama-memory-recurrent.h b/src/llama-memory-recurrent.h
      ggml_tensor * get_r_l(int32_t il) const;
      ggml_tensor * get_s_l(int32_t il) const;
 diff --git a/src/llama-model.cpp b/src/llama-model.cpp
+index 191d025e2..5c2899388 100644
 --- a/src/llama-model.cpp
 +++ b/src/llama-model.cpp
-@@ -18,6 +18,7 @@
+@@ -17,6 +17,7 @@
+ #include "llama-memory-hybrid.h"
  #include "llama-memory-hybrid-iswa.h"
- #include "llama-memory-hybrid-idx.h"
  #include "llama-memory-recurrent.h"
 +#include "llama-kvmem-factory.h"
  
  #include "llama.h"
  #include "models/models.h"
-@@ -2213,6 +2214,12 @@
+@@ -2498,6 +2499,12 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
  llama_memory_i * llama_model::create_memory(const llama_memory_params & params, const llama_cparams & cparams) const {
      llama_memory_i * res;
  
@@ -1324,9 +1413,10 @@ diff --git a/src/llama-model.cpp b/src/llama-model.cpp
          // Models that need specific instantiation should be handled in the
          // switch statement
 diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
+index ae67400c6..03247efe6 100644
 --- a/src/models/delta-net-base.cpp
 +++ b/src/models/delta-net-base.cpp
-@@ -460,6 +460,13 @@
+@@ -465,6 +465,13 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
  
      const int64_t n_seqs = ubatch.n_seqs;
  
@@ -1340,7 +1430,7 @@ diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
      ggml_tensor * conv_states = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
      cb(conv_states, "conv_states", il);
  
-@@ -476,7 +483,11 @@
+@@ -481,7 +488,11 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
  
      const size_t row_size  = ggml_row_size(conv_states_all->type, row_count);
  
@@ -1353,16 +1443,16 @@ diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
          const int64_t s_idx  = conv_input->ne[0] - conv_states->ne[0];
          const int64_t s_slot = 0;
  
-@@ -543,7 +554,7 @@
-     const int64_t n_seqs       = s->ne[3];
+@@ -551,7 +562,7 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+     const int64_t n_seqs       = v->ne[3];
      const int64_t n_seq_tokens = q->ne[2];
  
 -    const bool keep = cparams.n_rs_seq > 0;
 +    const bool keep = cparams.n_rs_seq > 0 || mctx_cur->has_replay();
  
-     if (!keep) {
-         auto attn_out = build_delta_net(q, k, v, g, b, s, il);
-@@ -561,13 +572,23 @@
+     GGML_ASSERT(state_rows == nullptr || keep); // rows mode is a ring-path optimization
+ 
+@@ -571,7 +582,17 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
      }
  
      const int64_t D = S_v * S_v * H_v;
@@ -1379,8 +1469,12 @@ diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
 +        }
 +    }
  
-     // state s is 4D [S_v, S_v, H_v, n_seqs]; K snapshot slots are written into the output.
-     ggml_tensor * gdn_out = ggml_gated_delta_net(ctx0, q, k, v, g, b, s, K);
+     const bool raw = gdn_raw_beta && gdn_raw_alpha && gdn_raw_dt_bias && gdn_raw_a;
+     ggml_tensor * gg = raw ? gdn_raw_alpha : g;
+@@ -589,9 +610,9 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
+     if (raw) {
+         ggml_gated_delta_net_set_raw_gates(gdn_out, gdn_raw_dt_bias, gdn_raw_a);
+     }
 -    if (n_seq_tokens > 1) {
 +    if (K > 0 && n_seq_tokens > 1) {
          res->add_fused_node({LLM_FUSED_OP_GDN_CH, gdn_out, il});
@@ -1389,7 +1483,7 @@ diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
          res->add_fused_node({LLM_FUSED_OP_GDN_AR, gdn_out, il});
      }
  
-@@ -582,6 +603,8 @@
+@@ -606,6 +627,8 @@ ggml_tensor * llm_build_delta_net_base::build_recurrent_attn(
          0);
      cb(output, "attn_output", il);
  
@@ -1399,9 +1493,10 @@ diff --git a/src/models/delta-net-base.cpp b/src/models/delta-net-base.cpp
  
      // op writes the last min(n_seq_tokens, K) snapshots; trailing slots are left unwritten
 diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
+index f4b2a2aeb..d75c2db19 100644
 --- a/src/models/qwen3.cpp
 +++ b/src/models/qwen3.cpp
-@@ -88,6 +88,7 @@
+@@ -88,6 +88,7 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
              Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
              cb(Qcur, "Qcur_normed", il);
  
@@ -1409,7 +1504,7 @@ diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
              Qcur = ggml_rope_ext(
                      ctx0, Qcur, inp_pos, nullptr,
                      n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-@@ -97,6 +98,7 @@
+@@ -97,6 +98,7 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
              Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
              cb(Kcur, "Kcur_normed", il);
  
@@ -1417,7 +1512,7 @@ diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
              Kcur = ggml_rope_ext(
                      ctx0, Kcur, inp_pos, nullptr,
                      n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-@@ -106,6 +108,7 @@
+@@ -106,6 +108,7 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
              cb(Qcur, "Qcur", il);
              cb(Kcur, "Kcur", il);
              cb(Vcur, "Vcur", il);
@@ -1426,9 +1521,10 @@ diff --git a/src/models/qwen3.cpp b/src/models/qwen3.cpp
              cur = build_attn(inp_attn,
                      model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
 diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
+index c5f816e96..5e0341bb9 100644
 --- a/src/models/qwen35.cpp
 +++ b/src/models/qwen35.cpp
-@@ -275,6 +275,8 @@
+@@ -343,6 +343,8 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
      Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, nullptr, LLM_NORM_RMS, il);
      cb(Qcur, "Qcur_normed", il);
  
@@ -1437,16 +1533,16 @@ diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
      ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur, model.layers[il].wk_s);
      cb(Kcur, "Kcur", il);
  
-@@ -285,6 +287,8 @@
-     Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
+@@ -354,6 +356,8 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
      Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, nullptr, LLM_NORM_RMS, il);
      cb(Kcur, "Kcur_normed", il);
-+
-+    kvmem_capture_k(Kcur, il);
  
++    kvmem_capture_k(Kcur, il);
++
      ggml_tensor * gate = ggml_view_3d(ctx0, Qcur_full, n_embd_head, n_head, n_tokens,
          ggml_element_size(Qcur_full) * n_embd_head * 2,
-@@ -311,6 +315,7 @@
+         ggml_element_size(Qcur_full) * n_embd_head * 2 * n_head,
+@@ -379,6 +383,7 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn(
      cb(Qcur, "Qcur", il);
      cb(Kcur, "Kcur", il);
      cb(Vcur, "Vcur", il);
@@ -1454,7 +1550,7 @@ diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
  
      // Attention computation
      const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
-@@ -576,10 +581,12 @@
+@@ -692,10 +697,12 @@ llama_model_qwen35::graph_mtp::graph_mtp(const llama_model & model, const llm_gr
      Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
      Kcur = build_norm(Kcur, layer.attn_k_norm, nullptr, LLM_NORM_RMS, il);
      cb(Kcur, "mtp_Kcur_normed", il);
@@ -1468,9 +1564,10 @@ diff --git a/src/models/qwen35.cpp b/src/models/qwen35.cpp
      Qcur = ggml_rope_multi(ctx0, Qcur, inp_pos, nullptr,
              n_rot, sections, rope_type, n_ctx_orig, freq_base, freq_scale,
 diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
+index b28bc29ef..4191a3815 100644
 --- a/tests/test-backend-ops.cpp
 +++ b/tests/test-backend-ops.cpp
-@@ -10793,6 +10793,9 @@
+@@ -10625,6 +10625,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
      test_cases.emplace_back(new test_acc(GGML_TYPE_F32, {256, 17, 2, 3}, {64, 16, 2, 3}, 3));
  
      // GATED_DELTA_NET: realistic model configurations
@@ -1481,9 +1578,10 @@ diff --git a/tests/test-backend-ops.cpp b/tests/test-backend-ops.cpp
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 32, 128, 1, 1));   // Qwen3.5-like: 32 heads, d=128
      test_cases.emplace_back(new test_gated_delta_net(GGML_TYPE_F32, 16, 64,  1, 1));   // smaller model
 diff --git a/tools/mtmd/mtmd-helper.cpp b/tools/mtmd/mtmd-helper.cpp
+index f1defb647..0753e4931 100644
 --- a/tools/mtmd/mtmd-helper.cpp
 +++ b/tools/mtmd/mtmd-helper.cpp
-@@ -115,7 +115,7 @@
+@@ -115,7 +115,7 @@ private:
  };
  
  // Helper function for decoding an image whose embeddings have already been calculated
@@ -1492,7 +1590,7 @@ diff --git a/tools/mtmd/mtmd-helper.cpp b/tools/mtmd/mtmd-helper.cpp
          mtmd_context * ctx,
          struct llama_context * lctx,
          const mtmd_input_chunk * chunk,
-@@ -125,7 +125,7 @@
+@@ -125,7 +125,7 @@ int32_t mtmd_helper_decode_image_chunk(
          int32_t n_batch,
          llama_pos * new_n_past,
          mtmd_helper_post_decode_callback callback,
@@ -1501,7 +1599,7 @@ diff --git a/tools/mtmd/mtmd-helper.cpp b/tools/mtmd/mtmd-helper.cpp
      GGML_ASSERT(n_batch > 0);
      auto chunk_type = mtmd_input_chunk_get_type(chunk);
      const char * name = chunk_type == MTMD_INPUT_CHUNK_TYPE_IMAGE ? "image" : "audio";
-@@ -174,7 +174,7 @@
+@@ -174,7 +174,7 @@ int32_t mtmd_helper_decode_image_chunk(
          LOG_INF("decoding %s batch %d/%d, n_tokens_batch = %d\n", name, i_batch+1, n_img_batches, n_tokens_batch);
  
          int64_t t1 = ggml_time_ms();
@@ -1510,25 +1608,26 @@ diff --git a/tools/mtmd/mtmd-helper.cpp b/tools/mtmd/mtmd-helper.cpp
          if (ret != 0) {
              LOG_ERR("failed to decode %s\n", name);
              return ret;
-@@ -197,6 +197,14 @@
-     *new_n_past = n_past;
- 
+@@ -199,6 +199,14 @@ int32_t mtmd_helper_decode_image_chunk(
      return 0;
-+}
-+
+ }
+ 
 +int32_t mtmd_helper_decode_image_chunk(
 +        mtmd_context * ctx, llama_context * lctx, const mtmd_input_chunk * chunk,
 +        float * encoded_embd, llama_pos n_past, llama_seq_id seq_id, int32_t n_batch,
 +        llama_pos * new_n_past, mtmd_helper_post_decode_callback callback, void * user_data) {
 +    return mtmd_helper_decode_image_chunk_with_decoder(ctx, lctx, chunk, encoded_embd,
 +            n_past, seq_id, n_batch, new_n_past, callback, user_data, nullptr);
- }
- 
++}
++
  int32_t mtmd_helper_eval_chunk_single(mtmd_context * ctx,
+         struct llama_context * lctx,
+         const mtmd_input_chunk * chunk,
 diff --git a/tools/mtmd/mtmd-helper.h b/tools/mtmd/mtmd-helper.h
+index 58dfb1525..164d73894 100644
 --- a/tools/mtmd/mtmd-helper.h
 +++ b/tools/mtmd/mtmd-helper.h
-@@ -133,6 +133,14 @@
+@@ -108,6 +108,14 @@ MTMD_API int32_t mtmd_helper_decode_image_chunk(mtmd_context * ctx,
                                                  mtmd_helper_post_decode_callback callback,
                                                  void * user_data);
  
@@ -1544,190 +1643,137 @@ diff --git a/tools/mtmd/mtmd-helper.h b/tools/mtmd/mtmd-helper.h
  // video input helpers (requires ffmpeg/ffprobe installed on the system)
  // the notion of video only exists at the helper level, it is not visible to the core mtmd library
 diff --git a/tools/server/server-common.cpp b/tools/server/server-common.cpp
+index 4f5b8202a..935728cde 100644
 --- a/tools/server/server-common.cpp
 +++ b/tools/server/server-common.cpp
-@@ -1129,6 +1129,90 @@
+@@ -1124,57 +1124,8 @@ static void handle_media(
      }
  }
  
+-// used by /chat/completions endpoint
+-json oaicompat_chat_params_parse(
+-    json & body, /* openai api json semantics */
+-    const server_chat_params & opt,
+-    std::vector<raw_buffer> & out_files)
+-{
+-    json llama_params;
+-
+-    auto tools = json_value(body, "tools", json());
+-    auto has_tools = tools.is_array() && !tools.empty();
+-    auto stream = json_value(body, "stream", false);
+-    auto tool_choice = json_value(body, "tool_choice", std::string("auto"));
+-
+-    if (!opt.use_jinja) {
+-        if (has_tools) {
+-            throw std::runtime_error("tools param requires --jinja flag");
+-        }
+-        if (tool_choice != "auto") {
+-            throw std::runtime_error("tool_choice param requires --jinja flag");
+-        }
+-    }
+-
+-    // Handle "stop" field
+-    if (body.contains("stop") && body.at("stop").is_string()) {
+-        llama_params["stop"] = json::array({body.at("stop").get<std::string>()});
+-    } else {
+-        llama_params["stop"] = json_value(body, "stop", json::array());
+-    }
+-
+-    auto json_schema = json_value(body, "json_schema", json());
+-    auto grammar = json_value(body, "grammar", std::string());
+-    if (!json_schema.is_null() && !grammar.empty()) {
+-        throw std::runtime_error("Cannot use both json_schema and grammar");
+-    }
+-
+-    // Handle "response_format" field
+-    if (body.contains("response_format")) {
+-        json response_format      = json_value(body, "response_format", json::object());
+-        std::string response_type = json_value(response_format, "type", std::string());
+-        if (response_type == "json_object") {
+-            if (response_format.contains("schema") || json_schema.empty()) {
+-                json_schema = json_value(response_format, "schema", json::object());
+-            }
+-        } else if (response_type == "json_schema") {
+-            auto schema_wrapper = json_value(response_format, "json_schema", json::object());
+-            json_schema = json_value(schema_wrapper, "schema", json::object());
+-        } else if (!response_type.empty() && response_type != "text") {
+-            throw std::invalid_argument("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
+-        }
+-    }
+-
 +void oaicompat_chat_process_media(json & body, const server_chat_params & opt,
 +                                 std::vector<raw_buffer> & out_files) {
-+    // get input files
-+    if (!body.contains("messages")) {
-+        throw std::invalid_argument("'messages' is required");
-+    }
-+    json & messages = body.at("messages");
-+    if (!messages.is_array()) {
-+        throw std::invalid_argument("Expected 'messages' to be an array");
-+    }
-+    for (auto & msg : messages) {
-+        std::string role = json_value(msg, "role", std::string());
-+        if (role != "assistant" && !msg.contains("content")) {
-+            throw std::invalid_argument("All non-assistant messages must contain 'content'");
-+        }
-+        if (role == "assistant") {
-+            if (!msg.contains("content") && !msg.contains("tool_calls")) {
-+                throw std::invalid_argument("Assistant message must contain either 'content' or 'tool_calls'!");
-+            }
-+            if (!msg.contains("content")) {
-+                continue; // avoid errors with no content
-+            }
-+        }
-+        json & content = msg.at("content");
-+        if (content.is_string() || content.is_null()) {
-+            continue;
-+        }
-+
-+        if (!content.is_array()) {
-+            throw std::invalid_argument("Expected 'content' to be a string or an array");
-+        }
-+
-+        for (auto & p : content) {
-+            std::string type = json_value(p, "type", std::string());
-+            if (type == "image_url") {
-+                if (!opt.allow_image) {
-+                    throw std::runtime_error("image input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
-+                }
-+
-+                json image_url = json_value(p, "image_url", json::object());
-+                std::string url = json_value(image_url, "url", std::string());
-+                handle_media(out_files, url, opt.media_path, true);
-+
-+                p["type"] = "media_marker";
-+                p["text"] = get_media_marker();
-+                p.erase("image_url");
-+
-+            } else if (type == "input_audio") {
-+                if (!opt.allow_audio) {
-+                    throw std::runtime_error("audio input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
-+                }
-+
-+                // note: don't need to validate "format", it's redundant
-+                json input_audio = json_value(p, "input_audio", json::object());
-+                std::string url  = json_value(input_audio, "data",
-+                                        json_value(input_audio, "url", std::string()));
-+                handle_media(out_files, url, opt.media_path, false);
-+
-+                p["type"] = "media_marker";
-+                p["text"] = get_media_marker();
-+                p.erase("input_audio");
-+
-+            } else if (type == "input_video") {
-+                if (!opt.allow_video) {
-+                    throw std::runtime_error("video input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
-+                }
-+
-+                json input_video = json_value(p, "input_video", json::object());
-+                std::string url  = json_value(input_video, "data",
-+                                        json_value(input_video, "url", std::string()));
-+                handle_media(out_files, url, opt.media_path, false);
-+
-+                p["type"] = "media_marker";
-+                p["text"] = get_media_marker();
-+                p.erase("input_video");
-+
-+            } else if (type != "text") {
-+                throw std::invalid_argument("unsupported content[].type");
-+            }
-+        }
-+    }
-+
-+}
-+
- // used by /chat/completions endpoint
- json oaicompat_chat_params_parse(
-     json & body, /* openai api json semantics */
-@@ -1180,85 +1264,8 @@
+     // get input files
+     if (!body.contains("messages")) {
+         throw std::invalid_argument("'messages' is required");
+@@ -1255,6 +1206,62 @@ json oaicompat_chat_params_parse(
          }
      }
  
--    // get input files
--    if (!body.contains("messages")) {
--        throw std::invalid_argument("'messages' is required");
--    }
++}
++
++// used by /chat/completions endpoint
++json oaicompat_chat_params_parse(
++    json & body, /* openai api json semantics */
++    const server_chat_params & opt,
++    std::vector<raw_buffer> & out_files)
++{
++    json llama_params;
++
++    auto tools = json_value(body, "tools", json());
++    auto has_tools = tools.is_array() && !tools.empty();
++    auto stream = json_value(body, "stream", false);
++    auto tool_choice = json_value(body, "tool_choice", std::string("auto"));
++
++    if (!opt.use_jinja) {
++        if (has_tools) {
++            throw std::runtime_error("tools param requires --jinja flag");
++        }
++        if (tool_choice != "auto") {
++            throw std::runtime_error("tool_choice param requires --jinja flag");
++        }
++    }
++
++    // Handle "stop" field
++    if (body.contains("stop") && body.at("stop").is_string()) {
++        llama_params["stop"] = json::array({body.at("stop").get<std::string>()});
++    } else {
++        llama_params["stop"] = json_value(body, "stop", json::array());
++    }
++
++    auto json_schema = json_value(body, "json_schema", json());
++    auto grammar = json_value(body, "grammar", std::string());
++    if (!json_schema.is_null() && !grammar.empty()) {
++        throw std::runtime_error("Cannot use both json_schema and grammar");
++    }
++
++    // Handle "response_format" field
++    if (body.contains("response_format")) {
++        json response_format      = json_value(body, "response_format", json::object());
++        std::string response_type = json_value(response_format, "type", std::string());
++        if (response_type == "json_object") {
++            if (response_format.contains("schema") || json_schema.empty()) {
++                json_schema = json_value(response_format, "schema", json::object());
++            }
++        } else if (response_type == "json_schema") {
++            auto schema_wrapper = json_value(response_format, "json_schema", json::object());
++            json_schema = json_value(schema_wrapper, "schema", json::object());
++        } else if (!response_type.empty() && response_type != "text") {
++            throw std::invalid_argument("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
++        }
++    }
++
 +    oaicompat_chat_process_media(body, opt, out_files);
-     json & messages = body.at("messages");
--    if (!messages.is_array()) {
--        throw std::invalid_argument("Expected 'messages' to be an array");
--    }
--    for (auto & msg : messages) {
--        std::string role = json_value(msg, "role", std::string());
--        if (role != "assistant" && !msg.contains("content")) {
--            throw std::invalid_argument("All non-assistant messages must contain 'content'");
--        }
--        if (role == "assistant") {
--            if (!msg.contains("content") && !msg.contains("tool_calls")) {
--                throw std::invalid_argument("Assistant message must contain either 'content' or 'tool_calls'!");
--            }
--            if (!msg.contains("content")) {
--                continue; // avoid errors with no content
--            }
--        }
--        json & content = msg.at("content");
--        if (content.is_string() || content.is_null()) {
--            continue;
--        }
--
--        if (!content.is_array()) {
--            throw std::invalid_argument("Expected 'content' to be a string or an array");
--        }
--
--        for (auto & p : content) {
--            std::string type = json_value(p, "type", std::string());
--            if (type == "image_url") {
--                if (!opt.allow_image) {
--                    throw std::runtime_error("image input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
--                }
--
--                json image_url = json_value(p, "image_url", json::object());
--                std::string url = json_value(image_url, "url", std::string());
--                handle_media(out_files, url, opt.media_path, true);
--
--                p["type"] = "media_marker";
--                p["text"] = get_media_marker();
--                p.erase("image_url");
--
--            } else if (type == "input_audio") {
--                if (!opt.allow_audio) {
--                    throw std::runtime_error("audio input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
--                }
--
--                // note: don't need to validate "format", it's redundant
--                json input_audio = json_value(p, "input_audio", json::object());
--                std::string url  = json_value(input_audio, "data",
--                                        json_value(input_audio, "url", std::string()));
--                handle_media(out_files, url, opt.media_path, false);
--
--                p["type"] = "media_marker";
--                p["text"] = get_media_marker();
--                p.erase("input_audio");
--
--            } else if (type == "input_video") {
--                if (!opt.allow_video) {
--                    throw std::runtime_error("video input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
--                }
--
--                json input_video = json_value(p, "input_video", json::object());
--                std::string url  = json_value(input_video, "data",
--                                        json_value(input_video, "url", std::string()));
--                handle_media(out_files, url, opt.media_path, false);
--
--                p["type"] = "media_marker";
--                p["text"] = get_media_marker();
--                p.erase("input_video");
--
--            } else if (type != "text") {
--                throw std::invalid_argument("unsupported content[].type");
--            }
--        }
--    }
- 
++    json & messages = body.at("messages");
++
      auto caps = common_chat_templates_get_caps(opt.tmpls.get());
  
+     common_chat_templates_inputs inputs;
 diff --git a/tools/server/server-common.h b/tools/server/server-common.h
+index f8ea82ef4..c0bfad902 100644
 --- a/tools/server/server-common.h
 +++ b/tools/server/server-common.h
-@@ -323,6 +323,9 @@
+@@ -316,6 +316,9 @@ struct server_chat_params {
  json oaicompat_completion_params_parse(const json & body);
  
  // used by /chat/completions endpoint
@@ -1737,53 +1783,3 @@ diff --git a/tools/server/server-common.h b/tools/server/server-common.h
  json oaicompat_chat_params_parse(
      json & body, /* openai api json semantics */
      const server_chat_params & opt,
-diff --git a/common/reasoning-budget.cpp b/common/reasoning-budget.cpp
---- a/common/reasoning-budget.cpp
-+++ b/common/reasoning-budget.cpp
-@@ -185,6 +185,21 @@
-     }
- }
- 
-+void common_reasoning_budget_accept_prefill(struct llama_sampler * smpl, llama_token token) {
-+    auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
-+    if (ctx->state != REASONING_BUDGET_FORCING) {
-+        common_reasoning_budget_accept(smpl, token);
-+        return;
-+    }
-+    // A prompt can contain whitespace or continued reasoning after the budget
-+    // is exhausted. Only an actual end tag closes it; output forcing is pending.
-+    const int32_t match = ctx->end_matcher.advance(token);
-+    if (match >= 0) {
-+        ctx->state = REASONING_BUDGET_DONE;
-+        ctx->end_match = match;
-+    }
-+}
-+
- static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
-     auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
-     ctx->state = REASONING_BUDGET_IDLE;
-diff --git a/common/reasoning-budget.h b/common/reasoning-budget.h
---- a/common/reasoning-budget.h
-+++ b/common/reasoning-budget.h
-@@ -43,6 +43,9 @@
- 
- common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl);
- 
-+// Read prompt tokens without consuming the forced output sequence.
-+void common_reasoning_budget_accept_prefill(struct llama_sampler * smpl, llama_token token);
-+
- // The end sequence that transitioned the sampler to DONE, or nullptr if none
- // was recorded. Cleared when a new start sequence re-arms the sampler.
- const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl);
-diff --git a/common/sampling.cpp b/common/sampling.cpp
---- a/common/sampling.cpp
-+++ b/common/sampling.cpp
-@@ -317,7 +317,7 @@
-             params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
- 
-         for (const auto & token : prefill_tokens) {
--            llama_sampler_accept(rbudget, token);
-+            common_reasoning_budget_accept_prefill(rbudget, token);
-             LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
-         }
-     }

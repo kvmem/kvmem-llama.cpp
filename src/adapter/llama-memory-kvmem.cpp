@@ -525,8 +525,7 @@ llama_memory_kvmem::llama_memory_kvmem(
                 nullptr,
                 nullptr,
                 nullptr,
-                nullptr,
-                "kvmem");
+                nullptr);
         kv_ = kv_owned_.get();
     }
 

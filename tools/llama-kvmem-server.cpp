@@ -139,6 +139,15 @@ static void print_usage(const char * argv0) {
             "  --reasoning-budget N       thinking token budget: -1 unlimited, 0 end immediately,\n"
             "                            N>0 force </think> after N think tokens (default -1)\n"
             "  --reasoning-budget-message MSG  injected before forced </think> (default none)\n"
+            "  --auto-continue-thinking   when thinking hits the output limit, keep the chain in\n"
+            "                            context and start another round (default off)\n"
+            "  --act-max-rounds N         safety cap on continuation rounds (default 8)\n"
+            "  --act-round-tokens N       per-round token budget; 0 = request max_tokens (default 0)\n"
+            "  --act-total-tokens N       total token budget across rounds; 0 = unlimited\n"
+            "  --act-continue-cue STR     text injected between rounds (default \"\\n\")\n"
+            "  --act-prefill-mode MODE    how a continuation round re-ingests the chain:\n"
+            "                            auto | legacy | restart (default auto)\n"
+            "  --act-think-end STR        thinking end tag (default </think>)\n"
             "  --webui                    serve bundled chat UI (default on)\n",
             argv0);
 }
@@ -210,6 +219,48 @@ struct MultimodalQuery {
     llama_kvmem_query_state state;
 };
 
+// ---- auto-continue-thinking (ACT) ------------------------------------------
+// When one generation hits its output limit while the model is still inside a
+// thinking block, keep the chain in context and start another round instead of
+// cutting the answer short. Required because KVMem caps a single generation at
+// --kvmem-gen-reserve (thinking included), so a long chain must be split.
+struct kvmem_act_params {
+    bool        enabled      = false;
+    int         max_rounds   = 8;    // hard safety valve
+    int         round_tokens = 0;    // per-round budget; 0 = request max_tokens
+    int         total_tokens = 0;    // total budget; 0 = unlimited
+    std::string cue          = "\n"; // injected between rounds (keeps LCP reuse cheap)
+    std::string think_start  = "<think>";
+    std::string think_end    = "</think>";
+    bool        thinking_on  = true; // per-request: is thinking enabled at all
+    // how a continuation round re-ingests the chain:
+    //   auto    - advance the prompt view so the "user" query policy sees it
+    //   legacy  - force the non-multimodal prefill path for continuation rounds
+    //   restart - drop the GPU window and re-evaluate the whole prompt
+    std::string prefill_mode = "auto";
+};
+
+// true while the model is still inside its thinking block.
+// NOTE: the opening <think> tag is emitted by the chat template, i.e. it lives
+// in the prompt, not in the generated text. So "still thinking" simply means
+// the closing tag has not been produced yet.
+static bool act_inside_thinking(const std::string & s, const kvmem_act_params & a) {
+    if (!a.thinking_on || a.think_end.empty()) {
+        return false;
+    }
+    return s.find(a.think_end) == std::string::npos;
+}
+
+// idempotent: only appends the closing tag when the block is still open
+static bool act_close_thinking(std::string & s, const kvmem_act_params & a) {
+    if (a.think_end.empty() || s.find(a.think_end) != std::string::npos) {
+        return false;
+    }
+    s += a.think_end;
+    return true;
+}
+
+// per-round budget actually handed to the generator
 struct ServerState {
     std::mutex mu;
     kvmem_server_progress progress;
@@ -275,7 +326,42 @@ struct ServerState {
     std::string last_user_text;
     std::string turn_last_user;
     int last_n_gen = 0;
+    kvmem_act_params act;              // auto-continue-thinking
 };
+
+// Prepare the state a continuation round needs.
+//
+// run_prefill_multimodal() takes no prompt argument: it reads st.active_prompt
+// and st.cached_prompt. st.active_prompt is only assigned once per request, so
+// without advancing it here the multimodal ("user" query policy) path computes
+// eval_end/lcp from the ORIGINAL prompt, decides that there is nothing new to
+// evaluate, and the next spec verify then trips over "non-consecutive token
+// position". Pushing the committed chain into active_prompt makes it see the
+// new rows and decode only the cue.
+static void act_prepare_next_round(ServerState & st, const llama_vocab * vocab,
+                                   const std::vector<llama_token> & gen, int budget) {
+    if (!st.query_policy_user || !st.active_prompt) {
+        return;
+    }
+    std::vector<llama_token> tail = gen;
+    if (!st.act.cue.empty() && vocab) {
+        const auto cue_ids = common_tokenize(vocab, st.act.cue, false, true);
+        tail.insert(tail.end(), cue_ids.begin(), cue_ids.end());
+    }
+    st.active_prompt = st.active_prompt->with_generated(tail);
+    // can_append() budgets the rows it may append using turn_generation_rows,
+    // which is sized for a whole request; resize it to this round's budget.
+    st.turn_generation_rows = (uint32_t) std::max(0, budget)
+            + (st.spec.ok ? (uint32_t) std::max(0, st.spec_n_max) + 1u : 0u);
+}
+
+// per-round budget actually handed to the generator
+static int act_round_budget(const kvmem_act_params & a, bool on, int max_tokens) {
+    if (!on || a.round_tokens <= 0) {
+        return max_tokens;
+    }
+    return a.round_tokens;
+}
 
 struct StreamIo {
     httplib::DataSink * sink = nullptr;
@@ -1115,6 +1201,7 @@ struct ChatRequest {
     std::map<std::string, std::string> template_kwargs;
     int reasoning_budget_tokens = -1;
     std::string reasoning_budget_message;
+    int act_override = -1;  // -1 = use the server default, 0 = off, 1 = on
 };
 
 static common_json nlohmann_to_common(const json & j) {
@@ -1525,6 +1612,17 @@ static bool parse_chat_request(const json & body, ChatRequest & out, std::string
     if (body.contains("reasoning_budget_message") && body["reasoning_budget_message"].is_string()) {
         out.reasoning_budget_message = body["reasoning_budget_message"].get<std::string>();
     }
+    if (body.contains("auto_continue_thinking")) {
+        const auto & v = body["auto_continue_thinking"];
+        if (v.is_boolean()) {
+            out.act_override = v.get<bool>() ? 1 : 0;
+        } else if (v.is_number_integer()) {
+            out.act_override = v.get<int>() != 0 ? 1 : 0;
+        } else {
+            err = "auto_continue_thinking must be a boolean";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -1783,6 +1881,37 @@ int main(int argc, char ** argv) {
             st.reasoning_budget_default = budget;
         } else if (eq(arg, "--reasoning-budget-message")) {
             st.reasoning_budget_message = need(arg);
+        } else if (eq(arg, "--auto-continue-thinking")) {
+            st.act.enabled = true;
+        } else if (eq(arg, "--act-max-rounds")) {
+            st.act.max_rounds = kvmem_cli_int(arg, need(arg), 8);
+            if (st.act.max_rounds < 1) {
+                fprintf(stderr, "invalid --act-max-rounds: expected an integer >= 1\n");
+                return 1;
+            }
+        } else if (eq(arg, "--act-round-tokens")) {
+            st.act.round_tokens = kvmem_cli_int(arg, need(arg), 0);
+            if (st.act.round_tokens < 0) {
+                fprintf(stderr, "invalid --act-round-tokens: expected 0 or a positive integer\n");
+                return 1;
+            }
+        } else if (eq(arg, "--act-total-tokens")) {
+            st.act.total_tokens = kvmem_cli_int(arg, need(arg), 0);
+            if (st.act.total_tokens < 0) {
+                fprintf(stderr, "invalid --act-total-tokens: expected 0 or a positive integer\n");
+                return 1;
+            }
+        } else if (eq(arg, "--act-continue-cue")) {
+            st.act.cue = need(arg);
+        } else if (eq(arg, "--act-prefill-mode")) {
+            st.act.prefill_mode = need(arg);
+            if (st.act.prefill_mode != "auto" && st.act.prefill_mode != "legacy" &&
+                    st.act.prefill_mode != "restart") {
+                fprintf(stderr, "invalid --act-prefill-mode: expected auto | legacy | restart\n");
+                return 1;
+            }
+        } else if (eq(arg, "--act-think-end")) {
+            st.act.think_end = need(arg);
         } else {
             fprintf(stderr, "unknown flag: %s\n", arg);
             print_usage(argv[0]);
@@ -2253,7 +2382,7 @@ int main(int argc, char ** argv) {
             kvmem_diag("KVMEM_TRACE query_loc fallback=explicit_span_contains_media\n");
         }
         try {
-            multimodal_validate_capacity(st, *parsed_prompt, (int) toks.size());
+            multimodal_validate_capacity(st, *parsed_prompt, st.query_policy_user ? (int) toks.size() : qbegin, (int) toks.size());
         } catch (const std::exception & e) {
             res.status = 400;
             res.set_content(json{{"error", e.what()}}.dump(), "application/json");
@@ -2431,6 +2560,48 @@ int main(int argc, char ** argv) {
             res.set_content(out.dump(), "application/json");
         };
 
+        // ACT tags follow the rendered template, not a hard-coded constant.
+        // The request may switch auto-continue off for A/B comparisons.
+        const bool act_on = (cr.act_override >= 0) ? (cr.act_override == 1) : st.act.enabled;
+        st.act.thinking_on = cr.enable_thinking;
+        if (!formatted.thinking_end_tags.empty()) {
+            st.act.think_end = formatted.thinking_end_tags.front();
+        }
+        if (!formatted.thinking_start_tag.empty()) {
+            st.act.think_start = formatted.thinking_start_tag;
+        }
+        // The request flag alone is not the whole story. A client may steer
+        // thinking only through chat_template_kwargs, and the server-side
+        // --enable-thinking default also opens a thinking block in the rendered
+        // prompt. If the prompt ends inside an OPEN thinking block the model will
+        // reason no matter what the flag said, so the continuation loop has to
+        // stay armed. Otherwise a round stops at --act-round-tokens and closes
+        // the block, which looks exactly like "thinking gives up by itself as
+        // soon as the round limit is reached".
+        if (!st.act.thinking_on && !st.act.think_start.empty()) {
+            const auto last_open = formatted.prompt.rfind(st.act.think_start);
+            if (last_open != std::string::npos) {
+                size_t last_close = std::string::npos;
+                for (const auto & tag : formatted.thinking_end_tags) {
+                    if (tag.empty()) {
+                        continue;
+                    }
+                    const auto pos = formatted.prompt.rfind(tag);
+                    if (pos != std::string::npos && (last_close == std::string::npos || pos > last_close)) {
+                        last_close = pos;
+                    }
+                }
+                if (last_close == std::string::npos || last_close < last_open) {
+                    st.act.thinking_on = true;
+                }
+            }
+        }
+        // One line that explains, without guessing, why the continuation loop
+        // will or will not run for this request.
+        kvmem_diag("KVMEM_ACT_STATE act_on=%d thinking_on=%d max_rounds=%d round_tokens=%d total_tokens=%d\n",
+                (int) act_on, (int) st.act.thinking_on, st.act.max_rounds,
+                st.act.round_tokens, st.act.total_tokens);
+
         if (cr.stream) {
             const int max_tokens = cr.max_tokens;
             const bool spec_stream = use_spec;
@@ -2438,7 +2609,7 @@ int main(int argc, char ** argv) {
             res.set_header("X-Accel-Buffering", "no");
             res.set_chunked_content_provider("text/event-stream",
                 [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, parse_tools, formatted, stops,
-                 spec_stream, ctx, vocab, make_emit_gen_wall, timings](size_t, httplib::DataSink & sink) mutable {
+                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, act_on](size_t, httplib::DataSink & sink) mutable {
                     StreamIo io;
                     io.sink = &sink;
                     io.req = &req;
@@ -2474,16 +2645,32 @@ int main(int argc, char ** argv) {
                     st.mm_live_checkpoint.reset();
                     auto emit_gen_wall = make_emit_gen_wall(t_turn0, t_pf1, prefill_ms, n_cache_hit);
 
-                    std::vector<llama_token> gen;
-                    std::string content;
+                    // ---- ACT: multi-round thinking loop --------------------------------
+                    // A single generation is capped by --kvmem-gen-reserve. When thinking
+                    // hits the limit, commit the chain into the context and open the next
+                    // round instead of cutting the answer short.
+                    std::vector<llama_token> cur      = toks;  // prompt of the current round
+                    std::vector<llama_token> gen;              // tokens produced this round
+                    std::vector<llama_token> all_gen;          // tokens produced by all rounds
+                    std::string content;                       // full text across all rounds
                     StreamChatOut sco(formatted, parse_tools, request_id);
-                    bool aborted = false;
-                    if (spec_stream) {
-                        const auto gst = kvmem_spec_generate(st.ctx, st.model, st.spec, toks, max_tokens, sparams,
+                    bool aborted   = false;
+                    bool hit_limit = false;
+                    bool fatal     = false;
+                    int  act_round = 0;
+
+                    for (;;) {
+                        gen.clear();
+                        const int budget = act_round_budget(st.act, act_on, max_tokens);
+                        bool round_eos   = false;
+                        bool round_stop  = false;
+                        bool round_limit = false;
+                        if (spec_stream) {
+                            const auto gst = kvmem_spec_generate(st.ctx, st.model, st.spec, cur, budget, sparams,
                             [&](llama_token id, const std::string & piece, bool) {
                                 gen.push_back(id);
                                 content += piece;
-                                emit_gen_wall((int) gen.size(), false);
+                                emit_gen_wall((int) all_gen.size() + (int) gen.size(), false);
                                 auto deltas = sco.set_text(content, true);
                                 for (size_t i = 0; i < deltas.size(); ++i) {
                                     const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
@@ -2491,11 +2678,22 @@ int main(int argc, char ** argv) {
                                 }
                             },
                             [&]() { return !stream_heartbeat(&io); },
-                            st.active_prompt->model_pos(toks.size()) - (llama_pos) toks.size());
-                        aborted = io.aborted || gst.failed;
-                        st.mm_live_row = gst.n_past;
-                        if (gst.failed) send(json{{"error", "speculative decode failed"}}.dump());
-                    } else {
+                            st.active_prompt->model_pos(cur.size()) - (llama_pos) cur.size());
+                            st.mm_live_row = gst.n_past;
+                            if (io.aborted) {
+                                aborted = true;
+                                break;
+                            }
+                            if (gst.failed && gen.empty()) {
+                                // nothing produced: a real failure, not a truncated generation
+                                send(json{{"error", "speculative decode failed"}}.dump());
+                                fatal = true;
+                                break;
+                            }
+                            // failed with tokens in hand == the KVMem generation reserve was
+                            // exhausted; treat it exactly like hitting the output limit.
+                            round_limit = gst.failed || (int) gen.size() >= budget;
+                        } else {
                         common_sampler * smpl = nullptr;
                         try {
                             common_params_sampling sp = sparams;
@@ -2517,79 +2715,116 @@ int main(int argc, char ** argv) {
                             sink.done();
                             return true;
                         }
-                        bool stopped = false;
-                        bool hit_stop = false;
-                        while ((int) gen.size() < max_tokens && !stopped) {
-                            if (!stream_heartbeat(&io)) {
-                                aborted = true;
+                            bool stopped = false;
+                            bool hit_stop = false;
+                            while ((int) gen.size() < budget && !stopped) {
+                                if (!stream_heartbeat(&io)) {
+                                    aborted = true;
+                                    break;
+                                }
+                                llama_token id = common_sampler_sample(smpl, ctx, -1);
+                                common_sampler_accept(smpl, id, true);
+                                if (llama_vocab_is_eog(vocab, id)) {
+                                    stopped = true;
+                                    break;
+                                }
+                                std::string piece = token_piece(vocab, id);
+                                if (multimodal_decode_generated(st, id, (int) cur.size() + (int) gen.size()) != 0) {
+                                    fprintf(stderr, "llama_decode(gen) failed\n");
+                                    send(json{{"error", "decode failed"}}.dump());
+                                    fatal = true;
+                                    break;
+                                }
+                                content += piece;
+                                gen.push_back(id);
+                                hit_stop = strip_stop(content, stops);
+                                emit_gen_wall((int) all_gen.size() + (int) gen.size(), false);
+                                auto deltas = sco.set_text(content, !hit_stop);
+                                for (size_t i = 0; i < deltas.size(); ++i) {
+                                    const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
+                                    send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
+                                }
+                                if (hit_stop) {
+                                    break;
+                                }
+                            }
+                            common_sampler_free(smpl);
+                            if (aborted || fatal) {
                                 break;
                             }
-                            llama_token id = common_sampler_sample(smpl, ctx, -1);
-                            common_sampler_accept(smpl, id, true);
-                            if (llama_vocab_is_eog(vocab, id)) {
-                                stopped = true;
-                                break;
-                            }
-                            std::string piece = token_piece(vocab, id);
-                            if (multimodal_decode_generated(st, id, (int) toks.size() + (int) gen.size()) != 0) {
-                                fprintf(stderr, "llama_decode(gen) failed\n");
-                                aborted = true;
-                                send(json{{"error", "decode failed"}}.dump());
-                                break;
-                            }
-                            content += piece;
-                            gen.push_back(id);
-                            hit_stop = strip_stop(content, stops);
-                            emit_gen_wall((int) gen.size(), false);
-                            auto deltas = sco.set_text(content, !hit_stop);
-                            for (size_t i = 0; i < deltas.size(); ++i) {
-                                const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
-                                send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
-                            }
-                            if (hit_stop) {
-                                break;
-                            }
+                            round_eos   = stopped;
+                            round_stop  = hit_stop;
+                            round_limit = !stopped && !hit_stop && (int) gen.size() >= budget;
                         }
-                        common_sampler_free(smpl);
-                        if (aborted) {
-                            multimodal_finish_request(st);
-                            slot->unlock();
-                            sink.done();
-                            return true;
+
+                        all_gen.insert(all_gen.end(), gen.begin(), gen.end());
+                        if (aborted || fatal) {
+                            break;
                         }
-                        const bool hit_limit = !stopped && !hit_stop && (int) gen.size() >= max_tokens;
-                        emit_gen_wall((int) gen.size(), false);
-                        auto flush_deltas = sco.set_text(content, false);
-                        for (size_t i = 0; i < flush_deltas.size(); ++i) {
-                            const json * ts = (i + 1 == flush_deltas.size()) ? &*timings : nullptr;
-                            send(stream_choice_chunk(cid, st.model_name, created, flush_deltas[i], nullptr, ts).dump());
+
+                        // keep going while the model has not finished: it may still
+                        // be reasoning, or it may be writing the final answer.
+                        // bounded by --act-max-rounds and --act-total-tokens
+                        const bool want_more = act_on && st.act.thinking_on && round_limit
+                                && !round_eos && !round_stop
+                                && (act_round + 1) < st.act.max_rounds
+                                && (st.act.total_tokens <= 0 || (int) all_gen.size() < st.act.total_tokens);
+                        if (!want_more) {
+                            hit_limit = round_limit;
+                            break;
                         }
-                        const char * finish = sco.finish_reason(hit_limit);
-                        kvmem_diag("KVMEM_TRACE chat_stream n_tc_delta=%d finish=%s "
-                                "content_chars=%zu reasoning_chars=%zu\n",
-                                sco.n_tc_delta, finish,
-                                sco.prev.content.size(), sco.prev.reasoning_content.size());
-                        llama_kvmem_decode_mean_flush();
-                        emit_gen_wall((int) gen.size());
-                        commit_cached(st, toks, gen);
-                        send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
-                        auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
-                        usage["timings"] = *timings;
-                        send(usage.dump());
-                        sink.write("data: [DONE]\n\n", 14);
+
+                        // ---- the whole chain stays in context; start the next round ----
+                        commit_cached(st, cur, gen);
+                        cur.insert(cur.end(), gen.begin(), gen.end());
+                        if (!st.act.cue.empty()) {
+                            const auto cue_ids = common_tokenize(vocab, st.act.cue, false, true);
+                            cur.insert(cur.end(), cue_ids.begin(), cue_ids.end());
+                        }
+                        act_prepare_next_round(st, vocab, gen, budget);
+                        kvmem_diag("KVMEM_ACT_ROUND k=%d n_gen=%d total=%d in_think=1\n",
+                                act_round, (int) gen.size(), (int) all_gen.size());
+                        act_round++;
+                        int round_cache_hit = 0;
+                        bool ok_prefill;
+                        {
+                            const bool saved_policy = st.query_policy_user;
+                            if (st.act.prefill_mode == "legacy")  { st.query_policy_user = false; }
+                            if (st.act.prefill_mode == "restart") { memory_clear_all(st); }
+                            ok_prefill = run_prefill_retrieval(st, cur, &io, &round_cache_hit);
+                            st.query_policy_user = saved_policy;
+                        }
+                        if (!ok_prefill) {
+                            if (!io.aborted) {
+                                send(json{{"error", "continuation prefill failed"}}.dump());
+                            }
+                            aborted = true;
+                            break;
+                        }
+                        n_cache_hit += round_cache_hit;
+                        llama_kvmem_end_prefill_capture();
+                        st.mm_live_checkpoint.reset();
+                    }
+
+                    if (aborted || fatal) {
+                        if (fatal) {
+                            sink.write("data: [DONE]\n\n", 14);
+                        }
                         multimodal_finish_request(st);
                         slot->unlock();
                         sink.done();
                         return true;
                     }
-                    if (aborted) {
-                        multimodal_finish_request(st);
-                        slot->unlock();
-                        sink.done();
-                        return true;
+                    // stopped with an open thinking block (round cap / budget cap):
+                    // close it so the client renders it as reasoning instead of content
+                    if (hit_limit && act_close_thinking(content, st.act)) {
+                        auto close_deltas = sco.set_text(content, false);
+                        for (size_t i = 0; i < close_deltas.size(); ++i) {
+                            const json * ts = (i + 1 == close_deltas.size()) ? &*timings : nullptr;
+                            send(stream_choice_chunk(cid, st.model_name, created, close_deltas[i], nullptr, ts).dump());
+                        }
                     }
-                    const bool hit_limit = (int) gen.size() >= max_tokens;
-                    emit_gen_wall((int) gen.size(), false);
+                    emit_gen_wall((int) all_gen.size(), false);
                     auto flush_deltas = sco.set_text(content, false);
                     for (size_t i = 0; i < flush_deltas.size(); ++i) {
                         const json * ts = (i + 1 == flush_deltas.size()) ? &*timings : nullptr;
@@ -2597,13 +2832,14 @@ int main(int argc, char ** argv) {
                     }
                     const char * finish = sco.finish_reason(hit_limit);
                     kvmem_diag("KVMEM_TRACE chat_stream n_tc_delta=%d finish=%s "
-                            "content_chars=%zu reasoning_chars=%zu\n",
+                            "content_chars=%zu reasoning_chars=%zu act_rounds=%d\n",
                             sco.n_tc_delta, finish,
-                            sco.prev.content.size(), sco.prev.reasoning_content.size());
-                    emit_gen_wall((int) gen.size());
-                    commit_cached(st, toks, gen);
+                            sco.prev.content.size(), sco.prev.reasoning_content.size(), act_round);
+                    llama_kvmem_decode_mean_flush();
+                    emit_gen_wall((int) all_gen.size());
+                    commit_cached(st, cur, gen);
                     send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
-                    auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
+                    auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) all_gen.size(), n_cache_hit);
                     usage["timings"] = *timings;
                     send(usage.dump());
                     sink.write("data: [DONE]\n\n", 14);
@@ -2641,96 +2877,163 @@ int main(int argc, char ** argv) {
         st.mm_live_checkpoint.reset();
         auto emit_gen_wall = make_emit_gen_wall(t_turn0, t_pf1, prefill_ms, n_cache_hit);
 
-        if (use_spec) {
-            std::string content;
-            std::vector<llama_token> gen;
-            const kvmem_spec_gen_stats gst = kvmem_spec_generate(
-                    ctx, st.model, st.spec, toks, cr.max_tokens, sparams,
-                    [&](llama_token id, const std::string & piece, bool) {
-                        gen.push_back(id);
-                        content += piece;
-                        st.progress.generated((int) gen.size());
-                        st.log.generated((int) gen.size());
-                    }, [&]() { return !stream_heartbeat(&io); },
-                    st.active_prompt->model_pos(toks.size()) - (llama_pos) toks.size());
-            if (gst.failed) {
-                res.status = 500;
-                res.set_content("{\"error\":\"speculative decode failed\"}", "application/json");
-                return;
-            }
-            st.mm_live_row = gst.n_past;
-            if (io.aborted) return;
-            emit_gen_wall((int) gen.size());
-            commit_cached(st, toks, gen);
-            emit_json(content, (int) gen.size(), (int) gen.size() >= cr.max_tokens);
-            return;
-        }
-
-        common_sampler * smpl = nullptr;
-        try {
-            common_params_sampling sp = sparams;
-            smpl = common_sampler_init(st.model, sp);
-        } catch (const std::exception & e) {
-            res.status = 500;
-            res.set_content(json{{"error", std::string("sampler init failed: ") + e.what()}}.dump(),
-                            "application/json");
-            return;
-        }
-        if (!smpl) {
-            res.status = 500;
-            res.set_content("{\"error\":\"sampler init failed\"}", "application/json");
-            return;
-        }
-
-        int next_row = (int) toks.size();
-        auto gen_one = [ctx, smpl, vocab, &st, &next_row](std::string & piece, bool & stopped, llama_token & id_out) -> bool {
-            llama_token id = common_sampler_sample(smpl, ctx, -1);
-            common_sampler_accept(smpl, id, true);
-            if (llama_vocab_is_eog(vocab, id)) {
-                stopped = true;
-                return true;
-            }
-            id_out = id;
-            piece = token_piece(vocab, id);
-            if (multimodal_decode_generated(st, id, next_row++) != 0) {
-                fprintf(stderr, "llama_decode(gen) failed\n");
-                return false;
-            }
-            return true;
-        };
-
-        std::string content;
+        // ---- ACT: multi-round thinking loop (non-streaming) ----------------------
+        std::vector<llama_token> cur      = toks;
         std::vector<llama_token> gen;
-        bool stopped = false;
-        while ((int) gen.size() < cr.max_tokens && !stopped) {
-            if (!stream_heartbeat(&io)) {
+        std::vector<llama_token> all_gen;
+        std::string content;
+        bool hit_limit = false;
+        bool fatal     = false;
+        int  act_round = 0;
+
+        for (;;) {
+            gen.clear();
+            const int budget = act_round_budget(st.act, act_on, cr.max_tokens);
+            bool round_eos   = false;
+            bool round_stop  = false;
+            bool round_limit = false;
+            if (use_spec) {
+                const kvmem_spec_gen_stats gst = kvmem_spec_generate(
+                        ctx, st.model, st.spec, cur, budget, sparams,
+                        [&](llama_token id, const std::string & piece, bool) {
+                            gen.push_back(id);
+                            content += piece;
+                            st.progress.generated((int) all_gen.size() + (int) gen.size());
+                            st.log.generated((int) all_gen.size() + (int) gen.size());
+                        }, [&]() { return !stream_heartbeat(&io); },
+                        st.active_prompt->model_pos(cur.size()) - (llama_pos) cur.size());
+                st.mm_live_row = gst.n_past;
+                if (io.aborted) return;
+                if (gst.failed && gen.empty()) {
+                    res.status = 500;
+                    res.set_content("{\"error\":\"speculative decode failed\"}", "application/json");
+                    return;
+                }
+                round_limit = gst.failed || (int) gen.size() >= budget;
+            } else {
+                common_sampler * smpl = nullptr;
+                try {
+                    common_params_sampling sp = sparams;
+                    smpl = common_sampler_init(st.model, sp);
+                } catch (const std::exception & e) {
+                    res.status = 500;
+                    res.set_content(json{{"error", std::string("sampler init failed: ") + e.what()}}.dump(),
+                                    "application/json");
+                    return;
+                }
+                if (!smpl) {
+                    res.status = 500;
+                    res.set_content("{\"error\":\"sampler init failed\"}", "application/json");
+                    return;
+                }
+
+                int next_row = (int) cur.size();
+                auto gen_one = [ctx, smpl, vocab, &st, &next_row](std::string & piece, bool & stopped, llama_token & id_out) -> bool {
+                    llama_token id = common_sampler_sample(smpl, ctx, -1);
+                    common_sampler_accept(smpl, id, true);
+                    if (llama_vocab_is_eog(vocab, id)) {
+                        stopped = true;
+                        return true;
+                    }
+                    id_out = id;
+                    piece = token_piece(vocab, id);
+                    if (multimodal_decode_generated(st, id, next_row++) != 0) {
+                        fprintf(stderr, "llama_decode(gen) failed\n");
+                        return false;
+                    }
+                    return true;
+                };
+
+                bool stopped = false;
+                while ((int) gen.size() < budget && !stopped) {
+                    if (!stream_heartbeat(&io)) {
+                        common_sampler_free(smpl);
+                        return;
+                    }
+                    std::string piece;
+                    llama_token id = 0;
+                    if (!gen_one(piece, stopped, id)) {
+                        common_sampler_free(smpl);
+                        res.status = 500;
+                        res.set_content("{\"error\":\"decode failed\"}", "application/json");
+                        fatal = true;
+                        break;
+                    }
+                    if (stopped) {
+                        break;
+                    }
+                    content += piece;
+                    gen.push_back(id);
+                    st.progress.generated((int) all_gen.size() + (int) gen.size());
+                    st.log.generated((int) all_gen.size() + (int) gen.size());
+                    if (strip_stop(content, stops)) {
+                        round_stop = true;
+                        break;
+                    }
+                }
                 common_sampler_free(smpl);
-                return;
+                if (fatal) {
+                    break;
+                }
+                round_eos   = stopped;
+                round_limit = !stopped && !round_stop && (int) gen.size() >= budget;
             }
-            std::string piece;
-            llama_token id = 0;
-            if (!gen_one(piece, stopped, id)) {
-                common_sampler_free(smpl);
-                res.status = 500;
-                res.set_content("{\"error\":\"decode failed\"}", "application/json");
-                return;
-            }
-            if (stopped) {
+
+            all_gen.insert(all_gen.end(), gen.begin(), gen.end());
+            if (fatal) {
                 break;
             }
-            content += piece;
-            gen.push_back(id);
-            st.progress.generated((int) gen.size());
-            st.log.generated((int) gen.size());
-            if (strip_stop(content, stops)) {
+
+            const bool want_more = act_on && st.act.thinking_on && round_limit
+                    && !round_eos && !round_stop
+                    && (act_round + 1) < st.act.max_rounds
+                    && (st.act.total_tokens <= 0 || (int) all_gen.size() < st.act.total_tokens);
+            if (!want_more) {
+                hit_limit = round_limit;
                 break;
             }
+
+            commit_cached(st, cur, gen);
+            cur.insert(cur.end(), gen.begin(), gen.end());
+            if (!st.act.cue.empty()) {
+                const auto cue_ids = common_tokenize(vocab, st.act.cue, false, true);
+                cur.insert(cur.end(), cue_ids.begin(), cue_ids.end());
+            }
+            act_prepare_next_round(st, vocab, gen, budget);
+            kvmem_diag("KVMEM_ACT_ROUND k=%d n_gen=%d total=%d in_think=1\n",
+                    act_round, (int) gen.size(), (int) all_gen.size());
+            act_round++;
+            int round_cache_hit = 0;
+            bool ok_prefill;
+            {
+                const bool saved_policy = st.query_policy_user;
+                if (st.act.prefill_mode == "legacy")  { st.query_policy_user = false; }
+                if (st.act.prefill_mode == "restart") { memory_clear_all(st); }
+                ok_prefill = run_prefill_retrieval(st, cur, &io, &round_cache_hit);
+                st.query_policy_user = saved_policy;
+            }
+            if (!ok_prefill) {
+                if (!io.aborted) {
+                    res.status = 500;
+                    res.set_content(json{{"error", "continuation prefill failed"}}.dump(), "application/json");
+                }
+                return;
+            }
+            n_cache_hit += round_cache_hit;
+            llama_kvmem_end_prefill_capture();
+            st.mm_live_checkpoint.reset();
+        }
+
+        if (fatal) {
+            return;
         }
         llama_kvmem_decode_mean_flush();
-        emit_gen_wall((int) gen.size());
-        commit_cached(st, toks, gen);
-        common_sampler_free(smpl);
-        emit_json(content, (int) gen.size(), !stopped && (int) gen.size() >= cr.max_tokens);
+        if (hit_limit) {
+            act_close_thinking(content, st.act);
+        }
+        emit_gen_wall((int) all_gen.size());
+        commit_cached(st, cur, gen);
+        emit_json(content, (int) all_gen.size(), hit_limit);
     };
 
     svr.Post("/v1/chat/completions", handle_chat);

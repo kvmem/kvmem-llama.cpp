@@ -81,8 +81,7 @@ llama_memory_kvmem_mtp::llama_memory_kvmem_mtp(
             nullptr,
             filter,
             nullptr,
-            nullptr,
-            "kvmem-mtp");
+            nullptr);
 
     const size_t krow = ggml_row_size(type_k_, n_embd_k_);
     const size_t vrow = ggml_row_size(type_v_, n_embd_v_);
