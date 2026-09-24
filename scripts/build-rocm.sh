@@ -18,6 +18,17 @@ fi
 if [[ ! -x "${rocm_bin}/clang++" ]]; then
     rocm_bin="${rocm}/lib/llvm/bin"
 fi
+if [[ ! -x "${rocm_bin}/clang++" && -n "${ROCM_CLANG_BIN:-}" ]]; then
+    rocm_bin="${ROCM_CLANG_BIN}"
+fi
+if [[ ! -x "${rocm_bin}/clang++" ]]; then
+    for candidate in /usr/lib/llvm-*/bin; do
+        if [[ -x "${candidate}/clang++" ]]; then
+            rocm_bin="${candidate}"
+            break
+        fi
+    done
+fi
 if [[ ! -x "${rocm_bin}/clang++" ]]; then
     echo "[error] AMD clang not found under ${rocm}." >&2
     exit 1
@@ -35,6 +46,14 @@ fi
 
 configure_args=()
 target_args=()
+hip_args=()
+generator="${CMAKE_GENERATOR:-Ninja}"
+if [[ "${generator}" == "Ninja" ]] && ! command -v ninja >/dev/null 2>&1; then
+    generator="Unix Makefiles"
+fi
+if [[ -n "${ROCM_DEVICE_LIB_PATH:-}" ]]; then
+    hip_args+=("-DCMAKE_HIP_FLAGS=--rocm-device-lib-path=${ROCM_DEVICE_LIB_PATH}")
+fi
 targets="${GPU_TARGETS:-${AMDGPU_TARGETS:-}}"
 if [[ -n "${targets}" ]]; then
     target_args+=("-DGPU_TARGETS=${targets}" "-DCMAKE_HIP_ARCHITECTURES=${targets}")
@@ -44,7 +63,7 @@ if [[ "${FRESH:-0}" == "1" ]]; then
     configure_args+=(--fresh)
 fi
 
-cmake "${configure_args[@]}" -S "${root}" -B "${build_dir}" -G Ninja \
+cmake "${configure_args[@]}" -S "${root}" -B "${build_dir}" -G "${generator}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_COMPILER="${CC:-${rocm_bin}/clang}" \
     -DCMAKE_CXX_COMPILER="${CXX:-${rocm_bin}/clang++}" \
@@ -62,6 +81,7 @@ cmake "${configure_args[@]}" -S "${root}" -B "${build_dir}" -G Ninja \
     -DKVMEM_BUILD_LLAMA=ON \
     -DLLAMA_KVMEM=ON \
     -DLLAMA_KVMEM_ROOT="${root}" \
+    "${hip_args[@]}" \
     "${target_args[@]}" \
     "$@"
 
