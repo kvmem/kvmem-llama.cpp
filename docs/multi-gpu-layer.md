@@ -6,8 +6,8 @@ different VRAM sizes. It keeps one logical KVMem block/slot selection and one
 host history. llama.cpp owns weight placement, layer execution and activation
 transfers; each attention layer's K/V remains on that layer's GPU.
 
-Use an explicit device list, `--split-mode layer`, `--gpu-layers all`, and
-`--spec-type none`. `--tensor-split` accepts one proportion per selected GPU,
+Use an explicit device list, `--split-mode layer`, and `--gpu-layers all`.
+`--tensor-split` accepts one proportion per selected GPU,
 which is useful when the cards have different free memory. After model weights
 load, KVMem caps the common KV token window by the smallest per-device
 attention-KV capacity. The allocated cache is checked against each layer's
@@ -19,8 +19,10 @@ and uses each tensor's ggml backend for host reads/writes and slot remapping.
 It bypasses the existing single-device CUDA staging, D2H pipe, D2D layout
 scratch and GPU mean-K accumulator. This is a correctness baseline, not a
 throughput optimization. It works without CUDA peer access. Single-GPU paths
-keep their existing fast behavior. MTP/ReplaySSM, row/tensor split and
-cross-machine execution are outside this release.
+keep their existing fast behavior. Embedded-nextn MTP with snapshot rollback
+or per-device ReplaySSM is experimental and requires an explicit
+`--kvmem-mtp-state snapshots|replay` on the dual-GPU server. Row/tensor split
+and cross-machine execution are outside this release.
 
 ## Validation on 2026-09-24
 
@@ -189,8 +191,73 @@ throughput control. At these settings, 8:1 offers nearly the measured 12:1
 decode speed with roughly 0.6 GiB more free VRAM on the 5060 Ti. The test
 servers were stopped after each run.
 
-The next MTP step is described in [multi-gpu-mtp-plan.md](multi-gpu-mtp-plan.md):
-snapshot rollback first, then per-device ReplaySSM.
+## Experimental dual-GPU MTP
+
+The implementation followed [multi-gpu-mtp-plan.md](multi-gpu-mtp-plan.md):
+snapshot rollback first, then ReplaySSM with one GDN descriptor buffer and
+fold stream per owning CUDA device. Each recurrent layer's state, convolution
+state and five record tensors must have the same CUDA owner. A commit waits
+for all launched device groups before publishing the new position. The
+two-GPU path uses one embedded `nextn` layer; the follower KV must live on
+that layer's GPU and use the requested draft dtype and target slot count.
+Per-device pool planning reserves the snapshot planes or ReplaySSM records,
+plus a worst-case F32 follower KV and compute headroom. `auto` and sidecar
+draft models remain unsupported for multi-GPU MTP. The rc3 launcher remains
+single-GPU by default; the dual-GPU mode is explicit.
+
+IQ3 validation used 5:1, Q8_0 target/draft KV, a 512+128-token pool and a
+1,278-token prompt that forced an archived block back into the active window.
+Target retrieval staged in 12 blocks and the MTP follower restored 16 blocks
+from host history. Both rollback modes generated the same 32 token IDs as
+single-GPU snapshots. On the same dual placement, the serialized 156,894,364-
+byte GDN state had the same FNV-64 hash (`1117ddd0f1d9d4e2`) after snapshot
+and replay generation. Single-GPU placement produced a different state hash
+despite identical token IDs, so state equality is only established between
+rollback modes on the same layer placement. One-run generation rates were
+40.64 tok/s for dual snapshots, 39.41 for dual ReplaySSM and 48.14 for single
+snapshots.
+
+The Q4_K_M CLI test kept the rc3 context and slot-pool settings (262,144
+context, 36,864 budget, 16,384 reserve, block 128), with a 450-token reported
+prompt, 64 generated tokens, Q8_0 target/draft KV and no vision projector.
+All four dual runs generated the same 64 token IDs, accepted 42/64 draft
+tokens and had identical snapshot/ReplaySSM GDN state hashes on 8:1
+(`1bbcd3103671c095`). These CLI rates are not comparable to the server
+rows below, where the default draft KV is F16 and the chat prompt differs.
+
+| Split | Snapshot gen tok/s | ReplaySSM gen tok/s |
+|---|---:|---:|
+| 5:1 | 28.91 | 28.58 |
+| 8:1 | 31.48 | 31.25 |
+
+The matched server test used the Q4_K_M model and CPU Q8_0 projector, rc3
+context and KVMem defaults, explicit layer split, and the same 365-token
+OpenAI chat prompt plus 64-token completion in every row. The UI was disabled
+for the test; no image was sent. Draft KV used the server's F16 default.
+Free VRAM is an idle-after-load sample in MiB, ordered 5060 Ti / 5050. These
+are single runs, not stable throughput distributions.
+
+| Split | MTP state | Free VRAM MiB | Prompt tok/s | Decode tok/s |
+|---|---|---:|---:|---:|
+| 5:1 | off | 2,347 / 3,553 | 276.81 | 16.46 |
+| 5:1 | snapshots | 1,955 / 2,755 | 223.32 | 18.28 |
+| 5:1 | ReplaySSM | 2,333 / 2,807 | 201.65 | 19.46 |
+| 8:1 | off | 1,251 / 4,647 | 263.03 | 16.71 |
+| 8:1 | snapshots | 831 / 3,879 | 234.15 | 20.04 |
+| 8:1 | ReplaySSM | 1,237 / 3,903 | 252.00 | 19.83 |
+
+ReplaySSM improved decode by about 18-19% over MTP-off for this request,
+while leaving about 392-406 MiB more free on the 5060 Ti than snapshots.
+Snapshot versus ReplaySSM speed is too close and variable to rank from one
+run. After cancelling a streamed 8:1 ReplaySSM request, two subsequent
+requests succeeded with the same output; the second reused 364 of 365 prompt
+tokens. The two modes also produced identical output for each split. At 5:1,
+MTP output differs from the MTP-off output by a small wording choice, and
+that difference repeated. At 8:1, all three modes matched. This may be
+floating-point sensitivity to layer placement and speculative batch shape;
+the tests do not prove bitwise output parity across all placements or broad
+quality parity. Keep dual MTP opt-in pending wider model, prompt and stability
+testing.
 
 ## Relation to [PR #54](https://github.com/kvmem/kvmem-llama.cpp/pull/54)
 
@@ -202,9 +269,9 @@ MTP/ReplaySSM across cards. Its diff still rejects multiple
 `--tensor-split` proportions and does not add per-device KV-pool sizing. The
 present branch instead makes the safe path automatic for multi-device models,
 supports unequal layer proportions, validates KV placement and tests a
-device-bounded pool. It deliberately defers MTP and TurboQuant. The GDN
-grouping in #54 is a useful starting point for the later MTP phase, subject
-to independent long-history and rollback tests.
+device-bounded pool. It adds independently validated per-device GDN Replay
+without TurboQuant. The GDN grouping in #54 informed the MTP follow-up, but
+its wider patch was not imported.
 
 Future tensor split with a mirrored active KV window can retain the same host
 archive and logical slot selection, while replacing each layer's single KV

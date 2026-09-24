@@ -73,6 +73,7 @@ public:
     uint32_t kv_size() const { return kv_size_; }
     uint32_t block_tokens() const { return block_tokens_; }
     uint32_t n_slots() const { return n_slots_; }
+    bool multi_gpu() const { return multi_gpu_; }
 
     // Slot-pool prepare used by both the dense KVMem memory and the hybrid
     // wrapper (attn half). Fills per-ubatch slot_info and the capture pos queue.

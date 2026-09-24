@@ -57,6 +57,7 @@ static void print_usage(const char * argv0) {
             "  --spec-kv-dtype TYPE       MTP K/V type (default: inherit target K/V types)\n"
             "  --spec-draft-n-max N       MTP draft tokens (default 2)\n"
             "  --spec-draft-p-min P       min draft probability (default 0)\n"
+            "  --kvmem-mtp-state MODE     snapshots | replay (default snapshots)\n"
             "  --spec-draft-model PATH    optional sidecar MTP GGUF\n",
             argv0);
 }
@@ -231,6 +232,14 @@ int main(int argc, char ** argv) {
             spec_n_max = std::atoi(need(arg));
         } else if (eq(arg, "--spec-draft-p-min")) {
             spec_p_min = std::strtof(need(arg), nullptr);
+        } else if (eq(arg, "--kvmem-mtp-state")) {
+            const char * mode = need(arg);
+            if (eq(mode, "snapshots")) kparams.mtp_state = 0;
+            else if (eq(mode, "replay")) kparams.mtp_state = 2;
+            else {
+                fprintf(stderr, "unsupported --kvmem-mtp-state (want snapshots|replay)\n");
+                return 1;
+            }
         } else if (eq(arg, "--spec-draft-model") || eq(arg, "-md")) {
             spec_draft_model = need(arg);
         } else if (arg[0] == '-') {
@@ -292,8 +301,12 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "invalid GPU configuration: %s\n", e.what());
         return 1;
     }
-    if (device_config.devices.size() > 2 && spec_mtp) {
-        fprintf(stderr, "multi-GPU layer currently requires --spec-type none\n");
+    if (device_config.devices.size() > 2 && spec_mtp && !kparams.enabled) {
+        fprintf(stderr, "multi-GPU MTP requires --kvmem\n");
+        return 1;
+    }
+    if (device_config.devices.size() > 2 && spec_mtp && !spec_draft_model.empty()) {
+        fprintf(stderr, "multi-GPU MTP currently requires an embedded nextn draft layer\n");
         return 1;
     }
     llama_model * model = llama_model_load_from_file(model_path.c_str(), model_params);
@@ -341,6 +354,7 @@ int main(int argc, char ** argv) {
     }
 
     if (kparams.enabled) {
+        if (!spec_mtp) kparams.mtp_state = 0;
         if (!nvme_dir.empty()) {
             kparams.nvme_dir = nvme_dir.c_str();
         }
@@ -642,6 +656,19 @@ int main(int argc, char ** argv) {
     }
 
     llama_synchronize(ctx);
+    const char * hash_gdn = std::getenv("KVMEM_GDN_HASH");
+    if (hash_gdn && hash_gdn[0] == '1' && llama_kvmem_has_recurrent()) {
+        const llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+        const size_t size = llama_state_seq_get_size_ext(ctx, 0, flags);
+        std::vector<uint8_t> state(size);
+        if (!size || llama_state_seq_get_data_ext(ctx, state.data(), size, 0, flags) != size) {
+            fprintf(stderr, "KVMEM_GDN_HASH failed to read recurrent state\n");
+            return 1;
+        }
+        uint64_t hash = 14695981039346656037ull;
+        for (uint8_t byte : state) hash = (hash ^ byte) * 1099511628211ull;
+        fprintf(stderr, "KVMEM_GDN_HASH bytes=%zu fnv64=%016llx\n", size, (unsigned long long) hash);
+    }
     const double gen_wall_ms = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - t_gen0).count();
     llama_perf_context_print(ctx);

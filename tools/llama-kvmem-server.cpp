@@ -1885,8 +1885,10 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "invalid GPU configuration: %s\n", e.what());
         return 1;
     }
-    if (device_config.devices.size() > 2 && st.spec_mtp) {
-        fprintf(stderr, "KVMEM_STARTUP_ERROR multi-GPU layer currently requires --spec-type none; MTP support follows the base layer path\n");
+    if (device_config.devices.size() > 2 && st.spec_mtp &&
+            (!st.kparams.enabled || st.kparams.mtp_state == 1 ||
+             (st.kparams.mtp_state == 2 && !config_sources.contains("--kvmem-mtp-state")))) {
+        fprintf(stderr, "KVMEM_STARTUP_ERROR multi-GPU MTP requires --kvmem and explicit --kvmem-mtp-state snapshots|replay (auto is not supported yet)\n");
         return 1;
     }
     // Check resources before spending time/VRAM on loading model weights.

@@ -93,6 +93,25 @@ llama_memory_kvmem_mtp::llama_memory_kvmem_mtp(
             (!v_trans_ && (vt->ne[0] != n_embd_v_ || vt->ne[1] != kv_size_ || vt->nb[1] != vrow))) {
         throw std::runtime_error("KVMem MTP cache layout does not match packed K/V transfers");
     }
+    if (target_->multi_gpu()) {
+        if (model.hparams.n_layer_nextn != 1) {
+            throw std::runtime_error("multi-GPU MTP currently requires one embedded nextn layer");
+        }
+        auto * expected = model.dev_layer(static_cast<int>(il_graph_));
+        if (!expected || ggml_backend_dev_type(expected) != GGML_BACKEND_DEVICE_TYPE_GPU) {
+            throw std::runtime_error("multi-GPU MTP nextn layer is not on a GPU");
+        }
+        for (auto * t : {kt, vt}) {
+            auto * buffer = t->buffer ? t->buffer : t->view_src ? t->view_src->buffer : nullptr;
+            auto * actual = buffer ? ggml_backend_buft_get_device(ggml_backend_buffer_get_type(buffer)) : nullptr;
+            if (actual != expected) {
+                throw std::runtime_error("multi-GPU MTP follower KV is not on its nextn layer GPU");
+            }
+        }
+        kvmem_diag("KVMEM_MTP_FOLLOWER owner=%s K=%s V=%s cells=%u bytes=%.2f MiB\n",
+                ggml_backend_dev_name(expected), ggml_type_name(kt->type), ggml_type_name(vt->type),
+                kv_size_, (ggml_nbytes(kt) + ggml_nbytes(vt)) / (1024.0 * 1024.0));
+    }
 
     kvmem::RawKvStoreConfig rcfg;
     rcfg.n_layer = std::max(1u, model.hparams.n_layer_nextn);

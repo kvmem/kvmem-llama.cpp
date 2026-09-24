@@ -2,8 +2,10 @@
 
 Scope: two local CUDA GPUs, one inference sequence, Qwen3.8-27B with an
 embedded `nextn` layer, and the existing layer-split KVMem slot pool. Tensor
-split, P2P, and TurboQuant are separate work. This is an implementation plan;
-multi-GPU MTP is still rejected by this branch.
+split, P2P, and TurboQuant are separate work. Both phases are implemented on
+this branch; validation and measurements are in
+[multi-gpu-layer.md](multi-gpu-layer.md). Dual MTP remains opt-in while the
+remaining release gates below are evaluated.
 
 ## What PR #54 supplies
 

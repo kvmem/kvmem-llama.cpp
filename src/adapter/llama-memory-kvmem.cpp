@@ -42,19 +42,22 @@
 static llama_kvmem_params g_kvmem_params = {};
 
 struct llama_memory_kvmem::GdnReplay {
-    ggml_backend_buffer_ptr descriptors;
-    cudaStream_t stream = nullptr;
-    int layers = 0;
-    int device = 0;
+    struct Group {
+        ggml_backend_buffer_ptr descriptors;
+        cudaStream_t stream = nullptr;
+        int layers = 0;
+        int device = -1;
+        ~Group() {
+            if (stream) {
+                cudaSetDevice(device);
+                cudaStreamSynchronize(stream);
+                cudaStreamDestroy(stream);
+            }
+        }
+    };
+    std::vector<std::unique_ptr<Group>> groups;
     uint64_t folds = 0;
     int64_t fold_us = 0;
-    ~GdnReplay() {
-        if (stream) {
-            cudaSetDevice(device);
-            cudaStreamSynchronize(stream);
-            cudaStreamDestroy(stream);
-        }
-    }
 };
 
 void llama_memory_kvmem::set_recurrent(llama_memory_recurrent * recr) {
@@ -71,32 +74,54 @@ void llama_memory_kvmem::set_recurrent(llama_memory_recurrent * recr) {
             (recurrent_bytes + conv_bytes) / planes * (planes - 1));
     if (!recr->replay_capacity) return;
     auto replay = std::make_unique<GdnReplay>();
-    std::vector<ggml_cuda_gdn_replay_layer> layers;
-    size_t records = 0, states = 0;
-    ggml_backend_buffer_type_t buft = nullptr;
+    struct GroupBuild {
+        std::vector<ggml_cuda_gdn_replay_layer> layers;
+        ggml_backend_buffer_type_t buft = nullptr;
+        size_t states = 0;
+        size_t records = 0;
+    };
+    std::map<int, GroupBuild> grouped;
     for (size_t il = 0; il < recr->r_l.size(); ++il) {
         if (!recr->r_l[il]) continue;
         const auto & r = recr->replay_l[il];
-        layers.push_back({static_cast<float *>(recr->s_l[il]->data), static_cast<float *>(recr->r_l[il]->data),
+        ggml_cuda_gdn_replay_layer layer = {static_cast<float *>(recr->s_l[il]->data), static_cast<float *>(recr->r_l[il]->data),
                 static_cast<float *>(r[0]->data), static_cast<float *>(r[1]->data), static_cast<float *>(r[2]->data),
-                static_cast<float *>(r[3]->data), static_cast<float *>(r[4]->data)});
-        for (auto * t : r) records += ggml_nbytes(t);
-        states += ggml_nbytes(recr->r_l[il]) + ggml_nbytes(recr->s_l[il]);
-        buft = ggml_backend_buffer_get_type(recr->s_l[il]->buffer);
+                static_cast<float *>(r[3]->data), static_cast<float *>(r[4]->data)};
+        const void * ptrs[] = {layer.state, layer.conv, layer.key, layer.value, layer.gate, layer.beta, layer.conv_input};
+        int device = -1;
+        for (const void * ptr : ptrs) {
+            cudaPointerAttributes attrs{};
+            if (!ptr || cudaPointerGetAttributes(&attrs, ptr) != cudaSuccess || attrs.type != cudaMemoryTypeDevice ||
+                    (device >= 0 && device != attrs.device)) {
+                throw std::runtime_error("GDN replay layer has missing or cross-device state/record tensors");
+            }
+            device = attrs.device;
+        }
+        auto & group = grouped[device];
+        group.layers.push_back(layer);
+        for (auto * t : r) group.records += ggml_nbytes(t);
+        group.states += ggml_nbytes(recr->r_l[il]) + ggml_nbytes(recr->s_l[il]);
+        if (!group.buft) group.buft = ggml_backend_buffer_get_type(recr->s_l[il]->buffer);
     }
-    if (layers.empty()) throw std::runtime_error("GDN replay has no recurrent layers");
-    cudaPointerAttributes attrs{};
-    if (cudaPointerGetAttributes(&attrs, layers.front().state) != cudaSuccess ||
-            cudaSetDevice(attrs.device) != cudaSuccess) throw std::runtime_error("cannot select GDN replay device");
-    replay->device = attrs.device;
-    replay->layers = layers.size();
-    replay->descriptors.reset(ggml_backend_buft_alloc_buffer(buft, layers.size() * sizeof(layers[0])));
-    if (!replay->descriptors || cudaStreamCreateWithFlags(&replay->stream, cudaStreamNonBlocking) != cudaSuccess ||
-            cudaMemcpy(ggml_backend_buffer_get_base(replay->descriptors.get()), layers.data(), layers.size() * sizeof(layers[0]), cudaMemcpyHostToDevice) != cudaSuccess) {
-        throw std::runtime_error("cannot allocate GDN replay descriptors");
+    if (grouped.empty()) throw std::runtime_error("GDN replay has no recurrent layers");
+    for (auto & [device, build] : grouped) {
+        auto group = std::make_unique<GdnReplay::Group>();
+        group->device = device;
+        group->layers = static_cast<int>(build.layers.size());
+        const size_t descriptor_bytes = build.layers.size() * sizeof(build.layers[0]);
+        if (cudaSetDevice(device) != cudaSuccess) throw std::runtime_error("cannot select GDN replay device");
+        group->descriptors.reset(ggml_backend_buft_alloc_buffer(build.buft, descriptor_bytes));
+        cudaPointerAttributes attrs{};
+        const void * dst = group->descriptors ? ggml_backend_buffer_get_base(group->descriptors.get()) : nullptr;
+        if (!dst || cudaPointerGetAttributes(&attrs, dst) != cudaSuccess || attrs.device != device ||
+                cudaStreamCreateWithFlags(&group->stream, cudaStreamNonBlocking) != cudaSuccess ||
+                cudaMemcpy(const_cast<void *>(dst), build.layers.data(), descriptor_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+            throw std::runtime_error("cannot allocate GDN replay descriptors on their layer GPU");
+        }
+        kvmem_diag("KVMEM_GDN_MEMORY mode=replay device=%d layers=%d capacity=%u state_bytes=%zu record_bytes=%zu descriptor_bytes=%zu\n",
+                device, group->layers, recr->replay_capacity, build.states, build.records, descriptor_bytes);
+        replay->groups.push_back(std::move(group));
     }
-    kvmem_diag("KVMEM_GDN_MEMORY mode=replay layers=%d capacity=%u state_bytes=%zu record_bytes=%zu descriptor_bytes=%zu\n",
-            replay->layers, recr->replay_capacity, states, records, layers.size() * sizeof(layers[0]));
     gdn_replay_ = std::move(replay);
 }
 
@@ -113,10 +138,21 @@ bool llama_memory_kvmem::gdn_replay_commit(llama_context * ctx, uint32_t n_keep)
     llama_synchronize(ctx);
     auto & replay = *gdn_replay_;
     const int64_t started = ggml_time_us();
-    const auto * layers = static_cast<const ggml_cuda_gdn_replay_layer *>(ggml_backend_buffer_get_base(replay.descriptors.get()));
-    if (cudaSetDevice(replay.device) != cudaSuccess ||
-            !ggml_backend_cuda_gdn_fold(layers, replay.layers, n_keep, recr_->replay_capacity, replay.stream) ||
-            cudaStreamSynchronize(replay.stream) != cudaSuccess) {
+    std::vector<GdnReplay::Group *> launched;
+    bool ok = true;
+    for (const auto & group : replay.groups) {
+        const auto * layers = static_cast<const ggml_cuda_gdn_replay_layer *>(ggml_backend_buffer_get_base(group->descriptors.get()));
+        if (cudaSetDevice(group->device) != cudaSuccess ||
+                !ggml_backend_cuda_gdn_fold(layers, group->layers, n_keep, recr_->replay_capacity, group->stream)) {
+            ok = false;
+            break;
+        }
+        launched.push_back(group.get());
+    }
+    for (auto * group : launched) {
+        if (cudaSetDevice(group->device) != cudaSuccess || cudaStreamSynchronize(group->stream) != cudaSuccess) ok = false;
+    }
+    if (!ok) {
         recr_->replay_poisoned = true;
         recr_->replay_finish(0);
         return false;
@@ -399,12 +435,34 @@ static kvmem_pool_plan kvmem_compute_pool(
     // A layer split has one common token window, but each GPU stores only the
     // KV of its own layers. The smallest per-device capacity bounds that window.
     std::map<ggml_backend_dev_t, uint64_t> bytes_per_token;
+    std::map<ggml_backend_dev_t, uint64_t> mtp_state_bytes;
     for (uint32_t il = 0; il < model.hparams.n_layer(); ++il) {
-        if (model.hparams.is_recr(il)) continue;
         auto * dev = model.dev_layer(static_cast<int>(il));
         if (!dev || ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU) continue;
+        if (model.hparams.is_recr(il)) {
+            if (cparams.n_rs_seq > 0) {
+                const uint64_t state = static_cast<uint64_t>(model.hparams.n_embd_r() + model.hparams.n_embd_s()) * sizeof(float);
+                // Match the five FP32 ReplaySSM record widths in llama_memory_recurrent.
+                const uint64_t records = static_cast<uint64_t>(2048 + 6144 + 48 + 48 + 10240) *
+                        sizeof(float) * (1 + cparams.n_rs_seq);
+                mtp_state_bytes[dev] += g_kvmem_params.mtp_state == 2 ? state + records : state * (1 + cparams.n_rs_seq);
+            }
+            continue;
+        }
         bytes_per_token[dev] += ggml_row_size(params.type_k, model.hparams.n_embd_k_gqa(il))
                               + ggml_row_size(params.type_v, model.hparams.n_embd_v_gqa(il));
+    }
+    ggml_backend_dev_t mtp_owner = nullptr;
+    uint64_t mtp_row_bytes = 0;
+    if (cparams.n_rs_seq > 0 && model.hparams.n_layer_nextn > 0) {
+        const uint32_t il = model.hparams.n_layer();
+        mtp_owner = model.dev_layer(static_cast<int>(il));
+        mtp_row_bytes = static_cast<uint64_t>(model.hparams.n_layer_nextn) *
+                (ggml_row_size(GGML_TYPE_F32, model.hparams.n_embd_k_gqa(il)) +
+                 ggml_row_size(GGML_TYPE_F32, model.hparams.n_embd_v_gqa(il)));
+        if (mtp_owner && ggml_backend_dev_type(mtp_owner) == GGML_BACKEND_DEVICE_TYPE_GPU) {
+            bytes_per_token.try_emplace(mtp_owner, 0);
+        }
     }
     if (model.n_devices() > 1 && !bytes_per_token.empty() && borrowed_kv_size == 0) {
         p.gpu_total = 0; // the per-device limits below replace a first-GPU total
@@ -414,14 +472,17 @@ static kvmem_pool_plan kvmem_compute_pool(
             ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
             // free_bytes is queried after model weights load. Leave headroom
             // for the scheduler graph and staging buffers on every device.
-            const uint64_t reserve = std::max<uint64_t>(256ull << 20, free_bytes / 10);
+            const uint64_t mtp_fixed = mtp_state_bytes[dev] + (cparams.n_rs_seq > 0 ? 128ull << 20 : 0);
+            const uint64_t reserve = std::max<uint64_t>(256ull << 20, free_bytes / 10) + mtp_fixed;
             const uint64_t free_for_kv = free_bytes > reserve ? free_bytes - reserve : 0;
             const uint64_t ratio_budget = static_cast<uint64_t>(total_bytes * ratio);
             const uint64_t kv_budget = std::min(free_for_kv, ratio_budget);
-            const uint64_t device_cap = kv_budget / (row_bytes * p.block_tokens);
-            LLAMA_LOG_INFO("%s: layer KV device=%s free=%zu total=%zu row_bytes=%llu cap_blocks=%llu\n",
+            const uint64_t planned_row = row_bytes + (dev == mtp_owner ? mtp_row_bytes : 0);
+            const uint64_t device_cap = planned_row ? kv_budget / (planned_row * p.block_tokens) : UINT64_MAX;
+            LLAMA_LOG_INFO("%s: layer KV device=%s free=%zu total=%zu row_bytes=%llu mtp_row_bytes=%llu mtp_state_reserve=%llu cap_blocks=%llu\n",
                     __func__, ggml_backend_dev_name(dev), free_bytes, total_bytes,
-                    (unsigned long long) row_bytes, (unsigned long long) device_cap);
+                    (unsigned long long) row_bytes, (unsigned long long) (dev == mtp_owner ? mtp_row_bytes : 0),
+                    (unsigned long long) mtp_fixed, (unsigned long long) device_cap);
             cap = std::min(cap, device_cap);
         }
         if (cap < 2) throw std::runtime_error("multi-GPU layer KV pool cannot fit a working block plus generation reserve on every owning GPU");
