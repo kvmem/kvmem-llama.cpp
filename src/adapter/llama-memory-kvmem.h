@@ -335,6 +335,7 @@ private:
     uint32_t block_tokens_ = 128;
     uint32_t kv_size_ = 0;
     uint32_t n_slots_ = 0;
+    bool multi_gpu_ = false;
     bool trace_ = false;
 
     std::unique_ptr<llama_kv_cache> kv_owned_;

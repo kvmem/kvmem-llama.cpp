@@ -1,6 +1,7 @@
 #include "llama.h"
 #include "llama-kvmem-hooks.h"
 #include "kvmem-spec.h"
+#include "kvmem-server-devices.h"
 
 #include <algorithm>
 #include <chrono>
@@ -23,7 +24,11 @@ static void print_usage(const char * argv0) {
             "  -c, --ctx-size N           context size (default prompt + n_predict)\n"
             "  -b, --batch-size N         logical batch (default 512)\n"
             "  -ub, --ubatch-size N       physical ubatch (default 512)\n"
-            "  -ngl, --n-gpu-layers N     GPU layers (default 99)\n"
+            "  -ngl, --n-gpu-layers N     GPU layers; all required for multi-GPU (default 99)\n"
+            "  --list-devices            list available ggml devices\n"
+            "  --device NAMES            CUDA devices, e.g. CUDA0,CUDA1\n"
+            "  --split-mode MODE         none | layer\n"
+            "  --tensor-split N,...      layer proportions, one per selected GPU\n"
             "  --temp T                   temperature; 0 = greedy (default 0)\n"
             "  --tokens-only              print generated token ids, one per line\n"
             "  --no-prompt                do not echo the prompt (generation only)\n"
@@ -71,6 +76,9 @@ int main(int argc, char ** argv) {
     int n_batch = 512;
     int n_ubatch = 512;
     int ngl = 99;
+    bool list_devices = false;
+    kvmem_server_options device_options;
+    kvmem_server_devices device_config;
     float temp = 0.0f;
     bool tokens_only = false;
     bool no_prompt = false;
@@ -121,7 +129,20 @@ int main(int argc, char ** argv) {
         } else if (eq(arg, "-ub") || eq(arg, "--ubatch-size")) {
             n_ubatch = std::atoi(need(arg));
         } else if (eq(arg, "-ngl") || eq(arg, "--n-gpu-layers")) {
-            ngl = std::atoi(need(arg));
+            const char * value = need(arg);
+            ngl = eq(value, "all") ? -2 : std::atoi(value);
+        } else if (eq(arg, "--list-devices")) {
+            list_devices = true;
+        } else if (eq(arg, "--device") || eq(arg, "-dev") ||
+                   eq(arg, "--split-mode") || eq(arg, "-sm") ||
+                   eq(arg, "--tensor-split") || eq(arg, "-ts") ||
+                   eq(arg, "--main-gpu") || eq(arg, "-mg")) {
+            try {
+                device_options.parse(arg, [&](const char *) { return need(arg); });
+            } catch (const std::exception & e) {
+                fprintf(stderr, "invalid GPU option: %s\n", e.what());
+                return 1;
+            }
         } else if (eq(arg, "--temp")) {
             temp = std::atof(need(arg));
         } else if (eq(arg, "--tokens-only")) {
@@ -233,6 +254,14 @@ int main(int argc, char ** argv) {
                 ggml_type_name(cache_type_k), ggml_type_name(cache_type_v));
         return 1;
     }
+    if (list_devices) {
+        ggml_backend_load_all();
+        for (size_t d = 0; d < ggml_backend_dev_count(); ++d) {
+            auto * dev = ggml_backend_dev_get(d);
+            fprintf(stdout, "%s: %s\n", ggml_backend_dev_name(dev), ggml_backend_dev_description(dev));
+        }
+        return 0;
+    }
     if (model_path.empty()) {
         print_usage(argv[0]);
         return 1;
@@ -257,6 +286,16 @@ int main(int argc, char ** argv) {
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = ngl;
     model_params.load_mtp = spec_mtp;
+    try {
+        device_config.apply(device_options, model_params);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "invalid GPU configuration: %s\n", e.what());
+        return 1;
+    }
+    if (device_config.devices.size() > 2 && spec_mtp) {
+        fprintf(stderr, "multi-GPU layer currently requires --spec-type none\n");
+        return 1;
+    }
     llama_model * model = llama_model_load_from_file(model_path.c_str(), model_params);
     if (!model) {
         fprintf(stderr, "failed to load model: %s\n", model_path.c_str());
