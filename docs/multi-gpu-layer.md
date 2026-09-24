@@ -189,6 +189,9 @@ throughput control. At these settings, 8:1 offers nearly the measured 12:1
 decode speed with roughly 0.6 GiB more free VRAM on the 5060 Ti. The test
 servers were stopped after each run.
 
+The next MTP step is described in [multi-gpu-mtp-plan.md](multi-gpu-mtp-plan.md):
+snapshot rollback first, then per-device ReplaySSM.
+
 ## Relation to [PR #54](https://github.com/kvmem/kvmem-llama.cpp/pull/54)
 
 PR #54 does add two-GPU layer work, alongside a substantially larger
