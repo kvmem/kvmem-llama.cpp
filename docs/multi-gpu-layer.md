@@ -153,6 +153,42 @@ planning; longer contexts or other GPU processes may favor 8:1 or 5:1. The
 single-card result is too close to its memory limit to generalize to the
 user's normal server settings.
 
+### rc3 default-launcher server profile
+
+The packaged rc3 `start-iq3.ps1` calls `start-server.ps1` with context
+262,144, KVMem budget 36,864, generation reserve 16,384, Q8_0 K/V, block
+size 128, MTP3, CPU vision projector, and thinking enabled. Its default GPU
+selection is the RTX 5060 Ti alone. The equivalent launcher in this branch
+was dry-run with the Q4_K_M model and the local Q8_0 projector, then run
+without changing those settings. It reached HTTP readiness at about 13.76 s,
+but left only 39 MiB free on the 5060 Ti, dropping to 11 MiB during the
+request. One uncached 354-prompt-token,
+64-completion-token chat request measured 12.62 prompt tok/s and 3.04 decode
+tok/s, with a 49.13 s server-reported request time. This one near-capacity
+run does not prove the exact driver-level cause of the slowdown.
+
+The rc3 launcher itself only selects one GPU. For dual tests, the same server
+binary and settings were used with an explicit CUDA0/CUDA1 layer split and
+MTP disabled, because this branch does not yet support multi-GPU MTP. The
+request, Q4_K_M model, CPU projector, context, KVMem budget/reserve, Q8_0
+cache, block size and thinking mode were otherwise the same. These are not
+strictly equivalent to the single-card MTP3 run.
+
+| Server placement | Ready s | Free VRAM MiB, 5060 Ti / 5050 | Prompt tok/s | Decode tok/s |
+|---|---:|---:|---:|---:|
+| rc3 launcher, single with MTP3 | 13.76 | 39 / — | 12.62 | 3.04 |
+| Dual 5:1, MTP off | 12.20 | 2,347 / 3,553 | 268.81 | 19.62 |
+| Dual 8:1, MTP off | 11.64 | 1,251 / 4,647 | 283.45 | 20.35 |
+| Dual 12:1, MTP off | 10.96 | 649 / 5,251 | 253.69 | 20.79 |
+
+All four requests completed 64 tokens. The VRAM figures are idle-after-load
+`nvidia-smi` samples, not peak free memory during inference. A single-GPU
+server with the same rc3 memory settings but MTP disabled failed during a
+1,768 MiB CUDA KV-cache allocation, so it supplies no matched single-GPU
+throughput control. At these settings, 8:1 offers nearly the measured 12:1
+decode speed with roughly 0.6 GiB more free VRAM on the 5060 Ti. The test
+servers were stopped after each run.
+
 ## Relation to [PR #54](https://github.com/kvmem/kvmem-llama.cpp/pull/54)
 
 PR #54 does add two-GPU layer work, alongside a substantially larger
