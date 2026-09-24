@@ -217,6 +217,17 @@ rollback modes on the same layer placement. One-run generation rates were
 40.64 tok/s for dual snapshots, 39.41 for dual ReplaySSM and 48.14 for single
 snapshots.
 
+The same IQ3 forced-retrieval prompt was also run at MTP widths 1 and 2.
+Both widths exercised rejected and partially accepted drafts. Snapshot and
+ReplaySSM produced the same 32 token IDs and GDN state hash at each width:
+`ee2125fc97fbff18` at width 1 and `5ec5a2cc23780abd` at width 2. The
+width-3 long-history run above exercised partial and full acceptance.
+Q4_K_M at 5:1 with the 512+128-token pool also forced 12 target blocks back
+into the window; the follower restored 16 host blocks. Snapshot and ReplaySSM
+again produced identical 32-token output and GDN hash
+(`46c81e0151974061`). These are end-to-end checks, not fault-injection tests
+of a failed fold on one GPU.
+
 The Q4_K_M CLI test kept the rc3 context and slot-pool settings (262,144
 context, 36,864 budget, 16,384 reserve, block 128), with a 450-token reported
 prompt, 64 generated tokens, Q8_0 target/draft KV and no vision projector.
