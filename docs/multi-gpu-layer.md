@@ -100,6 +100,59 @@ severe sensitivity to VRAM pressure, but the short run cannot establish the
 driver-level cause. Benchmark results should therefore report free VRAM and
 other GPU processes, not just total card size.
 
+## Q4_K_M capacity and speed on the same pair
+
+The downloaded `Qwen3.8-27B-UD-Q4_K_M.gguf` is 16,464,440,224 bytes
+(15.33 GiB), and its SHA-256 matched the accompanying checksum. Under the
+small 1K-context CLI configuration below, it actually loaded on the 16 GiB
+card alone, with only narrow headroom. This does not reproduce the user's
+reported single-card load failure, which may involve different context or
+server settings. The split measurements use
+CUDA0 = RTX 5060 Ti and CUDA1 = RTX 5050 Laptop. Both GPUs were idle before
+and after the runs.
+The CLI reported 15,174 / 7,123 MiB free when preparing the model. Every
+run offloaded 66/66 layers and mapped another 682 MiB of model data on CPU.
+
+The short runs used the same 302-token input, 64 generated tokens, Q8_0 K/V,
+MTP off, context 1,024, KVMem budget 512 plus 128 generation reserve, batch
+128 and ubatch 64 as the IQ3 test. The reported prompt count of 366 includes
+64 tokens of KVMem query replay. Each row was a separate, non-overlapping
+process. Times are llama.cpp's internal timings, which exclude process startup
+and teardown; prefill and decode are single-run observations.
+
+| Layer proportion CUDA0:CUDA1 | Model weights MiB CUDA0/CUDA1 | Load s | Prompt tok/s | Decode tok/s |
+|---|---:|---:|---:|---:|
+| Single CUDA0 | 14,674 / — | 10.15 | 200 | **23.59** |
+| 2:1 | 9,103 / 5,571 | 9.05 | 356 | 17.63 |
+| 3:1 | 10,312 / 4,363 | 8.96 | 381 | 19.29 |
+| 5:1 | 11,455 / 3,220 | 8.89 | 410 | 20.28 |
+| 8:1 | 12,428 / 2,246 | 9.38 | 327 | 20.91 |
+| 12:1 | 12,917 / 1,757 | 8.91 | 428 | 21.58 |
+
+A second 12:1 run gave 8.80 s load, 440 prompt tok/s and 21.38 decode
+tok/s. A stock-cache control at 12:1, without KVMem, gave 21.87 decode
+tok/s (302 prompt tokens because it does not replay the query). Thus the
+ordinary-decode difference attributable to KVMem in these short runs is
+small; most of the cost is layer execution across unlike GPUs. Prefill varies
+more between runs and should not be ranked from this table alone. The 12:1
+split delivered about 91% of the single-card decode rate in this constrained
+setup; the single card's prompt throughput was lower despite faster decode.
+
+At 12:1 with a 1,278-token input, context 2,048 and forced retrieval of an
+older block, the run completed at 455 prompt tok/s and 20.09 decode tok/s;
+retrieval took 59.88 ms. A separate diagnostic run showed `stage_in=12`,
+selected the forced old block, and found zero mismatched packed K bytes in
+sampled attention layers on both GPUs before and after restoration. This is a
+functional spot check rather than an end-to-end quality evaluation.
+
+For this model, 8:1 is a reasonable initial setting: it gives about 97% of
+the observed 12:1 decode rate while leaving roughly 0.5 GiB more CUDA0
+headroom after weight placement. The 12:1 split is faster in this 1K/2K
+context test but leaves only about 2.2 GiB free on CUDA0 at KVMem pool
+planning; longer contexts or other GPU processes may favor 8:1 or 5:1. The
+single-card result is too close to its memory limit to generalize to the
+user's normal server settings.
+
 ## Relation to [PR #54](https://github.com/kvmem/kvmem-llama.cpp/pull/54)
 
 PR #54 does add two-GPU layer work, alongside a substantially larger
