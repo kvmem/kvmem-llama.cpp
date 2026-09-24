@@ -45,6 +45,61 @@ cross-machine execution are outside this release.
   160-token budget retained the replay start and passed. This is a pre-existing
   minimum-window limitation, not evidence of a dual-GPU transfer failure.
 
+## IQ3 speed on the 16 GiB + 8 GiB pair
+
+Qwen3.8-27B-GSQ-RCO-IQ3_S was measured after the other GPU services were
+stopped. CUDA0 is the RTX 5060 Ti (16 GiB), and CUDA1 is the RTX 5050 Laptop
+(8 GiB). The CUDA Driver API reports no peer access in either direction.
+Each row is a separate process, with no benchmark processes overlapping.
+Common settings: Windows CUDA 12.9, MTP off, Q8_0 K/V, 1,024-token context,
+512-token KVMem budget plus 128-token generation reserve, batch 128,
+ubatch 64, the same 302-token input and 64 generated tokens. KVMem's 64-token
+query replay makes the reported prompt count 366. Throughput excludes model
+load; all rates below are from the 64-token runs.
+
+| Layer proportion CUDA0:CUDA1 | Model weights MiB CUDA0/CUDA1 | Prompt tok/s | Decode tok/s | Decode vs single |
+|---|---:|---:|---:|---:|
+| Single CUDA0 | 10,827 / — | 230 | **28.83** | 100% |
+| 1:1 | 4,746 / 6,081 | 277 | 15.30 | 53% |
+| 2:1 | 6,629 / 4,198 | 313 | 19.81 | 69% |
+| 3:1 | 7,637 / 3,190 | 341 | 23.05 | 80% |
+| 8:1 | 9,257 / 1,570 | 364 | 25.94 | 90% |
+
+The earlier serial 24-token runs showed the same ordering (single 27.19;
+1:1 15.19; 2:1 19.39; 3:1 22.30 tok/s). Prefill varied more
+between runs than decode, so the prompt column is one observed run, not a
+stable ranking. All five runs generated 64 tokens. The 1:1, 2:1 and 8:1
+outputs matched the single-GPU token IDs; 3:1 matched the first 24 and then
+diverged. The matched no-KVMem control gave 29.02 tok/s on one GPU and
+23.94 tok/s at 3:1. This is close to the KVMem result at each placement;
+the decode penalty is mainly associated with layer placement and inter-device
+work, rather than KVMem's synchronous history transfer, which is idle during
+ordinary decode. The two cards differ in speed and upstream scheduled four
+copies for the dual graph versus one for the single graph; this benchmark does
+not isolate their individual contributions.
+
+A separate 1,278-token input forced retrieval of an old block with a
+512-token budget. At 3:1, dual-GPU prefill was 409 tok/s, decode 20.02 tok/s,
+and retrieval 32.58 ms; the single-GPU measurements were 335 tok/s,
+25.83 tok/s, and 29.07 ms. A trace of the dual run confirmed 12 archived
+blocks staged in, with sampled K/V byte comparisons matching on layers from
+both GPUs. Prompt throughput varies between runs, while the decode slowdown
+persisted. These are short, single-session tests and do not validate long-run
+quality or thermal stability.
+
+IQ3 already fits the 16 GiB card, so single-GPU decode is faster here. For a
+larger or higher-precision model that requires both cards, choose the least
+work on CUDA1 that still leaves enough free memory on both cards. In this
+measurement 3:1 moved about 3.1 GiB of weights off CUDA0 at a roughly 20%
+decode-throughput cost; 1:1 moved about 5.9 GiB at roughly 47% cost.
+
+An initial two-token dual run under concurrent GPU services measured only
+0.25 tok/s. At that time the 5060 Ti had about 4 GiB free in `nvidia-smi`;
+after both GPUs became free, the slowdown did not recur. This suggests a
+severe sensitivity to VRAM pressure, but the short run cannot establish the
+driver-level cause. Benchmark results should therefore report free VRAM and
+other GPU processes, not just total card size.
+
 ## Relation to [PR #54](https://github.com/kvmem/kvmem-llama.cpp/pull/54)
 
 PR #54 does add two-GPU layer work, alongside a substantially larger
