@@ -26,12 +26,8 @@ fi
 export PATH="${rocm_bin}:${PATH}"
 export ROCM_PATH="${rocm}"
 
-# Match the Windows entry point: a clean submodule needs the cumulative patch.
-llama_patch="${root}/patches/llama-kvmem-current.patch"
-if ! git -C "${root}/llama.cpp" apply --reverse --check "${llama_patch}" 2>/dev/null; then
-    git -C "${root}/llama.cpp" apply --check "${llama_patch}"
-    git -C "${root}/llama.cpp" apply "${llama_patch}"
-fi
+# Replay the cumulative KVMem patch and the RDNA2 quantized-KV FA fix.
+"${root}/scripts/apply-patches.sh"
 
 configure_args=()
 target_args=()

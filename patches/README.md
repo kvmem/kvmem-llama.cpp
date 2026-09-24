@@ -7,6 +7,11 @@ It also fixes reasoning-budget initialization from a template's generation prefi
 `scripts/apply-patches.sh` applies it
 without creating commits and checks for an already applied tree.
 
+`0005-hip-rdna2-quantized-kv-fa-vec.patch` is an RX 6000 (RDNA2) HIP fix. It
+routes quantized-KV Flash Attention to the existing VEC kernel, avoiding the
+zero-occupancy assertion (`max_blocks_per_sm > 0`) of the larger tile kernel.
+It is replayed after the cumulative KVMem patch and is limited to RDNA2.
+
 `reasoning-budget-upgrade.patch` upgrades the v0.15.0 ReplaySSM tree.
 `replayssm-upgrade.patch` upgrades the preceding multimodal/query-replay tree.
 `multimodal-upgrade.patch` upgrades the KVMem working tree recorded before
