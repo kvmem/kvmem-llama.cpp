@@ -28,7 +28,7 @@ if ($NoMtp) {
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 if (!$BuildDir) {
     if (Test-Path -LiteralPath (Join-Path $root 'bin/llama-kvmem-server.exe')) { $BuildDir = $root }
-    else { $BuildDir = Join-Path $root 'build-win-bonsai' }
+    else { $BuildDir = Join-Path $root 'build-win-bonsai-release' }
 }
 $binary = Join-Path $BuildDir 'bin/llama-kvmem-server.exe'
 if ($Mtp -and !$PSBoundParameters.ContainsKey('Model')) {
