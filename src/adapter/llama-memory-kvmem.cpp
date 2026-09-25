@@ -7,6 +7,7 @@
 #include "llama-kvmem-capture.h"
 #include "llama-kvmem-factory.h"
 #include "llama-kvmem-hooks.h"
+#include "llama-kvmem-gdn.h"
 #include "llama-kvmem-quant.h"
 #include "llama-kvmem-stagein.h"
 #include "llama-kvmem-transfer.h"
@@ -22,9 +23,14 @@
 
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
+#if defined(LLAMA_KVMEM_CUDA)
 #include "ggml-cuda.h"
 
 #include <cuda_runtime.h>
+#endif
+#if defined(LLAMA_KVMEM_VULKAN)
+#include "ggml-vulkan.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -40,19 +46,35 @@
 static llama_kvmem_params g_kvmem_params = {};
 
 struct llama_memory_kvmem::GdnReplay {
+    enum class Backend {
+        GENERIC,
+        CUDA,
+        VULKAN,
+    } kind = Backend::GENERIC;
+
     ggml_backend_buffer_ptr descriptors;
+    ggml_backend_ptr backend;
+    std::vector<llama_kvmem_gdn_layer> generic_layers;
+#if defined(LLAMA_KVMEM_CUDA)
     cudaStream_t stream = nullptr;
-    int layers = 0;
     int device = 0;
+#endif
+#if defined(LLAMA_KVMEM_VULKAN)
+    std::vector<ggml_vk_gdn_replay_layer> vk_layers;
+#endif
+    int layers = 0;
+    bool generic_logged = false;
     uint64_t folds = 0;
     int64_t fold_us = 0;
+#if defined(LLAMA_KVMEM_CUDA)
     ~GdnReplay() {
-        if (stream) {
+        if (kind == Backend::CUDA && stream) {
             cudaSetDevice(device);
             cudaStreamSynchronize(stream);
             cudaStreamDestroy(stream);
         }
     }
+#endif
 };
 
 void llama_memory_kvmem::set_recurrent(llama_memory_recurrent * recr) {
@@ -69,32 +91,80 @@ void llama_memory_kvmem::set_recurrent(llama_memory_recurrent * recr) {
             (recurrent_bytes + conv_bytes) / planes * (planes - 1));
     if (!recr->replay_capacity) return;
     auto replay = std::make_unique<GdnReplay>();
-    std::vector<ggml_cuda_gdn_replay_layer> layers;
     size_t records = 0, states = 0;
     ggml_backend_buffer_type_t buft = nullptr;
     for (size_t il = 0; il < recr->r_l.size(); ++il) {
         if (!recr->r_l[il]) continue;
         const auto & r = recr->replay_l[il];
-        layers.push_back({static_cast<float *>(recr->s_l[il]->data), static_cast<float *>(recr->r_l[il]->data),
-                static_cast<float *>(r[0]->data), static_cast<float *>(r[1]->data), static_cast<float *>(r[2]->data),
-                static_cast<float *>(r[3]->data), static_cast<float *>(r[4]->data)});
+        replay->generic_layers.push_back({recr->s_l[il], recr->r_l[il], r[0], r[1], r[2], r[3], r[4]});
         for (auto * t : r) records += ggml_nbytes(t);
         states += ggml_nbytes(recr->r_l[il]) + ggml_nbytes(recr->s_l[il]);
-        buft = ggml_backend_buffer_get_type(recr->s_l[il]->buffer);
+        auto * layer_buft = ggml_backend_buffer_get_type(recr->s_l[il]->buffer);
+        if (buft && layer_buft != buft) throw std::runtime_error("GDN replay layers span multiple devices");
+        buft = layer_buft;
     }
-    if (layers.empty()) throw std::runtime_error("GDN replay has no recurrent layers");
-    cudaPointerAttributes attrs{};
-    if (cudaPointerGetAttributes(&attrs, layers.front().state) != cudaSuccess ||
-            cudaSetDevice(attrs.device) != cudaSuccess) throw std::runtime_error("cannot select GDN replay device");
-    replay->device = attrs.device;
-    replay->layers = layers.size();
-    replay->descriptors.reset(ggml_backend_buft_alloc_buffer(buft, layers.size() * sizeof(layers[0])));
-    if (!replay->descriptors || cudaStreamCreateWithFlags(&replay->stream, cudaStreamNonBlocking) != cudaSuccess ||
-            cudaMemcpy(ggml_backend_buffer_get_base(replay->descriptors.get()), layers.data(), layers.size() * sizeof(layers[0]), cudaMemcpyHostToDevice) != cudaSuccess) {
-        throw std::runtime_error("cannot allocate GDN replay descriptors");
+    if (replay->generic_layers.empty() || !buft) throw std::runtime_error("GDN replay has no recurrent layers");
+
+    const char * backend_name = ggml_backend_reg_name(
+            ggml_backend_dev_backend_reg(ggml_backend_buft_get_device(buft)));
+    const char * fold_override = std::getenv("KVMEM_GDN_FOLD");
+    const bool force_generic = fold_override && std::strcmp(fold_override, "ggml") == 0;
+    if (fold_override && fold_override[0] && !force_generic) {
+        throw std::runtime_error("KVMEM_GDN_FOLD must be unset or ggml");
     }
-    kvmem_diag("KVMEM_GDN_MEMORY mode=replay layers=%d capacity=%u state_bytes=%zu record_bytes=%zu descriptor_bytes=%zu\n",
-            replay->layers, recr->replay_capacity, states, records, layers.size() * sizeof(layers[0]));
+#if defined(LLAMA_KVMEM_CUDA)
+    if (!force_generic && std::strcmp(backend_name, "CUDA") == 0) {
+        std::vector<ggml_cuda_gdn_replay_layer> layers;
+        layers.reserve(replay->generic_layers.size());
+        for (const auto & layer : replay->generic_layers) {
+            layers.push_back({static_cast<float *>(layer.state->data), static_cast<float *>(layer.conv->data),
+                    static_cast<float *>(layer.key->data), static_cast<float *>(layer.value->data),
+                    static_cast<float *>(layer.gate->data), static_cast<float *>(layer.beta->data),
+                    static_cast<float *>(layer.conv_input->data)});
+        }
+        replay->kind = GdnReplay::Backend::CUDA;
+        cudaPointerAttributes attrs{};
+        if (cudaPointerGetAttributes(&attrs, layers.front().state) != cudaSuccess ||
+                cudaSetDevice(attrs.device) != cudaSuccess) throw std::runtime_error("cannot select GDN replay device");
+        replay->device = attrs.device;
+        replay->layers = layers.size();
+        replay->descriptors.reset(ggml_backend_buft_alloc_buffer(buft, layers.size() * sizeof(layers[0])));
+        if (!replay->descriptors || cudaStreamCreateWithFlags(&replay->stream, cudaStreamNonBlocking) != cudaSuccess ||
+                cudaMemcpy(ggml_backend_buffer_get_base(replay->descriptors.get()), layers.data(), layers.size() * sizeof(layers[0]), cudaMemcpyHostToDevice) != cudaSuccess) {
+            throw std::runtime_error("cannot allocate GDN replay descriptors");
+        }
+        kvmem_diag("KVMEM_GDN_MEMORY mode=replay layers=%d capacity=%u state_bytes=%zu record_bytes=%zu descriptor_bytes=%zu\n",
+                replay->layers, recr->replay_capacity, states, records, layers.size() * sizeof(layers[0]));
+        gdn_replay_ = std::move(replay);
+        return;
+    }
+#endif
+#if defined(LLAMA_KVMEM_VULKAN)
+    if (!force_generic && std::strcmp(backend_name, "Vulkan") == 0) {
+        replay->kind = GdnReplay::Backend::VULKAN;
+        replay->vk_layers.reserve(replay->generic_layers.size());
+        for (const auto & layer : replay->generic_layers) {
+            replay->vk_layers.push_back({layer.state, layer.conv, layer.key, layer.value,
+                    layer.gate, layer.beta, layer.conv_input});
+        }
+        replay->backend.reset(ggml_backend_dev_init(ggml_backend_buft_get_device(buft), nullptr));
+        if (!replay->backend || !ggml_backend_is_vk(replay->backend.get())) {
+            throw std::runtime_error("cannot initialize GDN replay Vulkan backend");
+        }
+        replay->layers = (int) replay->vk_layers.size();
+        kvmem_diag("KVMEM_GDN_MEMORY mode=replay-vulkan layers=%d capacity=%u state_bytes=%zu record_bytes=%zu descriptor_bytes=%zu\n",
+                replay->layers, recr->replay_capacity, states, records,
+                replay->vk_layers.size() * sizeof(replay->vk_layers[0]));
+        gdn_replay_ = std::move(replay);
+        return;
+    }
+#endif
+
+    replay->backend.reset(ggml_backend_dev_init(ggml_backend_buft_get_device(buft), nullptr));
+    if (!replay->backend) throw std::runtime_error("cannot initialize generic GDN replay backend");
+    replay->layers = (int) replay->generic_layers.size();
+    kvmem_diag("KVMEM_GDN_MEMORY mode=replay-ggml backend=%s layers=%d capacity=%u state_bytes=%zu record_bytes=%zu\n",
+            backend_name, replay->layers, recr->replay_capacity, states, records);
     gdn_replay_ = std::move(replay);
 }
 
@@ -111,10 +181,37 @@ bool llama_memory_kvmem::gdn_replay_commit(llama_context * ctx, uint32_t n_keep)
     llama_synchronize(ctx);
     auto & replay = *gdn_replay_;
     const int64_t started = ggml_time_us();
-    const auto * layers = static_cast<const ggml_cuda_gdn_replay_layer *>(ggml_backend_buffer_get_base(replay.descriptors.get()));
-    if (cudaSetDevice(replay.device) != cudaSuccess ||
-            !ggml_backend_cuda_gdn_fold(layers, replay.layers, n_keep, recr_->replay_capacity, replay.stream) ||
-            cudaStreamSynchronize(replay.stream) != cudaSuccess) {
+    bool folded = false;
+#if defined(LLAMA_KVMEM_CUDA)
+    if (replay.kind == GdnReplay::Backend::CUDA) {
+        const auto * layers = static_cast<const ggml_cuda_gdn_replay_layer *>(ggml_backend_buffer_get_base(replay.descriptors.get()));
+        folded = cudaSetDevice(replay.device) == cudaSuccess &&
+                ggml_backend_cuda_gdn_fold(layers, replay.layers, n_keep, recr_->replay_capacity, replay.stream) &&
+                cudaStreamSynchronize(replay.stream) == cudaSuccess;
+    }
+#endif
+#if defined(LLAMA_KVMEM_VULKAN)
+    if (replay.kind == GdnReplay::Backend::VULKAN) {
+        try {
+            folded = ggml_backend_vk_gdn_fold(replay.backend.get(), replay.vk_layers.data(), replay.layers,
+                    n_keep, recr_->replay_capacity);
+        } catch (const std::exception & error) {
+            LLAMA_LOG_ERROR("KVMEM_GDN_FOLD Vulkan error: %s\n", error.what());
+        }
+    }
+#endif
+    if (replay.kind == GdnReplay::Backend::GENERIC) {
+        size_t compute_bytes = 0;
+        folded = llama_kvmem_gdn_fold_ggml(replay.backend.get(), replay.generic_layers.data(), replay.layers,
+                n_keep, recr_->replay_capacity, &compute_bytes);
+        if (folded && n_keep && !replay.generic_logged) {
+            LLAMA_LOG_INFO("KVMEM_GDN_FOLD mode=ggml scratch_bytes=%zu\n", compute_bytes);
+            replay.generic_logged = true;
+        }
+    }
+    if (!folded) {
+        LLAMA_LOG_ERROR("KVMEM_GDN_FOLD failed backend=%d keep=%u capacity=%u\n",
+                (int) replay.kind, n_keep, recr_->replay_capacity);
         recr_->replay_poisoned = true;
         recr_->replay_finish(0);
         return false;
@@ -170,13 +267,17 @@ struct llama_memory_kvmem::CaptureD2hPipe {
         uint8_t * gpu = nullptr;
         uint8_t * pin = nullptr;
         size_t cap = 0;
+#if defined(LLAMA_KVMEM_CUDA)
         cudaEvent_t done = nullptr;
+#endif
         bool inflight = false;
         std::vector<Item> items;
         std::vector<llama_pos> pos;
     };
+#if defined(LLAMA_KVMEM_CUDA)
     cudaStream_t stream = nullptr;
     cudaEvent_t snap = nullptr;
+#endif
     ggml_backend_event_t compute_done = nullptr;
     ggml_backend_event_t snap_be = nullptr;
     Slot slots[2];
@@ -185,6 +286,7 @@ struct llama_memory_kvmem::CaptureD2hPipe {
     bool ok = false;
 };
 
+#if defined(LLAMA_KVMEM_CUDA)
 static bool kvmem_cuda_ok(cudaError_t e, const char * what) {
     if (e == cudaSuccess) {
         return true;
@@ -192,8 +294,10 @@ static bool kvmem_cuda_ok(cudaError_t e, const char * what) {
     fprintf(stderr, "KVMEM D2H %s: %s\n", what, cudaGetErrorString(e));
     return false;
 }
+#endif
 
 static uint8_t * kvmem_cuda_tensor_ptr(ggml_tensor * t) {
+#if defined(LLAMA_KVMEM_CUDA)
     if (!t || !t->data) {
         return nullptr;
     }
@@ -202,14 +306,22 @@ static uint8_t * kvmem_cuda_tensor_ptr(ggml_tensor * t) {
         return nullptr;
     }
     return static_cast<uint8_t *>(t->data);
+#else
+    // Non-CUDA ggml backends do not expose linear device pointers; callers
+    // fall back to tensor-level kvmem_tensor_get/set transfers.
+    (void) t;
+    return nullptr;
+#endif
 }
 
+#if defined(LLAMA_KVMEM_CUDA)
 static bool kvmem_d2d(uint8_t * dst, const uint8_t * src, size_t n, cudaStream_t st) {
     if (!dst || !src || n == 0) {
         return true;
     }
     return kvmem_cuda_ok(kvmem_copy_async(dst, src, n, cudaMemcpyDeviceToDevice, st), "layout D2D");
 }
+#endif
 
 static void kvmem_stagein_flush_sync(int64_t * copy_us, int64_t * rope_us,
                                      int64_t * hadamard_us, int64_t * set_us) {
@@ -226,9 +338,11 @@ static bool kvmem_harvest_sync_old() {
     return e && e[0] != '\0' && e[0] != '0';
 }
 
+#if defined(LLAMA_KVMEM_CUDA)
 static cudaEvent_t kvmem_ggml_cuda_event(ggml_backend_event_t ev) {
     return ev ? static_cast<cudaEvent_t>(ev->context) : nullptr;
 }
+#endif
 
 static bool kvmem_env_perf() {
     static int v = -1;
@@ -480,6 +594,17 @@ llama_memory_kvmem::llama_memory_kvmem(
         const llama_cparams & cparams,
         llama_kv_cache * ext_kv) :
     model_(model) {
+#if defined(LLAMA_KVMEM_CUDA)
+    if (cparams.offload_kqv) {
+        for (uint32_t il = 0; il < model.hparams.n_layer(); ++il) {
+            auto * dev = model.dev_layer(il);
+            if (dev && ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_CPU &&
+                    std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev)), "CUDA") != 0) {
+                throw std::runtime_error("KVMem CUDA staging cannot use a non-CUDA device; rebuild with GGML_CUDA=OFF for Vulkan");
+            }
+        }
+    }
+#endif
     backend_.owner = this;
     trace_ = kvmem_diag_enabled();
     perf_.enabled = kvmem_env_perf();
@@ -978,7 +1103,9 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
     const size_t vrow = ggml_row_size(type_v_, n_embd_v_);
     const uint64_t kspan = static_cast<uint64_t>(block_tokens_) * krow;
     const uint64_t vspan = static_cast<uint64_t>(block_tokens_) * vrow;
+#if defined(LLAMA_KVMEM_CUDA)
     const uint64_t scratch_stride = kspan + vspan;
+#endif
 
     std::vector<size_t> res_ix(items.size(), static_cast<size_t>(-1));
     size_t n_res = 0;
@@ -988,6 +1115,7 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
         }
     }
 
+#if defined(LLAMA_KVMEM_CUDA)
     bool d2d_ok = n_res > 0;
     uint8_t * scratch = nullptr;
     if (d2d_ok) {
@@ -1005,7 +1133,12 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
         kvmem_stagein_gpu_ready((size_t) block_tokens_ * std::max(n_embd_k_, n_embd_v_),
                                 std::max(krow, vrow) * (size_t) block_tokens_);
     }
+#else
+    // Generic backends take the host-bounce payload path below.
+    const bool d2d_ok = false;
+#endif
 
+#if defined(LLAMA_KVMEM_CUDA)
     if (d2d_ok) {
         cudaStream_t st = cudaStreamPerThread;
         bool copy_ok = true;
@@ -1117,7 +1250,9 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
                                __func__);
             }
         }
-    } else if (n_res > 0) {
+    } else
+#endif
+    if (n_res > 0) {
         const uint64_t payload_bytes =
                 static_cast<uint64_t>(n_layer_) * (krow + vrow) * block_tokens_;
         std::vector<std::vector<uint8_t>> payloads(items.size());
@@ -1549,6 +1684,7 @@ bool llama_memory_kvmem::d2h_init() {
     if (!d2h_) {
         d2h_ = std::make_unique<CaptureD2hPipe>();
     }
+#if defined(LLAMA_KVMEM_CUDA)
     if (d2h_->stream == nullptr) {
         if (!kvmem_cuda_ok(cudaStreamCreateWithFlags(&d2h_->stream, cudaStreamNonBlocking),
                            "stream")) {
@@ -1574,6 +1710,11 @@ bool llama_memory_kvmem::d2h_init() {
     }
     d2h_->ok = true;
     harvest_worker_start();
+#else
+    // Generic backends: captures are read back synchronously in d2h_submit,
+    // so no stream, events or harvest worker are needed.
+    d2h_->ok = true;
+#endif
     return true;
 }
 
@@ -1581,11 +1722,14 @@ void llama_memory_kvmem::d2h_free() {
     if (!d2h_) {
         return;
     }
+#if defined(LLAMA_KVMEM_CUDA)
     if (d2h_->stream) {
         cudaStreamSynchronize(d2h_->stream);
     }
+#endif
     for (int i = 0; i < 2; ++i) {
         auto & s = d2h_->slots[i];
+#if defined(LLAMA_KVMEM_CUDA)
         if (s.gpu) {
             cudaFree(s.gpu);
             s.gpu = nullptr;
@@ -1598,13 +1742,19 @@ void llama_memory_kvmem::d2h_free() {
             cudaEventDestroy(s.done);
             s.done = nullptr;
         }
+#else
+        free(s.pin);
+        s.pin = nullptr;
+#endif
         s.cap = 0;
         s.inflight = false;
     }
+#if defined(LLAMA_KVMEM_CUDA)
     if (d2h_->snap) {
         cudaEventDestroy(d2h_->snap);
         d2h_->snap = nullptr;
     }
+#endif
     if (d2h_->compute_done) {
         ggml_backend_event_free(d2h_->compute_done);
         d2h_->compute_done = nullptr;
@@ -1613,10 +1763,12 @@ void llama_memory_kvmem::d2h_free() {
         ggml_backend_event_free(d2h_->snap_be);
         d2h_->snap_be = nullptr;
     }
+#if defined(LLAMA_KVMEM_CUDA)
     if (d2h_->stream) {
         cudaStreamDestroy(d2h_->stream);
         d2h_->stream = nullptr;
     }
+#endif
     d2h_->ok = false;
 }
 
@@ -1660,9 +1812,11 @@ void llama_memory_kvmem::harvest_wait_slot(int slot) {
 }
 
 void llama_memory_kvmem::harvest_loop() {
+#if defined(LLAMA_KVMEM_CUDA)
     if (d2h_) {
         kvmem_cuda_ok(cudaSetDevice(d2h_->device), "harvest worker set device");
     }
+#endif
     while (true) {
         int slot = -1;
         {
@@ -1690,11 +1844,13 @@ void llama_memory_kvmem::d2h_commit(int slot) {
     }
     const int64_t t0 = ggml_time_us();
     int64_t wait_us = 0;
+#if defined(LLAMA_KVMEM_CUDA)
     if (s.done) {
         const int64_t tw = ggml_time_us();
         cudaEventSynchronize(s.done);
         wait_us = ggml_time_us() - tw;
     }
+#endif
     cur_pos_ = s.pos;
     const uint64_t nv0 = raw_ ? raw_->nvme_wait_ns() : 0;
     const uint64_t sc0 = raw_ ? raw_->nvme_syscalls() : 0;
@@ -1830,6 +1986,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     perf_.last_d2h_submit_us = 0;
     const int64_t t_submit0 = ggml_time_us();
     if (s.cap < bytes) {
+#if defined(LLAMA_KVMEM_CUDA)
         if (s.gpu) {
             cudaFree(s.gpu);
             s.gpu = nullptr;
@@ -1843,10 +2000,20 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             s.cap = 0;
             return false;
         }
+#else
+        // Generic backends stage straight into a heap buffer.
+        free(s.pin);
+        s.pin = static_cast<uint8_t *>(malloc(bytes));
+        if (!s.pin) {
+            s.cap = 0;
+            return false;
+        }
+#endif
         s.cap = bytes;
         kvmem_diag("KVMEM_CAPTURE_MEMORY mode=raw slot0_bytes=%zu slot1_bytes=%zu last_bytes=%zu pinned_bytes=%zu\n",
                 d2h_->slots[0].cap, d2h_->slots[1].cap, bytes, d2h_->slots[0].cap + d2h_->slots[1].cap);
     }
+#if defined(LLAMA_KVMEM_CUDA)
     if (be && !d2h_->compute_done) {
         ggml_backend_dev_t dev = ggml_backend_get_device(be);
         if (dev) {
@@ -1854,14 +2021,21 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             d2h_->snap_be = ggml_backend_event_new(dev);
         }
     }
+#endif
+#if defined(LLAMA_KVMEM_CUDA)
     const bool old_sync = kvmem_harvest_sync_old() || !be || !d2h_->compute_done ||
             !kvmem_ggml_cuda_event(d2h_->compute_done);
+#else
+    const bool old_sync = true;
+#endif
     {
         const int64_t t_sync = ggml_time_us();
         if (old_sync) {
             if (be) {
                 ggml_backend_synchronize(be);
-            } else {
+            }
+#if defined(LLAMA_KVMEM_CUDA)
+            else {
                 cudaDeviceSynchronize();
             }
         } else {
@@ -1872,6 +2046,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             } else {
                 ggml_backend_synchronize(be);
             }
+#endif
         }
         perf_.last_sync_us = ggml_time_us() - t_sync;
         perf_.sync_us += perf_.last_sync_us;
@@ -1904,6 +2079,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             memcpy(s.pin + off, src, it.nbytes);
             n_host++;
         } else {
+#if defined(LLAMA_KVMEM_CUDA)
             if (!kvmem_cuda_ok(kvmem_copy_async(s.gpu + off, src, it.nbytes,
                                                cudaMemcpyDeviceToDevice, d2h_->stream),
                                "D2D")) {
@@ -1912,6 +2088,12 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             }
             it.from_gpu = true;
             n_dev++;
+#else
+            // Generic backends: synchronous read straight into the staging buffer.
+            ggml_backend_tensor_get(n.t, s.pin + off, 0, it.nbytes);
+            if (kvmem_tensor_on_device(n.t)) kvmem_record_transfer(KVMEM_XFER_D2H, it.nbytes);
+            n_host++;
+#endif
         }
         if (n.which == 'q') {
             n_q++;
@@ -1925,6 +2107,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     }
     perf_.last_d2d_us = ggml_time_us() - t_d2d;
     perf_.d2d_us += perf_.last_d2d_us;
+#if defined(LLAMA_KVMEM_CUDA)
     if (n_dev > 0) {
         if (!kvmem_cuda_ok(cudaEventRecord(d2h_->snap, d2h_->stream), "snap record")) {
             return false;
@@ -1961,10 +2144,14 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             }
         }
     }
+#endif
+#if defined(LLAMA_KVMEM_CUDA)
     if (!kvmem_cuda_ok(cudaEventRecord(s.done, d2h_->stream), "record")) {
         return false;
     }
+#endif
     const int submitted = d2h_->next;
+#if defined(LLAMA_KVMEM_CUDA)
     if (harvest_worker_on()) {
         {
             std::lock_guard<std::mutex> lk(harvest_w_->mu);
@@ -1978,6 +2165,11 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     if (!old_sync && d2h_->compute_done) {
         ggml_backend_event_synchronize(d2h_->compute_done);
     }
+#else
+    // Generic backends: the staging buffer is already final; commit inline.
+    s.inflight = true;
+    d2h_commit(submitted);
+#endif
     perf_.last_d2h_submit_us = ggml_time_us() - t_submit0;
     perf_.d2h_submit_us += perf_.last_d2h_submit_us;
     if (trace_) {
@@ -2244,12 +2436,14 @@ void llama_memory_kvmem::harvest_write_batch() {
                 raw_->write_layer_v_gpu(j.pos0, j.n, j.il, src);
             }
         };
+#if defined(LLAMA_KVMEM_CUDA)
         if (j.gpu_src &&
             kvmem_copy(packed.data(), j.gpu_src, j.nbytes,
                        cudaMemcpyDeviceToHost) == cudaSuccess) {
             commit(packed.data());
             return;
         }
+#endif
         if (j.vt) {
             kvmem_tensor_get(j.vt, packed.data(), j.tensor_off, j.nbytes);
             commit(packed.data());

@@ -16,7 +16,9 @@
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
 
+#if defined(LLAMA_KVMEM_CUDA)
 #include <cuda_runtime.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -27,6 +29,7 @@
 #include <vector>
 
 static uint8_t * kvmem_mtp_cuda_ptr(ggml_tensor * t) {
+#if defined(LLAMA_KVMEM_CUDA)
     if (!t || !t->data) {
         return nullptr;
     }
@@ -35,6 +38,11 @@ static uint8_t * kvmem_mtp_cuda_ptr(ggml_tensor * t) {
         return nullptr;
     }
     return static_cast<uint8_t *>(t->data);
+#else
+    // Non-CUDA ggml backends do not expose linear device pointers.
+    (void) t;
+    return nullptr;
+#endif
 }
 
 llama_memory_kvmem_mtp::llama_memory_kvmem_mtp(
@@ -418,6 +426,10 @@ bool llama_memory_kvmem_mtp::layout_d2d(const LayoutMove * moves, size_t n_moves
     if (vt && !v_trans_ && !vbase) {
         return false;
     }
+#if !defined(LLAMA_KVMEM_CUDA)
+    // Generic backends re-stage MTP blocks from raw-K instead of D2D moves.
+    return false;
+#else
     const size_t krow = ggml_row_size(type_k_, n_embd_k_);
     const size_t vrow = ggml_row_size(type_v_, n_embd_v_);
     const uint64_t kspan = (uint64_t) block_tokens_ * krow;
@@ -499,6 +511,7 @@ bool llama_memory_kvmem_mtp::layout_d2d(const LayoutMove * moves, size_t n_moves
     }
     cudaFree(scratch);
     return ok;
+#endif
 }
 
 void llama_memory_kvmem_mtp::write_block_to_gpu(uint32_t block_id) {

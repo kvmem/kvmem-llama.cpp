@@ -1,0 +1,17 @@
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -78,9 +78,14 @@
+         enable_language(CUDA)
+         target_sources(llama PRIVATE
+             ${LLAMA_KVMEM_ROOT}/src/adapter/llama-kvmem-stagein.cu)
++        target_compile_definitions(llama PRIVATE LLAMA_KVMEM_CUDA=1)
+         if (DEFINED CMAKE_CUDA_ARCHITECTURES)
+             set_property(TARGET llama PROPERTY CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES})
+         endif()
++    else()
++        # Non-CUDA backends (Vulkan, etc.): host-fallback stage-in.
++        target_sources(llama PRIVATE
++            ${LLAMA_KVMEM_ROOT}/src/adapter/llama-kvmem-stagein-generic.cpp)
+     endif()
+     target_include_directories(llama PRIVATE
+         ${LLAMA_KVMEM_ROOT}/kvmem/include

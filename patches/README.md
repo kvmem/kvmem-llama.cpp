@@ -7,6 +7,9 @@ It also fixes reasoning-budget initialization from a template's generation prefi
 `scripts/apply-patches.sh` applies it
 without creating commits and checks for an already applied tree.
 
+`vulkan-support.patch` adds the generic staging path. `vulkan-replay.patch`
+adds Vulkan-native GDN Record/Fold shaders and their GGML graph fallback wiring.
+
 `reasoning-budget-upgrade.patch` upgrades the v0.15.0 ReplaySSM tree.
 `replayssm-upgrade.patch` upgrades the preceding multimodal/query-replay tree.
 `multimodal-upgrade.patch` upgrades the KVMem working tree recorded before

@@ -1,6 +1,8 @@
 /build/
 /build-cpu/
 /build-cuda/
+/build-vulkan/
+/build-multi/
 /models/
 /.venv/
 /logs/
