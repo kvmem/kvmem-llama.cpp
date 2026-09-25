@@ -15,6 +15,8 @@
 #include "kvmem-prefill-policy.h"
 
 #include "chat.h"
+#include "kvmem-responses.h"
+#include "kvmem-responses-stream.h"
 #include "common.h"
 #include "log.h"
 #include "kvmem-server-log.h"
@@ -52,6 +54,8 @@ static void print_usage(const char * argv0) {
             "usage: %s -m model.gguf [options]\n"
             "\n"
             "  Independent single-slot OpenAI-compatible server. Does not patch llama-server.\n"
+            "  Endpoints: /v1/chat/completions, /v1/responses (streaming and non-streaming),\n"
+            "             /v1/models, /props, /slots, /health, plus the bundled chat UI.\n"
             "\n"
             "  -m, --model PATH           GGUF path\n"
             "  --mmproj PATH              vision projector GGUF\n"
@@ -1235,6 +1239,54 @@ static json message_to_nlohmann(const common_chat_msg & msg) {
     return json::parse(msg.to_json_oaicompat().dump());
 }
 
+// OpenAI Responses "output" items for one assistant message. Kept as a free
+// function so a future streaming path can emit the same items incrementally.
+// call_id reuses the chat tool_call id verbatim so the client echoes it back
+// unchanged in a function_call_output item.
+static std::vector<json> responses_output_items(
+        const common_chat_msg & msg,
+        const std::string & request_id) {
+    std::vector<json> output;
+    if (!msg.reasoning_content.empty()) {
+        output.push_back(json {
+            {"id", "rs_" + request_id},
+            {"summary", json::array()},
+            {"type", "reasoning"},
+            {"content", json::array({json{
+                {"text", msg.reasoning_content},
+                {"type", "reasoning_text"},
+            }})},
+            {"encrypted_content", ""},
+            {"status", "completed"},
+        });
+    }
+    if (!msg.content.empty()) {
+        output.push_back(json {
+            {"content", json::array({json{
+                {"type", "output_text"},
+                {"annotations", json::array()},
+                {"logprobs", json::array()},
+                {"text", msg.content},
+            }})},
+            {"id", "msg_" + request_id},
+            {"role", msg.role.empty() ? std::string("assistant") : msg.role},
+            {"status", "completed"},
+            {"type", "message"},
+        });
+    }
+    for (const common_chat_tool_call & tool_call : msg.tool_calls) {
+        output.push_back(json {
+            {"id", "fc_" + tool_call.id},
+            {"type", "function_call"},
+            {"status", "completed"},
+            {"arguments", tool_call.arguments},
+            {"call_id", tool_call.id},
+            {"name", tool_call.name},
+        });
+    }
+    return output;
+}
+
 static json chat_diff_to_delta(const common_chat_msg_diff & diff) {
     json delta = json::object();
     if (!diff.reasoning_content_delta.empty()) {
@@ -1264,6 +1316,59 @@ static json chat_diff_to_delta(const common_chat_msg_diff & diff) {
     }
     return delta;
 }
+
+// Adapts Responses SSE events to the Chat Completions helpers below. The
+// Responses path reuses StreamChatOut for delta computation and rendering state
+// (set_text / finish_reason), so one server loop drives both wire formats.
+// `json` here is the server's nlohmann type, not upstream common_json.
+struct ResponsesStreamOut {
+    common_chat_msg prev;
+    std::string acc;
+    std::vector<std::string> tc_ids;
+    std::string request_id;
+    KvMemResponsesStreamState state;
+    int n_id = 0;
+
+    common_chat_parser_params pp;
+
+    ResponsesStreamOut(const common_chat_params & chat, bool parse_tools, const std::string & id)
+        : request_id(id) {
+        pp = common_chat_parser_params(chat);
+        pp.parse_tool_calls = parse_tools;
+        if (!chat.parser.empty()) {
+            pp.parser.load(chat.parser);
+        }
+    }
+
+    std::vector<std::string> set_text(const std::string & text, bool partial) {
+        acc = text;
+        std::vector<std::string> events;
+        try {
+            common_chat_msg msg = common_chat_parse(acc, partial, pp);
+            if (msg.empty() && partial) {
+                return events;
+            }
+            if (msg.role.empty()) {
+                msg.role = "assistant";
+            }
+            msg.set_tool_call_ids(tc_ids, [this]() {
+                return kvmem_chat_tool_id(request_id, ++n_id);
+            });
+            const auto diffs = common_chat_msg_diff::compute_diffs(prev, msg);
+            prev = std::move(msg);
+            for (const auto & d : diffs) {
+                for (std::string & ev : kvmem_responses_stream_events(state, d, request_id)) {
+                    events.push_back(std::move(ev));
+                }
+            }
+        } catch (const std::exception & e) {
+            if (!partial) {
+                LOG_WRN("srv    KVMEM_TRACE responses_stream_parse_fail %s\n", e.what());
+            }
+        }
+        return events;
+    }
+};
 
 struct StreamChatOut {
     common_chat_parser_params pp;
@@ -2132,12 +2237,50 @@ int main(int argc, char ** argv) {
         res.set_content(j.dump(), "application/json");
     });
 
+    // Diagnostic: dump each /v1/responses request, and the Chat Completions body
+    // it converts to, into $KVMEM_DBG_DIR. A client whose request this server
+    // only half-understands is invisible on the wire -- it gets a well-formed but
+    // empty response -- so seeing the exact bytes a client sends is the only way
+    // to tell which item shape it uses. Every request gets its own numbered pair,
+    // so a multi-turn exchange (tool call, then the tool result sent back) reads
+    // in order. Unset KVMEM_DBG_DIR = no-op, which is the normal case.
+    const auto kvmem_debug_dump = [seq = std::make_shared<int>(0)](
+            const char * name, const std::string & data) {
+        const char * dir = std::getenv("KVMEM_DBG_DIR");
+        if (dir == nullptr || *dir == '\0') {
+            return;
+        }
+        char prefix[32];
+        std::snprintf(prefix, sizeof(prefix), "%03d-", ++*seq);
+        const std::string path = std::string(dir) + "/" + prefix + name;
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out.write(data.data(), (std::streamsize) data.size());
+        std::fprintf(stderr, "[KVMEM_DBG] wrote %s (%zu bytes)\n", path.c_str(), data.size());
+        std::fflush(stderr);
+    };
+
     auto handle_chat = [&](const httplib::Request & req, httplib::Response & res) {
         const std::time_t created = std::time(nullptr);
-        json body;
+        // /v1/responses reuses this handler: convert the Responses request to
+        // Chat Completions first, then select the Responses output shape below.
+        const bool is_responses = req.path == "/v1/responses" || req.path == "/responses";
+        std::string body_text = req.body;
+        if (is_responses) {
+            kvmem_debug_dump("responses-raw.json", req.body);
+            try {
+                body_text = kvmem_responses_to_chatcmpl(req.body);
+            } catch (const std::exception & e) {
+                res.status = 400;
+                res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+                return;
+            }
+            kvmem_debug_dump("responses-converted.json", body_text);
+        } else {
+            kvmem_debug_dump("chatcmpl-raw.json", req.body);
+        }        json body;
         std::vector<std::vector<uint8_t>> media_files;
         try {
-            body = json::parse(kvmem_parse_media_messages(req.body, st.vision != nullptr, media_files));
+            body = json::parse(kvmem_parse_media_messages(body_text, st.vision != nullptr, media_files));
         } catch (const std::exception & e) {
             res.status = 400;
             res.set_content(json{{"error", e.what()}}.dump(), "application/json");
@@ -2406,6 +2549,30 @@ int main(int argc, char ** argv) {
             } else if (hit_limit) {
                 finish = "length";
             }
+            if (is_responses) {
+                kvmem_diag("KVMEM_TRACE chat_out n_tool_calls=%zu finish=%s content_chars=%zu reasoning_chars=%zu\n",
+                        msg.tool_calls.size(), finish.c_str(),
+                        msg.content.size(), msg.reasoning_content.size());
+                const std::time_t now = std::time(nullptr);
+                json out = {
+                    {"completed_at", now},
+                    {"created_at", now},
+                    {"id", "resp_" + request_id},
+                    {"model", st.model_name},
+                    {"object", "response"},
+                    {"output", responses_output_items(msg, request_id)},
+                    {"status", "completed"},
+                    {"usage", json {
+                        {"input_tokens", (int) toks.size()},
+                        {"output_tokens", n_gen},
+                        {"total_tokens", n_gen + (int) toks.size()},
+                        {"input_tokens_details", json{{"cached_tokens", n_cache_hit}}},
+                    }},
+                };
+                out["timings"] = *timings;
+                res.set_content(out.dump(), "application/json");
+                return;
+            }
             json message;
             try {
                 message = message_to_nlohmann(msg);
@@ -2439,7 +2606,7 @@ int main(int argc, char ** argv) {
             res.set_header("X-Accel-Buffering", "no");
             res.set_chunked_content_provider("text/event-stream",
                 [slot, &st, &req, toks, cid, request_id, created, max_tokens, sparams, parse_tools, formatted, stops,
-                 spec_stream, ctx, vocab, make_emit_gen_wall, timings](size_t, httplib::DataSink & sink) mutable {
+                 spec_stream, ctx, vocab, make_emit_gen_wall, timings, is_responses](size_t, httplib::DataSink & sink) mutable {
                     StreamIo io;
                     io.sink = &sink;
                     io.req = &req;
@@ -2451,9 +2618,38 @@ int main(int argc, char ** argv) {
                         }
                         return true;
                     };
-                    // 1:1 upstream initial delta: {role, content:null} (server-task.cpp to_json_oaicompat_chat)
-                    // 中文：对齐上游流式首帧 delta——role=assistant 且 content=null，客户端按此初始化
-                    send(stream_choice_chunk(cid, st.model_name, created, json{{"role", "assistant"}, {"content", nullptr}}, nullptr).dump());
+                    // Responses events arrive pre-framed ("event: ..\ndata: ..\n\n");
+                    // Chat Completions keeps the bare "data: <json>" framing.
+                    auto send_raw = [&](const std::string & framed) -> bool {
+                        if (!sink.write(framed.data(), framed.size())) {
+                            io.aborted = true;
+                            return false;
+                        }
+                        return true;
+                    };
+                    std::optional<ResponsesStreamOut> responses;
+                    if (is_responses) {
+                        responses.emplace(formatted, parse_tools, request_id);
+                    }
+                    const bool stream_open = is_responses
+                        ? [&] {
+                              for (const std::string & ev : kvmem_responses_stream_created(
+                                           responses->state, request_id, st.model_name)) {
+                                  if (!send_raw(ev)) {
+                                      return false;
+                                  }
+                              }
+                              return true;
+                          }()
+                        // 1:1 upstream initial delta: {role, content:null} (server-task.cpp to_json_oaicompat_chat)
+                        // 中文：对齐上游流式首帧 delta——role=assistant 且 content=null，客户端按此初始化
+                        : send(stream_choice_chunk(cid, st.model_name, created, json{{"role", "assistant"}, {"content", nullptr}}, nullptr).dump());
+                    if (!stream_open) {
+                        multimodal_finish_request(st);
+                        slot->unlock();
+                        sink.done();
+                        return true;
+                    }
                     const auto t_turn0 = std::chrono::steady_clock::now();
                     int n_cache_hit = 0;
                     if (!run_prefill_retrieval(st, toks, &io, &n_cache_hit)) {
@@ -2485,10 +2681,18 @@ int main(int argc, char ** argv) {
                                 gen.push_back(id);
                                 content += piece;
                                 emit_gen_wall((int) gen.size(), false);
-                                auto deltas = sco.set_text(content, true);
-                                for (size_t i = 0; i < deltas.size(); ++i) {
-                                    const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
-                                    send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
+                                if (is_responses) {
+                                    for (const std::string & ev : responses->set_text(content, true)) {
+                                        if (!send_raw(ev)) {
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    auto deltas = sco.set_text(content, true);
+                                    for (size_t i = 0; i < deltas.size(); ++i) {
+                                        const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
+                                        send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
+                                    }
                                 }
                             },
                             [&]() { return !stream_heartbeat(&io); },
@@ -2542,10 +2746,18 @@ int main(int argc, char ** argv) {
                             gen.push_back(id);
                             hit_stop = strip_stop(content, stops);
                             emit_gen_wall((int) gen.size(), false);
-                            auto deltas = sco.set_text(content, !hit_stop);
-                            for (size_t i = 0; i < deltas.size(); ++i) {
-                                const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
-                                send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
+                            if (is_responses) {
+                                for (const std::string & ev : responses->set_text(content, !hit_stop)) {
+                                    if (!send_raw(ev)) {
+                                        break;
+                                    }
+                                }
+                            } else {
+                                auto deltas = sco.set_text(content, !hit_stop);
+                                for (size_t i = 0; i < deltas.size(); ++i) {
+                                    const json * ts = (i + 1 == deltas.size()) ? &*timings : nullptr;
+                                    send(stream_choice_chunk(cid, st.model_name, created, deltas[i], nullptr, ts).dump());
+                                }
                             }
                             if (hit_stop) {
                                 break;
@@ -2558,8 +2770,30 @@ int main(int argc, char ** argv) {
                             sink.done();
                             return true;
                         }
-                        const bool hit_limit = !stopped && !hit_stop && (int) gen.size() >= max_tokens;
                         emit_gen_wall((int) gen.size(), false);
+                        if (is_responses) {
+                            // The non-partial parse turns accumulated text into the final diffs;
+                            // the *.done sequence then closes every block the stream opened.
+                            for (const std::string & ev : responses->set_text(content, false)) {
+                                if (!send_raw(ev)) {
+                                    break;
+                                }
+                            }
+                            emit_gen_wall((int) gen.size());
+                            commit_cached(st, toks, gen);
+                            for (const std::string & ev : kvmem_responses_stream_done(
+                                         responses->state, responses->prev, request_id, st.model_name,
+                                         (int) toks.size(), (int) gen.size(), n_cache_hit)) {
+                                if (!send_raw(ev)) {
+                                    break;
+                                }
+                            }
+                            multimodal_finish_request(st);
+                            slot->unlock();
+                            sink.done();
+                            return true;
+                        }
+                        const bool hit_limit = (int) gen.size() >= max_tokens;
                         auto flush_deltas = sco.set_text(content, false);
                         for (size_t i = 0; i < flush_deltas.size(); ++i) {
                             const json * ts = (i + 1 == flush_deltas.size()) ? &*timings : nullptr;
@@ -2589,8 +2823,30 @@ int main(int argc, char ** argv) {
                         sink.done();
                         return true;
                     }
-                    const bool hit_limit = (int) gen.size() >= max_tokens;
                     emit_gen_wall((int) gen.size(), false);
+                    if (is_responses) {
+                        // The non-partial parse turns accumulated text into the final diffs;
+                        // the *.done sequence then closes every block the stream opened.
+                        for (const std::string & ev : responses->set_text(content, false)) {
+                            if (!send_raw(ev)) {
+                                break;
+                            }
+                        }
+                        emit_gen_wall((int) gen.size());
+                        commit_cached(st, toks, gen);
+                        for (const std::string & ev : kvmem_responses_stream_done(
+                                     responses->state, responses->prev, request_id, st.model_name,
+                                     (int) toks.size(), (int) gen.size(), n_cache_hit)) {
+                            if (!send_raw(ev)) {
+                                break;
+                            }
+                        }
+                        multimodal_finish_request(st);
+                        slot->unlock();
+                        sink.done();
+                        return true;
+                    }
+                    const bool hit_limit = (int) gen.size() >= max_tokens;
                     auto flush_deltas = sco.set_text(content, false);
                     for (size_t i = 0; i < flush_deltas.size(); ++i) {
                         const json * ts = (i + 1 == flush_deltas.size()) ? &*timings : nullptr;
@@ -2736,6 +2992,8 @@ int main(int argc, char ** argv) {
 
     svr.Post("/v1/chat/completions", handle_chat);
     svr.Post("/chat/completions", handle_chat);
+    svr.Post("/v1/responses", handle_chat);
+    svr.Post("/responses", handle_chat);
 
     if (!svr.bind_to_port(host, port)) {
         fprintf(stderr, "KVMEM_STARTUP_ERROR cannot bind %s:%d; check --host/--port, permissions and port conflicts\n", host.c_str(), port);
