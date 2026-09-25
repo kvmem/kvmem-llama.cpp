@@ -40,17 +40,24 @@
 static llama_kvmem_params g_kvmem_params = {};
 
 struct llama_memory_kvmem::GdnReplay {
-    ggml_backend_buffer_ptr descriptors;
-    cudaStream_t stream = nullptr;
-    int layers = 0;
-    int device = 0;
+    // With layer-split inference the recurrent (GDN) layers live on different
+    // CUDA devices, so the fold runs once per device over that device's layers.
+    // Each group owns its own descriptor array and non-blocking stream.
+    struct Group {
+        ggml_backend_buffer_ptr descriptors;
+        cudaStream_t stream = nullptr;
+        int layers = 0;
+        int device = 0;
+    };
+    std::vector<Group> groups;
     uint64_t folds = 0;
     int64_t fold_us = 0;
     ~GdnReplay() {
-        if (stream) {
-            cudaSetDevice(device);
-            cudaStreamSynchronize(stream);
-            cudaStreamDestroy(stream);
+        for (auto & g : groups) {
+            if (!g.stream) continue;
+            cudaSetDevice(g.device);
+            cudaStreamSynchronize(g.stream);
+            cudaStreamDestroy(g.stream);
         }
     }
 };
@@ -69,32 +76,65 @@ void llama_memory_kvmem::set_recurrent(llama_memory_recurrent * recr) {
             (recurrent_bytes + conv_bytes) / planes * (planes - 1));
     if (!recr->replay_capacity) return;
     auto replay = std::make_unique<GdnReplay>();
-    std::vector<ggml_cuda_gdn_replay_layer> layers;
     size_t records = 0, states = 0;
-    ggml_backend_buffer_type_t buft = nullptr;
+    // Group the recurrent layers by CUDA device: with layer-split inference they
+    // are spread over several GPUs, and each GPU needs its own descriptor array,
+    // stream and fold launch (every layer's replay tensors live on its own device).
+    std::vector<int> dev_id;
+    std::vector<ggml_backend_buffer_type_t> dev_buft;
+    std::vector<std::vector<ggml_cuda_gdn_replay_layer>> dev_layers;
     for (size_t il = 0; il < recr->r_l.size(); ++il) {
         if (!recr->r_l[il]) continue;
         const auto & r = recr->replay_l[il];
-        layers.push_back({static_cast<float *>(recr->s_l[il]->data), static_cast<float *>(recr->r_l[il]->data),
+        ggml_cuda_gdn_replay_layer layer = {
+                static_cast<float *>(recr->s_l[il]->data), static_cast<float *>(recr->r_l[il]->data),
                 static_cast<float *>(r[0]->data), static_cast<float *>(r[1]->data), static_cast<float *>(r[2]->data),
-                static_cast<float *>(r[3]->data), static_cast<float *>(r[4]->data)});
+                static_cast<float *>(r[3]->data), static_cast<float *>(r[4]->data)};
         for (auto * t : r) records += ggml_nbytes(t);
         states += ggml_nbytes(recr->r_l[il]) + ggml_nbytes(recr->s_l[il]);
-        buft = ggml_backend_buffer_get_type(recr->s_l[il]->buffer);
+        cudaPointerAttributes attrs{};
+        if (cudaPointerGetAttributes(&attrs, layer.state) != cudaSuccess) {
+            cudaGetLastError();
+            throw std::runtime_error("GDN replay: cannot query recurrent layer device");
+        }
+        int slot = -1;
+        for (size_t k = 0; k < dev_id.size(); ++k) {
+            if (dev_id[k] == attrs.device) {
+                slot = static_cast<int>(k);
+                break;
+            }
+        }
+        if (slot < 0) {
+            dev_id.push_back(attrs.device);
+            dev_buft.push_back(ggml_backend_buffer_get_type(recr->s_l[il]->buffer));
+            dev_layers.emplace_back();
+            slot = static_cast<int>(dev_id.size()) - 1;
+        }
+        dev_layers[slot].push_back(layer);
     }
-    if (layers.empty()) throw std::runtime_error("GDN replay has no recurrent layers");
-    cudaPointerAttributes attrs{};
-    if (cudaPointerGetAttributes(&attrs, layers.front().state) != cudaSuccess ||
-            cudaSetDevice(attrs.device) != cudaSuccess) throw std::runtime_error("cannot select GDN replay device");
-    replay->device = attrs.device;
-    replay->layers = layers.size();
-    replay->descriptors.reset(ggml_backend_buft_alloc_buffer(buft, layers.size() * sizeof(layers[0])));
-    if (!replay->descriptors || cudaStreamCreateWithFlags(&replay->stream, cudaStreamNonBlocking) != cudaSuccess ||
-            cudaMemcpy(ggml_backend_buffer_get_base(replay->descriptors.get()), layers.data(), layers.size() * sizeof(layers[0]), cudaMemcpyHostToDevice) != cudaSuccess) {
-        throw std::runtime_error("cannot allocate GDN replay descriptors");
+    if (dev_id.empty()) throw std::runtime_error("GDN replay has no recurrent layers");
+    size_t total_layers = 0;
+    for (size_t k = 0; k < dev_id.size(); ++k) {
+        auto & layers = dev_layers[k];
+        total_layers += layers.size();
+        GdnReplay::Group group;
+        group.device = dev_id[k];
+        group.layers = static_cast<int>(layers.size());
+        if (cudaSetDevice(group.device) != cudaSuccess) {
+            throw std::runtime_error("cannot select GDN replay device");
+        }
+        group.descriptors.reset(ggml_backend_buft_alloc_buffer(dev_buft[k], layers.size() * sizeof(layers[0])));
+        if (!group.descriptors ||
+                cudaStreamCreateWithFlags(&group.stream, cudaStreamNonBlocking) != cudaSuccess ||
+                cudaMemcpy(ggml_backend_buffer_get_base(group.descriptors.get()), layers.data(),
+                           layers.size() * sizeof(layers[0]), cudaMemcpyHostToDevice) != cudaSuccess) {
+            throw std::runtime_error("cannot allocate GDN replay descriptors");
+        }
+        replay->groups.push_back(std::move(group));
     }
-    kvmem_diag("KVMEM_GDN_MEMORY mode=replay layers=%d capacity=%u state_bytes=%zu record_bytes=%zu descriptor_bytes=%zu\n",
-            replay->layers, recr->replay_capacity, states, records, layers.size() * sizeof(layers[0]));
+    kvmem_diag("KVMEM_GDN_MEMORY mode=replay layers=%d capacity=%u state_bytes=%zu record_bytes=%zu descriptor_bytes=%zu devices=%zu\n",
+            static_cast<int>(total_layers), recr->replay_capacity, states, records,
+            total_layers * sizeof(ggml_cuda_gdn_replay_layer), dev_id.size());
     gdn_replay_ = std::move(replay);
 }
 
@@ -111,10 +151,30 @@ bool llama_memory_kvmem::gdn_replay_commit(llama_context * ctx, uint32_t n_keep)
     llama_synchronize(ctx);
     auto & replay = *gdn_replay_;
     const int64_t started = ggml_time_us();
-    const auto * layers = static_cast<const ggml_cuda_gdn_replay_layer *>(ggml_backend_buffer_get_base(replay.descriptors.get()));
-    if (cudaSetDevice(replay.device) != cudaSuccess ||
-            !ggml_backend_cuda_gdn_fold(layers, replay.layers, n_keep, recr_->replay_capacity, replay.stream) ||
-            cudaStreamSynchronize(replay.stream) != cudaSuccess) {
+    bool ok = true;
+    // One fold launch per device group (layer-split spreads the GDN layers).
+    for (auto & g : replay.groups) {
+        if (cudaSetDevice(g.device) != cudaSuccess) {
+            ok = false;
+            break;
+        }
+        const auto * layers = static_cast<const ggml_cuda_gdn_replay_layer *>(
+                ggml_backend_buffer_get_base(g.descriptors.get()));
+        if (!ggml_backend_cuda_gdn_fold(layers, g.layers, n_keep, recr_->replay_capacity, g.stream)) {
+            ok = false;
+            break;
+        }
+    }
+    if (ok) {
+        for (auto & g : replay.groups) {
+            if (cudaSetDevice(g.device) != cudaSuccess ||
+                    cudaStreamSynchronize(g.stream) != cudaSuccess) {
+                ok = false;
+                break;
+            }
+        }
+    }
+    if (!ok) {
         recr_->replay_poisoned = true;
         recr_->replay_finish(0);
         return false;
@@ -988,7 +1048,9 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
         }
     }
 
-    bool d2d_ok = n_res > 0;
+    // Multi-GPU safe mode: the D2D layout path uses one scratch buffer and one
+    // stream, so take the device-aware host fallback instead.
+    bool d2d_ok = n_res > 0 && !kvmem_mg_safe();
     uint8_t * scratch = nullptr;
     if (d2d_ok) {
         const cudaError_t alloc_error = cudaMalloc(reinterpret_cast<void **>(&scratch),
@@ -1543,6 +1605,11 @@ bool llama_memory_kvmem::capture_can_reuse(uint32_t n_tokens, uint32_t n_pos,
 }
 
 bool llama_memory_kvmem::d2h_init() {
+    // Multi-GPU safe mode: the D2H capture pipe keeps its stream/events/staging
+    // on one device, so bypass it and use the device-aware harvest_capture path.
+    if (kvmem_mg_safe()) {
+        return false;
+    }
     if (d2h_ && d2h_->ok) {
         return true;
     }

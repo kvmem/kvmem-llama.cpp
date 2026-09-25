@@ -28,6 +28,63 @@ Current milestone: [`v0.16.0-rc3`](docs/milestones/v0.16.0-rc3.md) (pre-release)
 
 Version: **0.16.0-rc3**. See the [English / 中文 release notes](docs/releases/v0.16.0-rc3.md) for CUDA build choices and measured results.
 
+## TurboQuant KV codecs and 2-GPU layer split
+
+This contribution integrates the TurboQuant KV cache codec family and adds
+multi-GPU (2x Tesla V100) layer-split support.
+
+### TurboQuant KV codecs
+
+Seven additional KV cache data types are selectable with the usual
+`-ctk` / `-ctv` flags. A narrower KV type frees VRAM on a fixed budget, which
+leaves more room for the GPU working set that KVMem actually attends over.
+
+| `-ctk` / `-ctv` | approx. KV bits | notes |
+|---|---|---|
+| `turbo8` | ~8.1 | near-lossless |
+| `turbo4` | ~4.1 | small loss |
+| **`turbo3_tcq`** | **~3.1** | trellis-coded, best quality per byte |
+| `turbo2_tcq` | ~2.1 | aggressive |
+| `turbo2` / `turbo3` | - | non-TCQ variants |
+
+Implementation:
+
+- `ggml`: new types, block layouts, type traits, CPU reference
+  quantize/dequantize, WHT (Hadamard) rotation and mean-sub tables.
+- `ggml-cuda`: encode (`set_rows`), decode (`get_rows`), and a Flash-Attention
+  path that materializes turbo K/V back to f16 through the inverse WHT before
+  the native f16 attention kernel, so no graph-level change is required.
+
+Measured perplexity (2x Tesla V100, Qwen3.8-27B, 1024 ctx x 6 chunks):
+
+| KV type | PPL |
+|---|---|
+| f16 | 1.430 |
+| turbo8 | 1.429 |
+| turbo4 | 1.572 |
+| **turbo3_tcq** | **1.323** |
+| turbo2_tcq | 1.486 |
+
+`turbo3_tcq` matches the f16 baseline on greedy generation while using roughly
+one fifth of the KV bytes. TurboQuant originates from the buun-llama-cpp work;
+this is a port and integration for the KVMem tree.
+
+### 2-GPU layer split
+
+KVMem now runs with `--split-mode layer` across two GPUs:
+
+- the recurrent (GDN) layers are folded per device instead of requiring every
+  recurrent layer on a single GPU, so layer split and MTP can be combined;
+- the KVMem stager gained a per-device path (`KVMEM_MG_SAFE=1`) so a 2-GPU
+  context stages KV in and out without aliasing the Q/K/V work buffers.
+
+Example (2x V100):
+
+```
+-ngl all --split-mode layer --device CUDA0,CUDA1
+-ctk turbo3_tcq -ctv turbo3_tcq
+```
+
 ## How KVMem works
 
 Completed KV blocks are stored in host RAM. For each agent step, KVMem retrieves relevant blocks using the current query and places them in chronological order in a bounded GPU working set. Previously computed KV is reused across turns.
@@ -147,20 +204,23 @@ yet accept every `llama-server` option.
 | `-np`, `--parallel` | Only `1` is supported. Automatic or multiple slots produce an error. |
 | `-to`, `--timeout` | HTTP read/write timeout in seconds; KVMem retains its 1800-second default. |
 | `--threads-http` | HTTP worker count; <= 0 selects automatically. This does not enable parallel inference slots. |
-| `-dev`, `--device`; `--list-devices` | Select one offload device (for example `CUDA0`), or `none` for CPU; list devices without loading a model. |
-| `-mg`, `--main-gpu`; `-sm`, `--split-mode` | Select a single GPU using `--split-mode none --main-gpu INDEX`. `layer` is accepted only when offloading to at most one device. |
+| `-dev`, `--device`; `--list-devices` | Select one or more offload devices (for example `CUDA0` or `CUDA0,CUDA1`), or `none` for CPU; list devices without loading a model. |
+| `-mg`, `--main-gpu`; `-sm`, `--split-mode` | `--split-mode layer` spreads the model and its KV over the selected devices (see below); `--split-mode none --main-gpu INDEX` pins everything to one GPU. `row` and `tensor` split remain unsupported. |
 | `-ts`, `--tensor-split` | A single proportion is accepted; multi-device proportions are rejected. |
 
 Additional upstream aliases: `--usage` = `--help`, `--predict` = `--n-predict`,
 `-s` = `--seed`, `-mm` = `--mmproj`, `--no-webui` = `--no-ui`, and
 `--path` = `--ui-dir`.
 
-**Multi-GPU operation is not supported yet**, including with `--no-kvmem`.
-Multiple `--device` names, multiple `--tensor-split` entries, and `row`/`tensor`
-split modes fail before model loading. When automatic discovery sees multiple
-GPUs, select one with `--device CUDA0`, use `--split-mode none --main-gpu INDEX`,
-or expose one GPU through `CUDA_VISIBLE_DEVICES`. Indices refer to the visible
-device list (and to the selected device list when `--device` is supplied).
+**Multi-GPU layer split is supported.** Select several devices and use
+`--split-mode layer` (for example `--device CUDA0,CUDA1 --split-mode layer`) to
+spread the model over two or more GPUs. The recurrent (GDN) layers are folded
+once per device, and the KVMem stager keeps a per-device path (`KVMEM_MG_SAFE=1`)
+so a multi-GPU context stages KV in and out without aliasing the Q/K/V work
+buffers. `--no-kvmem` with more than one device, `row`/`tensor` split modes and
+multiple `--tensor-split` entries remain unsupported and fail before model
+loading. Indices refer to the visible device list (and to the selected device
+list when `--device` is supplied).
 
 Threads, physical batch size and Flash Attention settings propagate to MTP.
 Existing model, host/port, context, sampling, chat-template, vision and KV-cache
@@ -284,7 +344,7 @@ MODEL=/path/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf \
   MMPROJ=/path/mmproj-Qwen3.8-27B-Q5_K-MIX.gguf scripts/start-iq3.sh --dry-run
 ```
 
-GPU selection honors `CUDA_VISIBLE_DEVICES`; otherwise it chooses a 5060 Ti or the only GPU. Ambiguous multi-GPU setups require an explicit selection. `MODEL`, `MMPROJ`, `MMPROJ_DEVICE`, `HOST` and `PORT` can override recipe defaults. MTP3 and ReplaySSM are server defaults; override with `SPEC_DRAFT_N_MAX` and `KVMEM_MTP_STATE` if needed. CUDA libraries come from the build directory, caller environment or the toolkit recorded during compilation; use `CUDA_HOME` or `LD_LIBRARY_PATH` for a custom installation. An existing matching service is reused; switching configuration requires `--restart`, which only stops this project's server.
+GPU selection honors `CUDA_VISIBLE_DEVICES`; otherwise it chooses a 5060 Ti or the only GPU. On a multi-GPU machine, either select one GPU explicitly (for example `--device CUDA0`) or run a **layer split across several GPUs** (`--device CUDA0,CUDA1 --split-mode layer`) - see the 2-GPU layer split section above. `MODEL`, `MMPROJ`, `MMPROJ_DEVICE`, `HOST` and `PORT` can override recipe defaults. MTP3 and ReplaySSM are server defaults; override with `SPEC_DRAFT_N_MAX` and `KVMEM_MTP_STATE` if needed. CUDA libraries come from the build directory, caller environment or the toolkit recorded during compilation; use `CUDA_HOME` or `LD_LIBRARY_PATH` for a custom installation. An existing matching service is reused; switching configuration requires `--restart`, which only stops this project's server.
 
 ### llama.cpp-compatible KV cache flags
 
@@ -302,18 +362,23 @@ that sets both types. Arguments apply from left to right; the last assignment
 to each component wins. Setting only `-ctk` does not change V (both default to
 `q8_0`), so specify both when changing precision.
 
-Supported types are `f16`, `f32`, `q8_0`, `q5_0` and `q4_0`.
-K and V may independently select `q8_0`, `q5_0` or `q4_0`: all nine
-quantized pairs are accepted. Float/quantized pairs such as `q8_0/f16` remain
-rejected before model loading. Models that require shared K/V types still
-cannot use mixed precision; execution also depends on backend kernel support.
+Supported types are `f16`, `f32`, `q8_0`, `q5_0`, `q4_0`, and the TurboQuant
+codecs `turbo8`, `turbo4`, `turbo3_tcq` and `turbo2_tcq` (plus the non-TCQ
+`turbo2`/`turbo3`). K and V may independently select `q8_0`, `q5_0` or `q4_0`:
+all nine quantized pairs are accepted. Float/quantized pairs such as
+`q8_0/f16` remain rejected before model loading, and a TurboQuant type must be
+used on both sides (`-ctk turbo3_tcq -ctv turbo3_tcq`); mixed TurboQuant/other
+pairs are rejected before model loading. Models that require shared K/V types
+still cannot use mixed precision; execution also depends on backend kernel
+support.
 
 GPU validation covers the common `q8_0/q8_0`, `q5_0/q5_0`, `q4_0/q4_0`
 pairs and mixed **`q8_0/q4_0`**. Q8/Q4 additionally passed cache save/restore,
-MTP replay and long-context checks on CUDA. The other five mixed quantized
-pairs are enabled with argument-parsing checks only; they have not received
-full inference, quality or performance validation. ROCm/Vulkan combinations
-have not been validated here.
+MTP replay and long-context checks on CUDA, and the TurboQuant codecs were
+validated on CUDA (2x Tesla V100, sm_70 - see the perplexity table above). The
+other five mixed quantized pairs are enabled with argument-parsing checks only;
+they have not received full inference, quality or performance validation.
+ROCm/Vulkan combinations have not been validated here.
 
 ```text
 llama-kvmem-server -m model.gguf -ctk q8_0 -ctv q4_0
