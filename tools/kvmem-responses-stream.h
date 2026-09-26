@@ -20,13 +20,18 @@
 // Free functions over the same common_chat_msg_diff values the Chat Completions
 // stream already consumes, so this stays GPU-free and unit-testable.
 
+struct KvMemResponsesFunctionCallState {
+    std::string item_id;
+    int output_index = -1;
+};
+
 struct KvMemResponsesStreamState {
     // Block state carried across deltas, exactly as upstream tracks it.
     bool reasoning_started = false;
     bool text_started      = false;
-    bool fc_started        = false;
-    // Item id of the function_call currently accumulating arguments.
-    std::string fc_item_id;
+    // One entry per common_chat_msg::tool_calls index. A later call must not
+    // replace the item id/index used by an earlier call's deltas or done event.
+    std::vector<KvMemResponsesFunctionCallState> function_calls;
     // Index of the item each block occupies in `response.output`, in the order
     // the items were opened. OpenAI puts this `output_index` on every event and
     // content_index on the text-bearing ones; a client that indexes its own
@@ -34,7 +39,6 @@ struct KvMemResponsesStreamState {
     int next_output_index  = 0;
     int reasoning_index    = -1;
     int text_index         = -1;
-    int fc_index           = -1;
     // Monotonic counter, one per emitted event, as `sequence_number`.
     int64_t next_sequence  = 0;
 };

@@ -326,7 +326,7 @@ if (KVMEM_BUILD_LLAMA)
     target_link_libraries(kvmem-output-limit-test PRIVATE llama-common cpp-httplib)
     add_test(NAME kvmem-output-limit-test COMMAND kvmem-output-limit-test)
 
-    add_executable(kvmem-responses-test tests/responses-test.cpp
+    add_executable(kvmem-responses-test tests/responses-test.cpp tests/responses-media-test.cpp
         tools/kvmem-responses.cpp tools/kvmem-responses-stream.cpp
         llama.cpp/tools/server/server-chat.cpp llama.cpp/tools/server/server-common.cpp)
     target_include_directories(kvmem-responses-test PRIVATE

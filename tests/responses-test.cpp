@@ -17,6 +17,8 @@
 
 using nlohmann::json;
 
+void test_image_media_parser();
+
 static json convert(const std::string & body) {
     return json::parse(kvmem_responses_to_chatcmpl(body));
 }
@@ -54,6 +56,22 @@ static void test_input_item_list() {
     CHECK(out["messages"].size() == 1);
     CHECK(out["messages"][0]["content"][0]["type"] == "text");
     CHECK(out["messages"][0]["content"][0]["text"] == "hi");
+}
+
+static void test_image_input_converts_in_order() {
+    const auto out = convert(R"({"input": [{"role": "user", "content": [
+        {"type": "input_text", "text": "Compare these images"},
+        {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+        {"type": "input_image", "image_url": "https://example.com/second.png"}
+    ]}]})");
+    const auto & content = out["messages"][0]["content"];
+    CHECK(content.size() == 3);
+    CHECK(content[0]["type"] == "text");
+    CHECK(content[0]["text"] == "Compare these images");
+    CHECK(content[1]["type"] == "image_url");
+    CHECK(content[1]["image_url"]["url"] == "data:image/png;base64,aGVsbG8=");
+    CHECK(content[2]["type"] == "image_url");
+    CHECK(content[2]["image_url"]["url"] == "https://example.com/second.png");
 }
 
 static void test_function_call_output() {
@@ -146,7 +164,10 @@ static void test_rejects_bad_input() {
     CHECK(throws(R"({"input": 5})"));                                    // wrong input type
     CHECK(throws("not json"));
     CHECK(throws(R"({"input": [{"role": "user", "content": [
-        {"type": "input_image", "image_url": "https://example.com/x.png"}
+        {"type": "input_image"}
+    ]}]})"));
+    CHECK(throws(R"({"input": [{"role": "user", "content": [
+        {"type": "input_image", "file_id": "file_123"}
     ]}]})"));
 }
 
@@ -184,15 +205,17 @@ static common_chat_msg_diff text_diff(const std::string & content, const std::st
     return d;
 }
 
-static common_chat_msg_diff call_name_diff(const std::string & id, const std::string & name) {
+static common_chat_msg_diff call_name_diff(const std::string & id, const std::string & name, size_t index = 0) {
     common_chat_msg_diff d;
+    d.tool_call_index = index;
     d.tool_call_delta.id = id;
     d.tool_call_delta.name = name;
     return d;
 }
 
-static common_chat_msg_diff call_args_diff(const std::string & args) {
+static common_chat_msg_diff call_args_diff(const std::string & args, size_t index = 0) {
     common_chat_msg_diff d;
+    d.tool_call_index = index;
     d.tool_call_delta.arguments = args;
     return d;
 }
@@ -297,25 +320,25 @@ static void test_stream_reasoning_then_text_sequence() {
 
 static void test_stream_function_call_ids() {
     KvMemResponsesStreamState st;
-    const auto added = types_of(kvmem_responses_stream_events(st, call_name_diff("call_1", "get_weather"), "abc"));
+    const auto first_raw = kvmem_responses_stream_events(st, call_name_diff("call_1", "get_weather"), "abc");
+    const auto added = types_of(first_raw);
     CHECK(added.size() == 1);
     CHECK(added[0] == "response.output_item.added");
+    // The incremental parser can repeat or extend a name. Neither reopens it.
+    CHECK(kvmem_responses_stream_events(st, call_name_diff("call_1", "get_weather"), "abc").empty());
+    CHECK(kvmem_responses_stream_events(st, call_name_diff("call_1", "get_weather_v2"), "abc").empty());
 
-    const auto second = types_of(kvmem_responses_stream_events(st, call_name_diff("call_1", "get_weather"), "abc"));
-    CHECK(second.size() == 1);
-    CHECK(second[0] == "response.output_item.added");
-
-    const json item = decode_event(kvmem_responses_stream_events(st, call_name_diff("call_1", "get_weather"), "abc")[0])["item"];
+    const json item = decode_event(first_raw[0])["item"];
     CHECK(item["id"] == "fc_call_1");
     CHECK(item["call_id"] == "call_1");      // echoed verbatim, as the non-streaming path does
     CHECK(item["name"] == "get_weather");
     CHECK(item["arguments"] == "");
 
     // The name must be captured so argument deltas can address the item.
-    st.fc_item_id = "fc_call_1";
     const json d = decode_event(kvmem_responses_stream_events(st, call_args_diff("{\"c\""), "abc")[0]);
     CHECK(d["type"] == "response.function_call_arguments.delta");
     CHECK(d["item_id"] == "fc_call_1");
+    CHECK(d["output_index"] == 0);
     CHECK(d["delta"] == "{\"c\"");
 }
 
@@ -418,7 +441,8 @@ static void test_stream_done_tool_call() {
     // the tool call names itself once, which is what opens the item.
     kvmem_responses_stream_events(st, text_diff("ok", ""), "abc");
     kvmem_responses_stream_events(st, call_name_diff("call_1", "get_weather"), "abc");
-    CHECK(st.fc_item_id == "fc_call_1");
+    CHECK(st.function_calls.size() == 1);
+    CHECK(st.function_calls[0].item_id == "fc_call_1");
     common_chat_msg msg;
     msg.role = "assistant";
     common_chat_tool_call tc;
@@ -449,6 +473,38 @@ static void test_stream_done_tool_call() {
     CHECK(r["output"][0]["type"] == "function_call");
 }
 
+static void test_stream_two_tool_calls_keep_their_ids_and_indices() {
+    KvMemResponsesStreamState st;
+    const auto first = kvmem_responses_stream_events(st, call_name_diff("call_1", "first_tool", 0), "abc");
+    const auto second = kvmem_responses_stream_events(st, call_name_diff("call_2", "second_tool", 1), "abc");
+    CHECK(decode_event(first[0])["output_index"] == 0);
+    CHECK(decode_event(second[0])["output_index"] == 1);
+    const auto first_args = kvmem_responses_stream_events(st, call_args_diff("{\"a\":1}", 0), "abc");
+    const auto second_args = kvmem_responses_stream_events(st, call_args_diff("{\"b\":2}", 1), "abc");
+    CHECK(decode_event(first_args[0])["item_id"] == "fc_call_1");
+    CHECK(decode_event(first_args[0])["output_index"] == 0);
+    CHECK(decode_event(second_args[0])["item_id"] == "fc_call_2");
+    CHECK(decode_event(second_args[0])["output_index"] == 1);
+
+    common_chat_msg msg;
+    msg.role = "assistant";
+    common_chat_tool_call one, two;
+    one.id = "call_1"; one.name = "first_tool"; one.arguments = "{\"a\":1}";
+    two.id = "call_2"; two.name = "second_tool"; two.arguments = "{\"b\":2}";
+    msg.tool_calls = {one, two};
+    const auto done = kvmem_responses_stream_done(st, msg, "abc", "m", 5, 4, 0);
+    CHECK(types_of(done) == std::vector<std::string>({
+        "response.function_call_arguments.done", "response.output_item.done",
+        "response.function_call_arguments.done", "response.output_item.done", "response.completed"}));
+    CHECK(decode_event(done[0])["item_id"] == "fc_call_1");
+    CHECK(decode_event(done[0])["output_index"] == 0);
+    CHECK(decode_event(done[1])["item"]["id"] == "fc_call_1");
+    CHECK(decode_event(done[2])["item_id"] == "fc_call_2");
+    CHECK(decode_event(done[2])["output_index"] == 1);
+    CHECK(decode_event(done[3])["item"]["id"] == "fc_call_2");
+    CHECK(decode_event(done[4])["response"]["output"].size() == 2);
+}
+
 static void test_stream_done_empty_content_still_completes() {
     // max_tokens hit before any text: the stream must still terminate with
     // response.completed, with an empty output array.
@@ -468,6 +524,8 @@ int main() {
     test_string_input();
     test_instructions_become_system();
     test_input_item_list();
+    test_image_input_converts_in_order();
+    test_image_media_parser();
     test_function_call_output();
     test_reasoning_item_summary_folds_into_content();
     test_reasoning_item_with_content_is_left_alone();
@@ -484,6 +542,7 @@ int main() {
     test_stream_done_text_only();
     test_stream_done_reasoning_and_message();
     test_stream_done_tool_call();
+    test_stream_two_tool_calls_keep_their_ids_and_indices();
     test_stream_done_empty_content_still_completes();
     std::puts("responses request bridge tests PASS");
 }

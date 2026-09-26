@@ -203,32 +203,33 @@ std::vector<std::string> kvmem_responses_stream_events(
         }));
     }
 
-    if (!diff.tool_call_delta.name.empty()) {
-        // The function_call item id must persist for the argument deltas that
-        // follow: the tool call id is only known once its name has streamed.
-        // The name arrives once per tool call, so this opens the item once.
-        state.fc_item_id   = "fc_" + (diff.tool_call_delta.id.empty() ? response_id : diff.tool_call_delta.id);
-        state.fc_index     = state.next_output_index++;
-        state.fc_started   = true;
-        events.push_back(kvmem_responses_event(&state, "response.output_item.added", json{
-            {"output_index", state.fc_index},
-            {"item", json{
-                {"id", state.fc_item_id},
-                {"arguments", ""},
-                {"call_id", diff.tool_call_delta.id},
-                {"name", diff.tool_call_delta.name},
-                {"type", "function_call"},
-                {"status", "in_progress"},
-            }},
-        }));
-    }
-
-    if (!diff.tool_call_delta.arguments.empty()) {
-        events.push_back(kvmem_responses_event(&state, "response.function_call_arguments.delta", json{
-            {"item_id", state.fc_item_id.empty() ? "fc_" + response_id : state.fc_item_id},
-            {"output_index", state.fc_index < 0 ? 0 : state.fc_index},
-            {"delta", diff.tool_call_delta.arguments},
-        }));
+    if (diff.tool_call_index != std::string::npos) {
+        if (state.function_calls.size() <= diff.tool_call_index) {
+            state.function_calls.resize(diff.tool_call_index + 1);
+        }
+        auto & call = state.function_calls[diff.tool_call_index];
+        if (!diff.tool_call_delta.name.empty() && call.output_index < 0) {
+            call.item_id = "fc_" + (diff.tool_call_delta.id.empty() ? response_id : diff.tool_call_delta.id);
+            call.output_index = state.next_output_index++;
+            events.push_back(kvmem_responses_event(&state, "response.output_item.added", json{
+                {"output_index", call.output_index},
+                {"item", json{
+                    {"id", call.item_id},
+                    {"arguments", ""},
+                    {"call_id", diff.tool_call_delta.id},
+                    {"name", diff.tool_call_delta.name},
+                    {"type", "function_call"},
+                    {"status", "in_progress"},
+                }},
+            }));
+        }
+        if (!diff.tool_call_delta.arguments.empty() && call.output_index >= 0) {
+            events.push_back(kvmem_responses_event(&state, "response.function_call_arguments.delta", json{
+                {"item_id", call.item_id},
+                {"output_index", call.output_index},
+                {"delta", diff.tool_call_delta.arguments},
+            }));
+        }
     }
 
     return events;
@@ -295,17 +296,21 @@ std::vector<std::string> kvmem_responses_stream_done(
         output_index++;
     }
 
-    for (const common_chat_tool_call & tool_call : msg.tool_calls) {
-        if (!state.fc_item_id.empty()) {
+    for (size_t call_index = 0; call_index < msg.tool_calls.size(); ++call_index) {
+        const common_chat_tool_call & tool_call = msg.tool_calls[call_index];
+        const bool opened = call_index < state.function_calls.size() &&
+            state.function_calls[call_index].output_index >= 0;
+        if (opened) {
+            const auto & call = state.function_calls[call_index];
             events.push_back(kvmem_responses_event(&state, "response.function_call_arguments.done", json{
-                {"item_id", state.fc_item_id},
-                {"output_index", output_index},
+                {"item_id", call.item_id},
+                {"output_index", call.output_index},
                 {"arguments", tool_call.arguments},
             }));
         }
         json item = kvmem_responses_function_call_item(tool_call);
         events.push_back(kvmem_responses_event(&state, "response.output_item.done", json{
-            {"output_index", output_index},
+            {"output_index", opened ? state.function_calls[call_index].output_index : output_index},
             {"item", item},
         }));
         output.push_back(std::move(item));

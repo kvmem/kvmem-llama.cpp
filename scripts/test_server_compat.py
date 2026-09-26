@@ -240,6 +240,35 @@ try:
                     # SDK dispatching on either sees a different stream.
                     check('responses stream event/type agree',
                           all(name is not None and data.get('type') == name for name, data in events))
+                    if a.image and a.mmproj:
+                        image_payload = {'input': [{'role': 'user', 'content': [
+                            {'type': 'input_text', 'text': 'Read the four digits in the image. Output only the digits.'},
+                            {'type': 'input_image', 'image_url': dataurl}]}],
+                            'max_output_tokens': 128, 'reasoning': {'effort': 'none'},
+                            'temperature': 0, 'stream': False}
+                        status, body = request('/v1/responses', json.dumps(image_payload).encode(), headers)
+                        image_response = json.loads(body)
+                        image_text = ''.join(part.get('text', '')
+                                             for item in image_response.get('output', [])
+                                             if item.get('type') == 'message'
+                                             for part in item.get('content', [])
+                                             if part.get('type') == 'output_text')
+                        check('responses vision non-stream', status == 200 and
+                              ''.join(image_text.strip().strip('。.!').split()) == '6037')
+                        image_payload['stream'] = True
+                        status, body = request('/v1/responses', json.dumps(image_payload).encode(), headers)
+                        image_deltas = []
+                        completed = []
+                        for line in body.decode().splitlines():
+                            if line.startswith('data: ') and line != 'data: [DONE]':
+                                event = json.loads(line[6:])
+                                if event.get('type') == 'response.output_text.delta':
+                                    image_deltas.append(event.get('delta', ''))
+                                elif event.get('type') == 'response.completed':
+                                    completed.append(event)
+                        check('responses vision stream', status == 200 and
+                              ''.join(''.join(image_deltas).strip().strip('。.!').split()) == '6037' and
+                              len(completed) == 1)
                     payload = {'messages': [{'role': 'user', 'content':
                         'Write numbers 1 through 60 in ascending order, separated by commas. Output only the list.'}],
                         'reasoning_effort': 'none', 'temperature': 0, 'stream': False}

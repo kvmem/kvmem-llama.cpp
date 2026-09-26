@@ -143,6 +143,13 @@ def main():
         check("non-stream reasoning text", "144" in text_of(r), text_of(r))
         check("non-stream item types",
               all(k in ("reasoning", "message", "function_call") for k in kinds), kinds)
+        for item in r.output:
+            item_data = item.model_dump()
+            if item.type == "reasoning" and item_data.get("content"):
+                summary = item_data.get("summary") or []
+                check("non-stream reasoning summary",
+                      bool(summary) and summary[0].get("text") == item_data["content"][0].get("text"),
+                      item_data)
 
         # --- streaming tool call --------------------------------------------
         events, calls = [], []
@@ -196,22 +203,34 @@ def main():
                 text += event.delta
         check("instructions honored (stream)", "BANANA" in text.upper(), text)
 
-        # --- vision refused on both paths -----------------------------------
+        # --- vision on both paths --------------------------------------------
         if args.mmproj:
             png = base64.b64decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
             url = "data:image/png;base64," + base64.b64encode(png).decode()
-            for stream in (False, True):
-                try:
-                    client.responses.create(
-                        model="test",
-                        input=[{"role": "user", "content": [
-                            {"type": "input_text", "text": "what is this?"},
-                            {"type": "input_image", "image_url": url}]}],
-                        max_output_tokens=16, stream=stream)
-                    check(f"vision refused (stream={stream})", False, "accepted an image")
-                except openai.BadRequestError as e:
-                    check(f"vision refused (stream={stream})", "not supported" in str(e), str(e))
+            vision_input = [{"role": "user", "content": [
+                {"type": "input_text", "text": "Describe this image briefly."},
+                {"type": "input_image", "image_url": url}]}]
+            r = client.responses.create(model="test", input=vision_input,
+                                        max_output_tokens=128, reasoning={"effort": "none"})
+            check("vision non-stream", r.status == "completed" and bool(text_of(r).strip()),
+                  r.model_dump())
+            events, text = [], ""
+            for event in client.responses.create(model="test", input=vision_input,
+                                                 max_output_tokens=128,
+                                                 reasoning={"effort": "none"}, stream=True):
+                events.append(event.type)
+                if event.type == "response.output_text.delta":
+                    text += event.delta
+            check("vision stream", bool(text.strip()) and events.count("response.completed") == 1,
+                  (events, text))
+        else:
+            try:
+                client.responses.create(model="test", input=[{"role": "user", "content": [
+                    {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}]}])
+                check("vision requires mmproj", False, "accepted an image")
+            except openai.BadRequestError as e:
+                check("vision requires mmproj", "mmproj" in str(e), str(e))
 
         print()
         if FAILURES:

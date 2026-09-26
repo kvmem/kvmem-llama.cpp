@@ -4,23 +4,6 @@
 // common_json. See kvmem-responses.h for why the conversion crosses a string.
 #include "server-chat.h"
 
-static bool kvmem_responses_has_image(const json & body) {
-    if (!body.contains("input") || !body.at("input").is_array()) {
-        return false;
-    }
-    for (const json & item : body.at("input")) {
-        if (!item.contains("content") || !item.at("content").is_array()) {
-            continue;
-        }
-        for (const json & part : item.at("content")) {
-            if (json_value(part, "type", std::string()) == "input_image") {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 // A reasoning item a client sends back may carry its text only under `summary`.
 //
 // We emit every reasoning item with the text in both `summary` (type
@@ -101,9 +84,6 @@ static void kvmem_responses_fill_message_type(json & body) {
 
 std::string kvmem_responses_to_chatcmpl(const std::string & body) {
     json parsed = json::parse(body);
-    if (kvmem_responses_has_image(parsed)) {
-        throw std::invalid_argument("image input is not supported on /v1/responses yet");
-    }
     kvmem_responses_fold_reasoning_summary(parsed);
     kvmem_responses_fill_message_type(parsed);
     return server_chat_convert_responses_to_chatcmpl(parsed).dump();

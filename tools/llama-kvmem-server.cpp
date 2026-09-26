@@ -1250,7 +1250,10 @@ static std::vector<json> responses_output_items(
     if (!msg.reasoning_content.empty()) {
         output.push_back(json {
             {"id", "rs_" + request_id},
-            {"summary", json::array()},
+            {"summary", json::array({json{
+                {"text", msg.reasoning_content},
+                {"type", "summary_text"},
+            }})},
             {"type", "reasoning"},
             {"content", json::array({json{
                 {"text", msg.reasoning_content},
