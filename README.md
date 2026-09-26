@@ -42,11 +42,15 @@ Core flags (what the 16 GiB recipes still pass):
 | `--kvmem-budget` | How many historical tokens retrieval may keep on GPU. |
 | `--kvmem-sink-tokens N` | Server and CLI: always keep the prefix in the GPU working set. Default `0` keeps one block (not disabled). Positive values round down to whole blocks, with a minimum of one block. For example, with block size 128, `1024` keeps 1024 tokens and `129` keeps 128. These blocks count toward `--kvmem-budget`. |
 | `--kvmem-gen-reserve` | GPU slots reserved for new tokens so retrieval cannot fill the pool. **One generation cannot exceed this length** (including thinking). |
+| `--kvmem-conversations N` | How many conversations keep their KV in host RAM. Default `1` reproduces earlier behavior, where a different conversation discards the previous one. Higher values let the server switch between conversations without reprocessing them; requests are still served one at a time. Needs flash attention. |
+| `--kvmem-conversations-gb GB` | Cap the accounted host store bytes summed over conversations, evicting the least recently used **inactive** conversation first. Default `0` means no byte cap, leaving the count above as the only bound. Requires `--kvmem-conversations N` with `N > 1`. |
 | `--kv-dtype` | Sets the same cache type for **main** attention K and V (IQ3 q8_0, IQ4 q5_0). Use `-ctk q8_0 -ctv q4_0` for mixed precision. |
 | `--spec-type draft-mtp` | Enable multi-token prediction. |
 | `--mmproj` | Vision projector GGUF. Omit for text-only. |
 
 KVMem retrieval is on by default, with 128-token blocks, query replay `auto`, query policy `user`, MTP draft length 3, F16 draft KV, and ReplaySSM. You do not need to pass those unless you are overriding them. GPU KV size is `budget + gen_reserve`. When history exceeds `--kvmem-budget`, retrieval picks blocks for the current last-user query. Clients should send the full `messages` history each turn.
+
+With `--kvmem-conversations` above 1, that history is also the conversation's identity: no client API change and no conversation id are required. A request that continues a stored conversation extends it, while a request that only shares a system prompt or chat template starts a separate one instead of truncating the stored tail. A match is usable only when a recurrent checkpoint exists at or before it; otherwise the request is an ordinary cache miss. Details and limits are in [Multi-conversation KV cache](docs/multi-conversation-kv-cache.md).
 
 ## How KVMem attaches to llama.cpp
 
@@ -193,10 +197,13 @@ key and return HTTP 401 otherwise. Health checks, CORS preflights and mounted UI
 assets remain public. Loading the UI does not grant access to authenticated APIs;
 clients must supply the key. Without key flags, authentication remains disabled.
 
-Regression checks: `kvmem-server-options-test` via CTest, and
+Regression checks: `kvmem-server-options-test` and
+`kvmem-conversation-store-test` via CTest, and
 `python scripts/test_server_compat.py --server /path/to/llama-kvmem-server`.
 Add `--model PATH` for live auth/inference checks, `--mtp` for MTP, and
 `--mmproj PATH --image PATH` for the optional vision fixture containing `6037`.
+Interleaved conversations need a model of their own:
+`python scripts/test_server_conversations.py --server PATH --model PATH --output DIR`.
 
 ### Environment variables and startup diagnostics
 
@@ -493,6 +500,7 @@ Native TLS is not supported. Stream `usage` includes
 - [Recommended 16 GiB performance](docs/recommended-config-performance.md)
 - [256K tool benchmark](docs/long-context-benchmark-2026-09-14.md)
 - [Query replay](docs/query-replay-implementation-report-2026-09-14.md)
+- [Multi-conversation KV cache](docs/multi-conversation-kv-cache.md)
 - [Multimodal usage](docs/multimodal-implementation-report-2026-09-14.md)
 - Native Qwen engine: [kvmem/kvmem-qw3](https://github.com/kvmem/kvmem-qw3)
 

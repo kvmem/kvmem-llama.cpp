@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <limits>
@@ -61,6 +62,11 @@ inline int kvmem_cli_gpu_layers(const char * option, const char * value) {
 
 struct kvmem_server_options {
     int sink_tokens = 0; // Zero keeps one block; positive values round down to whole blocks.
+    // Live host KV stores, time-multiplexed on one GPU working set. One
+    // reproduces the single-store server, where a different conversation
+    // discards the previous one.
+    int conversations = 1;
+    uint64_t conversation_bytes = 0; // Accounted host store bytes; zero = count cap only.
     int verbosity = 3; // Same default and levels as llama-server.
     int trace = -1; // -1 inherits KVMEM_TRACE; CLI overrides only after parsing.
     int threads = -1;
@@ -153,6 +159,12 @@ struct kvmem_server_options {
     bool parse(const std::string & arg, const Need & need) {
         if (arg == "--kvmem-sink-tokens") {
             sink_tokens = kvmem_cli_int(arg.c_str(), need(arg.c_str()));
+        } else if (arg == "--kvmem-conversations") {
+            conversations = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
+        } else if (arg == "--kvmem-conversations-gb") {
+            const double gb = kvmem_cli_real(arg.c_str(), need(arg.c_str()), 0, 1048576);
+            conversation_bytes = gb <= 0.0 ? 0
+                : static_cast<uint64_t>(gb * 1024.0 * 1024.0 * 1024.0);
         } else if (arg == "--kvmem-trace" || arg == "--no-kvmem-trace") {
             trace = arg == "--kvmem-trace" ? 1 : 0;
         } else if (arg == "-lv" || arg == "--verbosity" || arg == "--log-verbosity") {
