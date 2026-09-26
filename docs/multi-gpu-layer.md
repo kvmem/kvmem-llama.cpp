@@ -169,12 +169,12 @@ request. One uncached 354-prompt-token,
 tok/s, with a 49.13 s server-reported request time. This one near-capacity
 run does not prove the exact driver-level cause of the slowdown.
 
-The rc3 launcher itself only selects one GPU. For dual tests, the same server
-binary and settings were used with an explicit CUDA0/CUDA1 layer split and
-MTP disabled, because this branch does not yet support multi-GPU MTP. The
-request, Q4_K_M model, CPU projector, context, KVMem budget/reserve, Q8_0
-cache, block size and thinking mode were otherwise the same. These are not
-strictly equivalent to the single-card MTP3 run.
+The rc3 launcher itself only selects one GPU. For the dual-GPU comparison, the
+same server binary and settings were used with an explicit CUDA0/CUDA1 layer
+split and MTP disabled, to match the single-card MTP-off control. The request,
+Q4_K_M model, CPU projector, context, KVMem budget/reserve, Q8_0 cache, block
+size and thinking mode were otherwise the same. These are not strictly
+equivalent to the single-card MTP3 run.
 
 | Server placement | Ready s | Free VRAM MiB, 5060 Ti / 5050 | Prompt tok/s | Decode tok/s |
 |---|---:|---:|---:|---:|

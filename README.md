@@ -162,13 +162,15 @@ The experimental layer path on this branch is opt-in. For example:
 ```
 
 Use `--list-devices` to obtain device names; the example budget must fit every
-owning GPU. A multi-GPU request currently requires CUDA devices, full layer
-offload and `--spec-type none`. KVMem capture and KV layout use a synchronous
-backend path for correctness. MTP, ReplaySSM, tensor and row split are not yet
-enabled for multiple GPUs. Automatic discovery still requires an explicit
-choice when several GPUs are present. Indices refer to the visible device list
-(and to the selected list when `--device` is supplied). Single-GPU defaults
-remain unchanged.
+owning GPU. A multi-GPU request requires CUDA devices, full layer offload and
+`--split-mode layer`. KVMem capture and KV layout use a synchronous backend
+path for correctness. On two GPUs, embedded `nextn` MTP is experimental and
+requires `--spec-type draft-mtp` plus an explicit
+`--kvmem-mtp-state snapshots` or `replay`; `auto` and independent draft models
+are not supported for multi-GPU MTP. Tensor and row split remain unsupported.
+Automatic discovery still requires an explicit choice when several GPUs are
+present. Indices refer to the visible device list (and to the selected list
+when `--device` is supplied). Single-GPU defaults remain unchanged.
 
 Threads, physical batch size and Flash Attention settings propagate to MTP.
 Existing model, host/port, context, sampling, chat-template, vision and KV-cache
