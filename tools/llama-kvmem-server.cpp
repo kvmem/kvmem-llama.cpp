@@ -85,11 +85,11 @@ static void print_usage(const char * argv0) {
             "  --mlock                   legacy alias for load-mode mlock\n"
             "  --timeout, -to N          HTTP read/write timeout seconds (default 1800)\n"
             "  --threads-http N          HTTP worker threads; <=0 = automatic\n"
-            "  --device, -dev NAME       one offload device, e.g. CUDA0; none = CPU\n"
+            "  --device, -dev NAMES      offload devices, e.g. CUDA0,CUDA1; none = CPU\n"
             "  --list-devices            list available offload devices and exit\n"
             "  --main-gpu, -mg N         main device index (default 0)\n"
-            "  --split-mode, -sm MODE    none | layer; multi-GPU modes are not supported\n"
-            "  --tensor-split, -ts N     one device proportion; multiple entries are rejected\n"
+            "  --split-mode, -sm MODE    none | layer (multi-GPU requires layer)\n"
+            "  --tensor-split, -ts N,... layer proportions, one per selected GPU\n"
             "  Aliases: --usage, --predict, -s, -mm, --no-webui, --path\n"
             "  Environment: supported LLAMA_ARG_* settings apply before CLI; API keys append.\n"
             "  --ui / --webui            enable UI (overrides LLAMA_ARG_UI=0)\n"
@@ -1883,6 +1883,12 @@ int main(int argc, char ** argv) {
         device_config.apply(options, mparams);
     } catch (const std::exception & e) {
         fprintf(stderr, "invalid GPU configuration: %s\n", e.what());
+        return 1;
+    }
+    if (device_config.devices.size() > 2 && st.spec_mtp &&
+            (!st.kparams.enabled || st.kparams.mtp_state == 1 ||
+             (st.kparams.mtp_state == 2 && !config_sources.contains("--kvmem-mtp-state")))) {
+        fprintf(stderr, "KVMEM_STARTUP_ERROR multi-GPU MTP requires --kvmem and explicit --kvmem-mtp-state snapshots|replay (auto is not supported yet)\n");
         return 1;
     }
     // Check resources before spending time/VRAM on loading model weights.

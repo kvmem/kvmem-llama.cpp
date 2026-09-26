@@ -9,10 +9,9 @@ struct kvmem_server_devices {
     std::vector<float> split;
 
     void apply(const kvmem_server_options & options, llama_model_params & params) {
-        if (options.device_names.find(',') != std::string::npos || options.tensor_split.size() > 1 ||
-                (options.split_mode_set && (options.split_mode == LLAMA_SPLIT_MODE_ROW ||
-                                           options.split_mode == LLAMA_SPLIT_MODE_TENSOR)))
-            throw std::invalid_argument("multi-GPU is not supported yet; select one --device (see --list-devices)");
+        if (options.split_mode_set && (options.split_mode == LLAMA_SPLIT_MODE_ROW ||
+                                       options.split_mode == LLAMA_SPLIT_MODE_TENSOR))
+            throw std::invalid_argument("KVMem supports --split-mode layer for multiple GPUs; tensor is not implemented yet");
         if (!options.device_names.empty()) {
             if (options.device_names != "none") {
                 size_t start = 0;
@@ -41,8 +40,24 @@ struct kvmem_server_devices {
             split.resize(llama_max_devices(), 0);
             params.tensor_split = split.data();
         }
-        // Enforce single-GPU operation even when default discovery finds several.
+        // Multi-GPU remains opt-in. The current adapter requires every attention
+        // layer on a CUDA device and a single shared logical KV window.
         size_t count = devices.empty() ? 0 : devices.size() - 1;
+        if (count > 1) {
+            if (params.split_mode != LLAMA_SPLIT_MODE_LAYER)
+                throw std::invalid_argument("multiple --device entries require --split-mode layer");
+            if (params.n_gpu_layers != -2)
+                throw std::invalid_argument("multiple GPUs require --gpu-layers all in this release");
+            if (!options.tensor_split.empty() && options.tensor_split.size() != count)
+                throw std::invalid_argument("--tensor-split must have one proportion per --device");
+            for (size_t i = 0; i < count; ++i) {
+                auto * reg = ggml_backend_dev_backend_reg(devices[i]);
+                if (std::string(ggml_backend_reg_name(reg)) != "CUDA")
+                    throw std::invalid_argument("multi-GPU layer currently requires CUDA devices from one backend");
+            }
+        } else if (options.tensor_split.size() > 1) {
+            throw std::invalid_argument("multiple --tensor-split proportions require an explicit multi-GPU --device list");
+        }
         if (devices.empty()) {
             size_t discrete = 0, integrated = 0, rpc = 0;
             std::vector<std::string> ids;
@@ -68,7 +83,7 @@ struct kvmem_server_devices {
             }
             count = rpc + (discrete ? discrete : integrated);
         }
-        if (count > 1 && params.n_gpu_layers != 0 && params.split_mode != LLAMA_SPLIT_MODE_NONE)
-            throw std::invalid_argument("multi-GPU is not supported yet; select one --device or use --split-mode none --main-gpu INDEX");
+        if (devices.empty() && count > 1 && params.n_gpu_layers != 0 && params.split_mode != LLAMA_SPLIT_MODE_NONE)
+            throw std::invalid_argument("select multi-GPU explicitly with --device CUDA0,CUDA1 --split-mode layer --gpu-layers all");
     }
 };

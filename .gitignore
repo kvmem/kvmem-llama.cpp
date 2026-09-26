@@ -1,6 +1,7 @@
 /build/
 /build-cpu/
 /build-cuda/
+/build-layer/
 /models/
 /.venv/
 /logs/
