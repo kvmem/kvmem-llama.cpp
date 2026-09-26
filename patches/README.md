@@ -12,6 +12,12 @@ routes quantized-KV Flash Attention to the existing VEC kernel, avoiding the
 zero-occupancy assertion (`max_blocks_per_sm > 0`) of the larger tile kernel.
 It is replayed after the cumulative KVMem patch and is limited to RDNA2.
 
+`0006-hip-rdna2-fattn-vec-occupancy.patch` is an RDNA2 HIP performance fix.
+HIP reports one resident block per WGP for the D=256 VEC Flash Attention
+kernel, so decode attention is split into too few KV chunks (about three waves
+per SIMD) to hide memory latency. The patch assumes two blocks per WGP on
+RDNA2 for the non-stream-k path. It is replayed after 0005.
+
 `reasoning-budget-upgrade.patch` upgrades the v0.15.0 ReplaySSM tree.
 `replayssm-upgrade.patch` upgrades the preceding multimodal/query-replay tree.
 `multimodal-upgrade.patch` upgrades the KVMem working tree recorded before
