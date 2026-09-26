@@ -14,6 +14,15 @@ __pycache__/
 /build-ui*/
 
 /build-win*/
+
+# Local one-click launchers pinned to this machine's paths
+/start-local.*
+*.obj
+*.exe
+*.ilk
+*.pdb
+
+CLAUDE.md
 /build-hip*/
 /dist/
 /artifacts/

@@ -469,6 +469,7 @@ progress-reporting approach from [PR #9](https://github.com/kvmem/kvmem-llama.cp
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions` (sampling, stream, tools, optional images)
+- `POST /v1/responses` and `POST /responses` (OpenAI Responses, non-streaming and SSE streaming). With `--mmproj`, `input_image.image_url` accepts image URLs or Base64 data URLs through the same vision pipeline as Chat Completions. File IDs are not supported. The per-request `detail` value is ignored; image resolution is controlled by the server's image token settings. `scripts/test_responses_sdk.py` exercises both paths through the official OpenAI Python SDK, whose Responses stream parser is stricter than a hand-rolled client.
 
 No auth or TLS unless an API key is set. Binds `127.0.0.1` by default. To serve
 on the LAN, pass `--host 0.0.0.0` to the server or to the launchers
