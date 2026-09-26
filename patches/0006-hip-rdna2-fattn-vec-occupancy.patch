@@ -1,0 +1,20 @@
+diff --git a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common.cuh
+index e67cc7fdf..6ea29d50d 100644
+--- a/ggml/src/ggml-cuda/fattn-common.cuh
++++ b/ggml/src/ggml-cuda/fattn-common.cuh
+@@ -1112,6 +1112,15 @@ void launch_fattn(
+     int max_blocks_per_sm = 1; // Max. number of active blocks limited by occupancy.
+     CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_blocks_per_sm, fattn_kernel, block_dim.x * block_dim.y * block_dim.z, nbytes_shared));
+     GGML_ASSERT(max_blocks_per_sm > 0);
++#ifdef GGML_USE_HIP
++    // RDNA2 reports one resident block per WGP for the D=256 vector kernel, which
++    // splits decode attention into too few KV chunks (about 3 waves per SIMD) to
++    // hide memory latency. Two blocks per WGP picks ~2x the chunks: decode FA at
++    // GQA 6 / 32K KV runs 1.7x faster (858 -> 509 us on RX 6900 XT).
++    if (GGML_CUDA_CC_IS_RDNA2(cc) && !stream_k && ncols2 == 1) {
++        max_blocks_per_sm = std::max(max_blocks_per_sm, 2);
++    }
++#endif // GGML_USE_HIP
+     int parallel_blocks = max_blocks_per_sm;
+ 
+     const int ntiles_KV = (K->ne[1] + nbatch_fa - 1) / nbatch_fa; // Max. number of parallel blocks limited by KV cache length.
