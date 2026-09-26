@@ -469,6 +469,7 @@ progress-reporting approach from [PR #9](https://github.com/kvmem/kvmem-llama.cp
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions` (sampling, stream, tools, optional images)
+- `POST /v1/responses` and `POST /responses` (OpenAI Responses, non-streaming and SSE streaming. Vision input is not implemented.) `scripts/test_responses_sdk.py` exercises both paths through the official OpenAI Python SDK, whose Responses stream parser is stricter than a hand-rolled client.
 
 No auth or TLS unless an API key is set. Binds `127.0.0.1` by default. To serve
 on the LAN, pass `--host 0.0.0.0` to the server or to the launchers
