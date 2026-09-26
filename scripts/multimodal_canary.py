@@ -252,7 +252,7 @@ def main():
             chunks = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith('data: {')]
             assert not any('error' in chunk for chunk in chunks), (label, raw)
             assert 'data: [DONE]' in raw, (label, raw)
-            text = ''.join(choice.get('delta', {}).get('content', '')
+            text = ''.join((choice.get('delta', {}).get('content') or '')
                            for chunk in chunks for choice in chunk.get('choices', []))
             for word in expected or []:
                 assert word in text.lower(), (label, word, text)
