@@ -242,10 +242,13 @@ rows below, where the default draft KV is F16 and the chat prompt differs.
 | 5:1 | 28.91 | 28.58 |
 | 8:1 | 31.48 | 31.25 |
 
-The matched server test used the Q4_K_M model and CPU Q8_0 projector, rc3
-context and KVMem defaults, explicit layer split, and the same 365-token
-OpenAI chat prompt plus 64-token completion in every row. The UI was disabled
-for the test; no image was sent. Draft KV used the server's F16 default.
+The initial matched server test used the Q4_K_M model and CPU Q8_0 projector,
+rc3 context and KVMem defaults, explicit layer split, and the same 365-token
+OpenAI chat prompt plus 64-token completion in every row. This prompt appended
+an extra request to the repository's original task 1, and `KVMEM_TRACE=1` was
+enabled. These are diagnostic results, not comparable with the earlier
+354-token, trace-off task-1 server baseline. The UI was disabled for the test;
+no image was sent. Draft KV used the server's F16 default.
 Free VRAM is an idle-after-load sample in MiB, ordered 5060 Ti / 5050. These
 are single runs, not stable throughput distributions.
 
@@ -258,8 +261,24 @@ are single runs, not stable throughput distributions.
 | 8:1 | snapshots | 831 / 3,879 | 234.15 | 20.04 |
 | 8:1 | ReplaySSM | 1,237 / 3,903 | 252.00 | 19.83 |
 
-ReplaySSM improved decode by about 18-19% over MTP-off for this request,
-while leaving about 392-406 MiB more free on the 5060 Ti than snapshots.
+For a direct comparison with the original task 1, the same 8:1 server build
+and launch settings were run with the unmodified repository prompt, 354 prompt
+tokens and 64 completion tokens. With `KVMEM_TRACE` off, MTP-off decoded at
+20.46 tok/s (3,127.81 ms), snapshots at 34.34 and 33.96 tok/s, and ReplaySSM
+at 35.05 and 35.31 tok/s in fresh-server runs. All three modes returned the
+same 64-token output. ReplaySSM had 406 MiB more idle free VRAM on the 5060 Ti
+than snapshots (1,237 versus 831 MiB). Its roughly 3% decode lead in these
+short runs is too small to establish a stable speed ranking. With trace on,
+the matched MTP-off and ReplaySSM task-1 rates fell to 16.18 and 19.52 tok/s.
+The traced ReplaySSM run accepted 45 of 55 draft tokens and used 19 verifier
+calls. Trace therefore changes measured throughput substantially, especially
+for MTP, and must be disabled for performance comparisons. These are short
+single-request samples, not a throughput distribution. The Q8_0 multimodal
+projector was loaded on CPU via `--no-mmproj-offload`; no images were sent.
+
+In the traced 365-token diagnostic, ReplaySSM improved decode by about 18-19%
+over MTP-off for that request, while leaving about 392-406 MiB more free on
+the 5060 Ti than snapshots.
 Snapshot versus ReplaySSM speed is too close and variable to rank from one
 run. After cancelling a streamed 8:1 ReplaySSM request, two subsequent
 requests succeeded with the same output; the second reused 364 of 365 prompt
