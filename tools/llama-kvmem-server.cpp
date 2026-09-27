@@ -92,8 +92,8 @@ static void print_usage(const char * argv0) {
             "  --device, -dev NAMES      offload devices, e.g. CUDA0,CUDA1; none = CPU\n"
             "  --list-devices            list available offload devices and exit\n"
             "  --main-gpu, -mg N         main device index (default 0)\n"
-            "  --split-mode, -sm MODE    none | layer (multi-GPU requires layer)\n"
-            "  --tensor-split, -ts N,... layer proportions, one per selected GPU\n"
+            "  --split-mode, -sm MODE    none | layer | tensor (multi-GPU requires layer or tensor)\n"
+            "  --tensor-split, -ts N,... proportions, one per selected GPU\n"
             "  Aliases: --usage, --predict, -s, -mm, --no-webui, --path\n"
             "  Environment: supported LLAMA_ARG_* settings apply before CLI; API keys append.\n"
             "  --ui / --webui            enable UI (overrides LLAMA_ARG_UI=0)\n"
@@ -1993,7 +1993,11 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "invalid GPU configuration: %s\n", e.what());
         return 1;
     }
-    if (device_config.devices.size() > 2 && st.spec_mtp &&
+    if (mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR && st.spec_mtp && st.kparams.enabled && st.kparams.mtp_state != 0) {
+        fprintf(stderr, "KVMEM_STARTUP_ERROR tensor KVMem currently supports MTP snapshots only; use --kvmem-mtp-state snapshots\n");
+        return 1;
+    }
+    if (device_config.devices.size() > 2 && st.spec_mtp && mparams.split_mode != LLAMA_SPLIT_MODE_TENSOR &&
             (!st.kparams.enabled || st.kparams.mtp_state == 1 ||
              (st.kparams.mtp_state == 2 && !config_sources.contains("--kvmem-mtp-state")))) {
         fprintf(stderr, "KVMEM_STARTUP_ERROR multi-GPU MTP requires --kvmem and explicit --kvmem-mtp-state snapshots|replay (auto is not supported yet)\n");
@@ -2019,7 +2023,8 @@ int main(int argc, char ** argv) {
     json startup = {
         {"model", model_path}, {"alias", st.model_name},
         {"gpu", {{"device_requested", options.device_names.empty() ? "auto" : options.device_names},
-                  {"main_gpu", mparams.main_gpu}, {"split_mode", mparams.split_mode == LLAMA_SPLIT_MODE_NONE ? "none" : "layer"},
+                  {"main_gpu", mparams.main_gpu}, {"split_mode", mparams.split_mode == LLAMA_SPLIT_MODE_NONE ? "none" :
+                      mparams.split_mode == LLAMA_SPLIT_MODE_TENSOR ? "tensor" : "layer"},
                   {"layers_requested", ngl}}},
         {"context_requested", n_ctx}, {"batch_requested", st.n_batch},
         {"n_predict", st.n_predict_default},

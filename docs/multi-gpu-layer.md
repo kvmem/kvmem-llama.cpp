@@ -21,8 +21,9 @@ scratch and GPU mean-K accumulator. This is a correctness baseline, not a
 throughput optimization. It works without CUDA peer access. Single-GPU paths
 keep their existing fast behavior. Embedded-nextn MTP with snapshot rollback
 or per-device ReplaySSM is experimental and requires an explicit
-`--kvmem-mtp-state snapshots|replay` on the dual-GPU server. Row/tensor split
-and cross-machine execution are outside this release.
+`--kvmem-mtp-state snapshots|replay` on the dual-GPU layer server. Row split
+and cross-machine execution are outside this release. CUDA tensor split uses
+the separate [Meta KV path](tensor-parallel-design.md).
 
 ## Validation on 2026-09-24
 
@@ -284,8 +285,11 @@ device-bounded pool. It adds independently validated per-device GDN Replay
 without TurboQuant. The GDN grouping in #54 informed the MTP follow-up, but
 its wider patch was not imported.
 
-Future tensor split with a mirrored active KV window can retain the same host
-archive and logical slot selection, while replacing each layer's single KV
-destination with a set of required replicas. Completion must wait for every
-replica before publishing a new window. Peer-to-peer transfers may optimize
-that fan-out but are not a prerequisite for the interface.
+The tensor follow-up uses llama.cpp's native Meta backend. It shards attention
+KV by head and exposes logical get/set operations that assemble and distribute
+complete host rows. KVMem keeps the same archive and slot selection, uses
+synchronous Meta transfers, and budgets KV by physical GPU. Snapshot MTP works
+with standard Meta cache names; ReplaySSM remains blocked for tensor split
+because its fold path assumes direct per-GPU CUDA pointers. A fully mirrored
+KV window would require changing the native split rules and consume more
+memory on both GPUs.

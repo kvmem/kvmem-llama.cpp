@@ -27,8 +27,8 @@ static void print_usage(const char * argv0) {
             "  -ngl, --n-gpu-layers N     GPU layers; all required for multi-GPU (default 99)\n"
             "  --list-devices            list available ggml devices\n"
             "  --device NAMES            CUDA devices, e.g. CUDA0,CUDA1\n"
-            "  --split-mode MODE         none | layer\n"
-            "  --tensor-split N,...      layer proportions, one per selected GPU\n"
+            "  --split-mode MODE         none | layer | tensor\n"
+            "  --tensor-split N,...      proportions, one per selected GPU\n"
             "  --temp T                   temperature; 0 = greedy (default 0)\n"
             "  --tokens-only              print generated token ids, one per line\n"
             "  --no-prompt                do not echo the prompt (generation only)\n"
@@ -301,7 +301,12 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "invalid GPU configuration: %s\n", e.what());
         return 1;
     }
-    if (device_config.devices.size() > 2 && spec_mtp && !kparams.enabled) {
+    if (model_params.split_mode == LLAMA_SPLIT_MODE_TENSOR && spec_mtp && kparams.enabled && kparams.mtp_state != 0) {
+        fprintf(stderr, "tensor KVMem currently supports MTP snapshots only; use --kvmem-mtp-state snapshots\n");
+        return 1;
+    }
+    if (device_config.devices.size() > 2 && spec_mtp && !kparams.enabled &&
+        model_params.split_mode != LLAMA_SPLIT_MODE_TENSOR) {
         fprintf(stderr, "multi-GPU MTP requires --kvmem\n");
         return 1;
     }
@@ -359,8 +364,7 @@ int main(int argc, char ** argv) {
             kparams.nvme_dir = nvme_dir.c_str();
         }
         if (dump_kv) {
-#if defined(_WIN32)
-            // _putenv_s always overwrites, which is setenv(..., 1) semantics.
+#ifdef _WIN32
             _putenv_s("KVMEM_DUMP_CAPTURE", "1");
 #else
             setenv("KVMEM_DUMP_CAPTURE", "1", 1);

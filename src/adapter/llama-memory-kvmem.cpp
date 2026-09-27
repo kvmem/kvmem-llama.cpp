@@ -252,7 +252,7 @@ static uint8_t * kvmem_cuda_tensor_ptr(ggml_tensor * t) {
         return nullptr;
     }
     ggml_backend_buffer_t buf = t->view_src ? t->view_src->buffer : t->buffer;
-    if (!buf || ggml_backend_buffer_is_host(buf)) {
+    if (!buf || ggml_backend_buffer_is_host(buf) || ggml_backend_buffer_is_meta(buf)) {
         return nullptr;
     }
     return static_cast<uint8_t *>(t->data);
@@ -414,6 +414,70 @@ struct kvmem_pool_plan {
     uint64_t gpu_total = 0;
 };
 
+static bool kvmem_tensor_multi_gpu(const llama_model & model) {
+    return model.split_mode() == LLAMA_SPLIT_MODE_TENSOR && model.get_split_state_ud.n_devices > 1;
+}
+
+static std::vector<ggml_backend_dev_t> kvmem_tensor_devices(const llama_model & model) {
+    if (model.devices.size() != 1) throw std::runtime_error("tensor model has no unique Meta device");
+    auto * meta = model.devices[0].dev;
+    if (ggml_backend_dev_type(meta) != GGML_BACKEND_DEVICE_TYPE_META) {
+        throw std::runtime_error("tensor model device is not Meta");
+    }
+    const size_t count = ggml_backend_meta_device_count(meta);
+    if (count != model.get_split_state_ud.n_devices) {
+        throw std::runtime_error("tensor Meta physical GPU count does not match split metadata");
+    }
+    std::vector<ggml_backend_dev_t> result;
+    for (size_t i = 0; i < count; ++i) {
+        auto * dev = ggml_backend_meta_device_get(meta, i);
+        if (!dev || ggml_backend_dev_type(dev) != GGML_BACKEND_DEVICE_TYPE_GPU ||
+                std::string(ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev))) != "CUDA" ||
+                std::find(result.begin(), result.end(), dev) != result.end()) {
+            throw std::runtime_error("tensor Meta physical GPU list is invalid");
+        }
+        result.push_back(dev);
+    }
+    return result;
+}
+
+static std::vector<uint64_t> kvmem_tensor_kv_row_bytes(
+        const llama_model & model, ggml_type type_k, ggml_type type_v, bool include_mtp) {
+    const size_t n_devices = model.get_split_state_ud.n_devices;
+    std::vector<uint64_t> bytes(n_devices, 0);
+    const uint32_t n_layers = include_mtp ? model.hparams.n_layer_all : model.hparams.n_layer();
+    ggml_init_params ip = {
+        /*.mem_size   =*/ 2 * n_layers * ggml_tensor_overhead() + 1024,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ true,
+    };
+    ggml_context_ptr ctx{ggml_init(ip)};
+    if (!ctx) throw std::runtime_error("cannot allocate tensor KV split metadata");
+    for (uint32_t il = 0; il < n_layers; ++il) {
+        if (model.hparams.is_recr(il) || !model.hparams.has_kv(il)) continue;
+        for (bool is_k : {true, false}) {
+            // The draft context can choose a wider cache type than the target.
+            const ggml_type type = il >= model.hparams.n_layer() ? GGML_TYPE_F32 : is_k ? type_k : type_v;
+            const uint32_t dim = is_k ? model.hparams.n_embd_k_gqa(il) : model.hparams.n_embd_v_gqa(il);
+            ggml_tensor * t = ggml_new_tensor_2d(ctx.get(), type, dim, 1);
+            ggml_format_name(t, "cache_%c_l%u", is_k ? 'k' : 'v', il);
+            auto * ud = const_cast<llama_meta_device_get_split_state_userdata *>(&model.get_split_state_ud);
+            const auto split = llama_meta_device_get_split_state(t, ud);
+            if (split.axis != GGML_BACKEND_SPLIT_AXIS_0 || split.n_segments != 1 || split.nr[0] != 1) {
+                throw std::runtime_error("unsupported tensor KV split layout for KVMem pool planning");
+            }
+            for (size_t j = 0; j < n_devices; ++j) {
+                const int64_t shard_dim = split.ne[j];
+                if (shard_dim < 0 || shard_dim % ggml_blck_size(type) != 0) {
+                    throw std::runtime_error("tensor KV split is incompatible with the selected cache type");
+                }
+                if (shard_dim > 0) bytes[j] += ggml_row_size(type, shard_dim);
+            }
+        }
+    }
+    return bytes;
+}
+
 static kvmem_pool_plan kvmem_compute_pool(
         const llama_model & model,
         const llama_memory_params & params,
@@ -480,7 +544,43 @@ static kvmem_pool_plan kvmem_compute_pool(
             bytes_per_token.try_emplace(mtp_owner, 0);
         }
     }
-    if (model.n_devices() > 1 && !bytes_per_token.empty() && borrowed_kv_size == 0) {
+    if (kvmem_tensor_multi_gpu(model) && borrowed_kv_size == 0) {
+        const auto rows = kvmem_tensor_kv_row_bytes(model, params.type_k, params.type_v, cparams.n_rs_seq > 0);
+        const auto devices = kvmem_tensor_devices(model);
+        uint64_t state_reserve = 0;
+        if (cparams.n_rs_seq > 0) {
+            for (uint32_t il = 0; il < model.hparams.n_layer(); ++il) {
+                if (model.hparams.is_recr(il)) {
+                    state_reserve += static_cast<uint64_t>(model.hparams.n_embd_r() + model.hparams.n_embd_s()) *
+                                     sizeof(float) * (1 + cparams.n_rs_seq);
+                }
+            }
+        }
+        p.gpu_total = 0;
+        uint64_t cap = UINT64_MAX;
+        for (size_t j = 0; j < rows.size(); ++j) {
+            auto * dev = devices[j];
+            size_t free_bytes = 0, total_bytes = 0;
+            ggml_backend_dev_memory(dev, &free_bytes, &total_bytes);
+            // Reserve the whole snapshot state on each card as a safe upper bound
+            // until per-shard recurrent memory accounting is exposed by Meta.
+            const uint64_t reserve = std::max<uint64_t>(256ull << 20, free_bytes / 10) + state_reserve;
+            const uint64_t free_for_kv = free_bytes > reserve ? free_bytes - reserve : 0;
+            const uint64_t kv_budget = std::min<uint64_t>(free_for_kv, total_bytes * ratio);
+            const uint64_t device_cap = rows[j] ? kv_budget / (rows[j] * p.block_tokens) : UINT64_MAX;
+            LLAMA_LOG_INFO("%s: tensor KV device=%s free=%zu total=%zu row_bytes=%llu state_reserve=%llu cap_blocks=%llu\n",
+                    __func__, ggml_backend_dev_name(dev), free_bytes, total_bytes,
+                    (unsigned long long) rows[j], (unsigned long long) state_reserve,
+                    (unsigned long long) device_cap);
+            cap = std::min(cap, device_cap);
+        }
+        if (cap < 2) throw std::runtime_error("tensor KV pool cannot fit a working block plus generation reserve");
+        p.cap_blocks = static_cast<uint32_t>(std::min<uint64_t>(cap, UINT32_MAX));
+        if (g_kvmem_params.budget &&
+                static_cast<uint64_t>(budget) + gen_reserve > cap * p.block_tokens) {
+            throw std::runtime_error("requested KVMem budget plus generation reserve exceeds a tensor GPU KV capacity");
+        }
+    } else if (model.n_devices() > 1 && !bytes_per_token.empty() && borrowed_kv_size == 0) {
         p.gpu_total = 0; // the per-device limits below replace a first-GPU total
         uint64_t cap = UINT64_MAX;
         for (const auto & [dev, row_bytes] : bytes_per_token) {
@@ -610,7 +710,7 @@ llama_memory_kvmem::llama_memory_kvmem(
 
     const kvmem_pool_plan pool = kvmem_compute_pool(
             model, params, cparams,
-            ext_kv && model.n_devices() > 1 ? ext_kv->get_size() : 0);
+            ext_kv && (model.n_devices() > 1 || kvmem_tensor_multi_gpu(model)) ? ext_kv->get_size() : 0);
     block_tokens_ = pool.block_tokens;
     kv_size_ = pool.kv_size;
     n_slots_ = pool.n_slots;
@@ -650,14 +750,23 @@ llama_memory_kvmem::llama_memory_kvmem(
                 nullptr,
                 nullptr,
                 nullptr,
-                "kvmem");
+                kvmem_tensor_multi_gpu(model) ? "" : "kvmem");
         kv_ = kv_owned_.get();
     }
 
     std::set<ggml_backend_dev_t> kv_owners;
     for (uint32_t il : kv_->get_layer_ids()) {
         auto * expected = model.dev_layer(static_cast<int>(il));
-        if (model.n_devices() > 1) {
+        if (kvmem_tensor_multi_gpu(model)) {
+            for (ggml_tensor * t : {kv_->get_k_storage(static_cast<int32_t>(il)),
+                                    kv_->get_v_storage(static_cast<int32_t>(il))}) {
+                if (!t) continue;
+                auto * buffer = t->buffer ? t->buffer : t->view_src ? t->view_src->buffer : nullptr;
+                if (!ggml_backend_buffer_is_meta(buffer)) {
+                    throw std::runtime_error("tensor split requires Meta attention KV buffers");
+                }
+            }
+        } else if (model.n_devices() > 1) {
             for (ggml_tensor * t : {kv_->get_k_storage(static_cast<int32_t>(il)),
                                     kv_->get_v_storage(static_cast<int32_t>(il))}) {
                 if (!t) continue;
@@ -672,10 +781,15 @@ llama_memory_kvmem::llama_memory_kvmem(
             kv_owners.insert(expected);
         }
     }
-    multi_gpu_ = model.n_devices() > 1;
+    multi_gpu_ = model.n_devices() > 1 || kvmem_tensor_multi_gpu(model);
     if (multi_gpu_) {
-        LLAMA_LOG_INFO("%s: synchronous layer KV path across %zu selected GPUs (%zu attention owners)\n",
-                       __func__, model.n_devices(), kv_owners.size());
+        if (kvmem_tensor_multi_gpu(model)) {
+            LLAMA_LOG_INFO("%s: synchronous tensor KV path across %zu physical GPUs\n",
+                           __func__, model.get_split_state_ud.n_devices);
+        } else {
+            LLAMA_LOG_INFO("%s: synchronous layer KV path across %zu selected GPUs (%zu attention owners)\n",
+                           __func__, model.n_devices(), kv_owners.size());
+        }
     }
 
     reset_slots();
@@ -2314,8 +2428,9 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         const int64_t read_before = perf_.multi_read_us;
         const int64_t host_before = perf_.multi_host_us;
         const char * batch_env = getenv("KVMEM_MULTI_D2H_BATCH");
-        const bool is_cuda = !model_.devices.empty() &&
-                std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(model_.devices[0].dev)), "CUDA") == 0;
+        auto * reg = !kvmem_tensor_multi_gpu(model_) && !model_.devices.empty() ?
+                ggml_backend_dev_backend_reg(model_.devices[0].dev) : nullptr;
+        const bool is_cuda = reg && std::strcmp(ggml_backend_reg_name(reg), "CUDA") == 0;
         const bool batch_on = is_cuda && (!batch_env || batch_env[0] != '0');
         const bool batched = batch_on && multi_d2h_submit();
         if (!batched) {
