@@ -70,6 +70,7 @@ typedef __hip_bfloat16 nv_bfloat16;
 
 #define cudaPointerAttributes      hipPointerAttribute_t
 #define cudaPointerGetAttributes   hipPointerGetAttributes
+#define cudaMemoryTypeDevice       hipMemoryTypeDevice
 
 #else
 
