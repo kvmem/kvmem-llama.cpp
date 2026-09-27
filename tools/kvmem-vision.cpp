@@ -1,6 +1,7 @@
 #include "llama-kvmem-diag.h"
 #include "kvmem-vision.h"
 #include "server-common.h"
+#include "ggml-backend.h"
 
 #include <algorithm>
 #include <chrono>
@@ -83,10 +84,11 @@ std::string kvmem_parse_media_messages(const std::string & body, bool allow_imag
 }
 
 kvmem_vision::kvmem_vision(llama_model * model, const std::string & path, bool gpu,
-                           int min_tokens, int max_tokens, int n_threads) {
+                           ggml_backend_dev_t device, int min_tokens, int max_tokens, int n_threads) {
     auto params = mtmd_context_params_default();
     params.media_marker = get_media_marker();
     params.use_gpu = gpu;
+    params.device = gpu ? device : nullptr;
     params.image_min_tokens = min_tokens;
     params.image_max_tokens = max_tokens;
     if (n_threads > 0) params.n_threads = n_threads;
@@ -97,7 +99,8 @@ kvmem_vision::kvmem_vision(llama_model * model, const std::string & path, bool g
     if (!ctx_) throw std::runtime_error("failed to load mmproj: " + path);
     n_embd_ = llama_model_n_embd_inp(model);
     kvmem_diag("KVMEM_TRACE vision_load device=%s embedding_width=%d min_tokens=%d max_tokens=%d threads=%d\n",
-            gpu ? "GPU" : "CPU", n_embd_, min_tokens, max_tokens, params.n_threads);
+            gpu ? (device ? ggml_backend_dev_name(device) : "GPU-auto") : "CPU",
+            n_embd_, min_tokens, max_tokens, params.n_threads);
 }
 
 kvmem_vision::~kvmem_vision() { mtmd_free(ctx_); }

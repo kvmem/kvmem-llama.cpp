@@ -61,6 +61,7 @@ static void print_usage(const char * argv0) {
             "  --mmproj PATH              vision projector GGUF\n"
             "  --mmproj-offload           place vision encoder on GPU (default)\n"
             "  --no-mmproj-offload        place vision encoder on CPU\n"
+            "  -mmdev, --mmproj-device DEVICE  select vision device, e.g. CUDA1 or Vulkan0 (none = CPU)\n"
             "  --image-min-tokens N       native minimum image token count\n"
             "  --image-max-tokens N       native maximum image token count\n"
             "  -lv, --verbosity N         log level: 0 silent, 1 error, 2 warn, 3 info (default), 4 trace, 5 debug\n"
@@ -1643,6 +1644,7 @@ int main(int argc, char ** argv) {
     bool no_ui = false;
     std::string model_path;
     std::string mmproj_path;
+    std::string mmproj_device_name;
     std::string chat_template;
     bool template_set = false;
     std::string template_source;
@@ -1702,6 +1704,16 @@ int main(int argc, char ** argv) {
             mmproj_gpu = true;
         } else if (eq(arg, "--no-mmproj-offload")) {
             mmproj_gpu = false;
+        } else if (eq(arg, "--mmproj-device") || eq(arg, "-mmdev")) {
+            mmproj_device_name = need(arg);
+            if (mmproj_device_name == "none") {
+                mmproj_device_name.clear();
+                mmproj_gpu = false;
+            } else if (mmproj_device_name.empty()) {
+                throw std::invalid_argument("--mmproj-device requires a device name or none");
+            } else {
+                mmproj_gpu = true;
+            }
         } else if (eq(arg, "--image-min-tokens") || eq(arg, "--image-max-tokens")) {
             const std::string value = need(arg);
             try {
@@ -1973,6 +1985,16 @@ int main(int argc, char ** argv) {
     common_init();
     mtmd_helper_log_set(common_log_default_callback, nullptr);
     ggml_backend_load_all();
+    ggml_backend_dev_t mmproj_device = nullptr;
+    if (mmproj_gpu && !mmproj_device_name.empty()) {
+        mmproj_device = ggml_backend_dev_by_name(mmproj_device_name.c_str());
+        const auto type = mmproj_device ? ggml_backend_dev_type(mmproj_device) : GGML_BACKEND_DEVICE_TYPE_CPU;
+        if (type != GGML_BACKEND_DEVICE_TYPE_GPU && type != GGML_BACKEND_DEVICE_TYPE_IGPU) {
+            fprintf(stderr, "KVMEM_STARTUP_ERROR invalid --mmproj-device %s; use --list-devices\n",
+                    mmproj_device_name.c_str());
+            return 1;
+        }
+    }
 
     // No speculative rollback state is needed without MTP.
     if (!st.spec_mtp) st.kparams.mtp_state = 0;
@@ -2032,7 +2054,8 @@ int main(int argc, char ** argv) {
         {"kvmem", {{"enabled", st.kparams.enabled}, {"budget", st.kparams.budget}, {"gen_reserve", st.kparams.gen_reserve},
                    {"sink_tokens", st.kparams.sink_tokens}, {"block_tokens", st.kparams.block_tokens}}},
         {"spec_type", st.spec_mtp ? "draft-mtp" : "none"},
-        {"vision", {{"enabled", !mmproj_path.empty()}, {"projector", mmproj_path}, {"gpu", mmproj_gpu}}},
+        {"vision", {{"enabled", !mmproj_path.empty()}, {"projector", mmproj_path}, {"gpu", mmproj_gpu},
+                    {"device", mmproj_gpu ? (mmproj_device_name.empty() ? "auto" : mmproj_device_name) : "CPU"}}},
         {"http", {{"host", host}, {"port", port}, {"timeout", options.timeout}, {"slots", 1}}},
         {"auth", {{"enabled", !options.api_keys.empty()}, {"key_count", options.api_keys.size()}}},
         {"sources", config_sources}, {"unlisted_sources", "default"}
@@ -2102,7 +2125,8 @@ int main(int argc, char ** argv) {
             if (image_min_tokens > 0 && image_max_tokens > 0 && image_min_tokens > image_max_tokens)
                 throw std::invalid_argument("image-min-tokens exceeds image-max-tokens");
             st.vision = std::make_unique<kvmem_vision>(
-                    st.model, mmproj_path, mmproj_gpu, image_min_tokens, image_max_tokens, options.threads);
+                    st.model, mmproj_path, mmproj_gpu, mmproj_device,
+                    image_min_tokens, image_max_tokens, options.threads);
         } catch (const std::exception & e) {
             fprintf(stderr, "%s\n", e.what());
             return 1;

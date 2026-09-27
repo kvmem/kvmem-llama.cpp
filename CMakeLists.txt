@@ -53,8 +53,8 @@ else()
 endif()
 
 if (KVMEM_BUILD_LLAMA)
-    if (GGML_VULKAN)
-        message(FATAL_ERROR "This HIP integration does not include the Vulkan adapter. Use the Vulkan worktree; do not combine its backend with CUDA/HIP staging.")
+    if (GGML_VULKAN AND KVMEM_GPU_BACKEND STREQUAL "HIP")
+        message(FATAL_ERROR "The HIP/ROCm adapter does not support a combined Vulkan build.")
     endif()
     if (KVMEM_GPU_BACKEND STREQUAL "CUDA")
         # Let CMake discover nvcc (or honor CUDACXX/CMAKE_CUDA_COMPILER) and

@@ -5,6 +5,7 @@ param(
     [string]$BuildDir,
     [string]$CudaPath = $env:CUDA_PATH,
     [switch]$ExperimentalCuda129,
+    [switch]$Vulkan,
     [string]$CudaArchitectures = '75-real;80-real;86-real;89-real;90-real;120a-real',
     [ValidateRange(1, 64)][int]$Jobs = 4,
     [switch]$HostOnly,
@@ -76,6 +77,17 @@ if ($HostOnly) {
     $options += @('-DKVMEM_BUILD_LLAMA=ON', '-DGGML_CUDA=ON',
         "-DCMAKE_CUDA_COMPILER=$CudaPath/bin/nvcc.exe", "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchitectures",
         "-DCUDAToolkit_ROOT=$CudaPath")
+    if ($Vulkan) {
+        $vulkanSdk = $env:VULKAN_SDK
+        if (!$vulkanSdk) { $vulkanSdk = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine') }
+        if (!$vulkanSdk -or !(Test-Path -LiteralPath (Join-Path $vulkanSdk 'Bin/glslc.exe')) -or
+            !(Test-Path -LiteralPath (Join-Path $vulkanSdk 'Include/spirv/unified1/spirv.hpp'))) {
+            throw 'Install the complete Vulkan SDK and set VULKAN_SDK before using -Vulkan'
+        }
+        $env:VULKAN_SDK = $vulkanSdk
+        $env:PATH = "$(Join-Path $vulkanSdk 'Bin');$env:PATH"
+        $options += '-DGGML_VULKAN=ON'
+    }
 }
 Invoke-Checked cmake $options
 $targets = @('kvmem_store_test', 'pinned_kv_tier_test')

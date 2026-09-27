@@ -37,7 +37,7 @@ private:
 class kvmem_vision {
 public:
     kvmem_vision(llama_model * model, const std::string & path, bool gpu,
-                 int min_tokens, int max_tokens, int n_threads);
+                 ggml_backend_dev_t device, int min_tokens, int max_tokens, int n_threads);
     ~kvmem_vision();
     std::shared_ptr<kvmem_prompt> tokenize(const std::string & prompt, const std::vector<std::vector<uint8_t>> & files);
     int decode(llama_context * ctx, const kvmem_prompt & prompt, size_t row, int n_batch,
