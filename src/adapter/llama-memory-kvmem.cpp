@@ -222,6 +222,23 @@ struct llama_memory_kvmem::CaptureD2hPipe {
     bool ok = false;
 };
 
+struct llama_memory_kvmem::MultiD2hPipe {
+    struct Device {
+        int id = -1;
+        cudaStream_t stream = nullptr;
+        uint8_t * pin = nullptr;
+        size_t cap = 0;
+        size_t used = 0;
+    };
+    struct Item {
+        CaptureD2hPipe::Item capture;
+        size_t device = 0;
+        const uint8_t * src = nullptr;
+    };
+    std::vector<Device> devices;
+    std::vector<Item> items;
+};
+
 static bool kvmem_cuda_ok(cudaError_t e, const char * what) {
     if (e == cudaSuccess) {
         return true;
@@ -742,6 +759,7 @@ llama_memory_kvmem::~llama_memory_kvmem() {
     harvest_worker_stop();
     harvest_perf_print_sum();
     d2h_free();
+    multi_d2h_free();
     if (!multi_gpu_) kvmem_stagein_gpu_free();
     if (mtp_) {
         mtp_->detach_target();
@@ -1754,6 +1772,144 @@ void llama_memory_kvmem::d2h_free() {
     d2h_->ok = false;
 }
 
+void llama_memory_kvmem::multi_d2h_free() {
+    if (!multi_d2h_) return;
+    int original = -1;
+    (void) cudaGetDevice(&original);
+    for (auto & dev : multi_d2h_->devices) {
+        if (dev.id >= 0) (void) cudaSetDevice(dev.id);
+        if (dev.stream) {
+            (void) cudaStreamSynchronize(dev.stream);
+            (void) cudaStreamDestroy(dev.stream);
+            dev.stream = nullptr;
+        }
+        if (dev.pin) {
+            (void) cudaFreeHost(dev.pin);
+            dev.pin = nullptr;
+        }
+    }
+    if (original >= 0) (void) cudaSetDevice(original);
+    multi_d2h_.reset();
+}
+
+bool llama_memory_kvmem::multi_d2h_submit() {
+    if (pending_capture_.empty() || pos_queue_.empty()) return false;
+    if (!multi_d2h_) multi_d2h_ = std::make_unique<MultiD2hPipe>();
+    auto & pipe = *multi_d2h_;
+    pipe.items.clear();
+    for (auto & dev : pipe.devices) dev.used = 0;
+
+    int original = -1;
+    if (cudaGetDevice(&original) != cudaSuccess) return false;
+    struct DeviceRestore {
+        int id;
+        ~DeviceRestore() { (void) cudaSetDevice(id); }
+    } restore{original};
+
+    // A layer split has ordinary CUDA tensors owned by one physical GPU.
+    for (const CaptureNode & n : pending_capture_) {
+        if (!n.t || n.which == 'v') continue;
+        const uint8_t * src = kvmem_cuda_tensor_ptr(n.t);
+        if (!src) return false;
+        cudaPointerAttributes attr{};
+        if (cudaPointerGetAttributes(&attr, src) != cudaSuccess || attr.type != cudaMemoryTypeDevice) {
+            (void) cudaGetLastError();
+            return false;
+        }
+        size_t index = 0;
+        for (; index < pipe.devices.size(); ++index) {
+            if (pipe.devices[index].id == attr.device) break;
+        }
+        if (index == pipe.devices.size()) {
+            pipe.devices.emplace_back();
+            pipe.devices.back().id = attr.device;
+        }
+        auto & dev = pipe.devices[index];
+        if (!dev.stream && (!kvmem_cuda_ok(cudaSetDevice(dev.id), "multi set device") ||
+                !kvmem_cuda_ok(cudaStreamCreateWithFlags(&dev.stream, cudaStreamNonBlocking), "multi stream"))) {
+            return false;
+        }
+        MultiD2hPipe::Item item;
+        item.device = index;
+        item.src = src;
+        item.capture.il = n.il;
+        item.capture.which = n.which;
+        item.capture.offset = dev.used;
+        item.capture.nbytes = ggml_nbytes(n.t);
+        item.capture.d = n.t->ne[0];
+        item.capture.h = n.t->ne[1];
+        item.capture.n = n.t->ne[2];
+        item.capture.nb0 = n.t->nb[0];
+        item.capture.nb1 = n.t->nb[1];
+        item.capture.nb2 = n.t->nb[2];
+        item.capture.type = n.t->type;
+        dev.used += item.capture.nbytes;
+        pipe.items.push_back(item);
+    }
+    for (auto & dev : pipe.devices) {
+        if (dev.used <= dev.cap) continue;
+        if (dev.pin) {
+            (void) cudaFreeHost(dev.pin);
+            dev.pin = nullptr;
+            dev.cap = 0;
+        }
+        if (!kvmem_cuda_ok(cudaSetDevice(dev.id), "multi set device") ||
+            !kvmem_cuda_ok(cudaMallocHost(reinterpret_cast<void **>(&dev.pin), dev.used), "multi pinned host")) {
+            (void) cudaGetLastError();
+            return false;
+        }
+        dev.cap = dev.used;
+    }
+
+    const int64_t t_read = ggml_time_us();
+    bool submitted = true;
+    for (size_t index = 0; index < pipe.devices.size(); ++index) {
+        auto & dev = pipe.devices[index];
+        if (!dev.used) continue;
+        if (!kvmem_cuda_ok(cudaSetDevice(dev.id), "multi set device")) {
+            submitted = false;
+            break;
+        }
+        for (const auto & item : pipe.items) {
+            if (item.device != index) continue;
+            if (!kvmem_cuda_ok(kvmem_copy_async(dev.pin + item.capture.offset, item.src,
+                    item.capture.nbytes, cudaMemcpyDeviceToHost, dev.stream), "multi D2H")) {
+                submitted = false;
+                break;
+            }
+        }
+        if (!submitted) break;
+    }
+    for (auto & dev : pipe.devices) {
+        if (!dev.stream || !dev.used) continue;
+        (void) cudaSetDevice(dev.id);
+        if (!kvmem_cuda_ok(cudaStreamSynchronize(dev.stream), "multi D2H wait")) submitted = false;
+    }
+    if (!submitted) {
+        (void) cudaGetLastError();
+        return false;
+    }
+    const int64_t read_us = ggml_time_us() - t_read;
+    cur_pos_ = std::move(pos_queue_.front());
+    pos_queue_.erase(pos_queue_.begin());
+    const int64_t t_host = ggml_time_us();
+    for (const auto & item : pipe.items) {
+        const auto & c = item.capture;
+        harvest_from_host(c.il, c.which, pipe.devices[item.device].pin + c.offset,
+                          c.type, c.d, c.h, c.n, c.nb0, c.nb1, c.nb2);
+    }
+    const int64_t host_us = ggml_time_us() - t_host;
+    if (perf_.enabled) {
+        perf_.multi_read_us += read_us;
+        perf_.multi_host_us += host_us;
+        size_t bytes = 0;
+        for (const auto & dev : pipe.devices) bytes += dev.used;
+        fprintf(stderr, "KVMEM_MULTI_D2H mode=batch devices=%zu copies=%zu bytes=%zu read_ms=%.3f host_ms=%.3f\n",
+                pipe.devices.size(), pipe.items.size(), bytes, read_us / 1000.0, host_us / 1000.0);
+    }
+    return true;
+}
+
 bool llama_memory_kvmem::harvest_worker_on() const {
     return harvest_w_ && harvest_w_->th.joinable();
 }
@@ -2150,16 +2306,34 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         return;
     }
     if (multi_gpu_) {
-        // The asynchronous pipe owns a single CUDA stream/device. Synchronize
-        // the whole graph, then read each tensor through its own backend so a
-        // recycled graph allocation cannot invalidate another GPU's capture.
+        // Finish the graph before capture tensors can be recycled by the next ubatch.
+        // The CUDA layer path uses one D2H stream per physical GPU.
+        const int64_t t_sync = ggml_time_us();
         if (sched) ggml_backend_sched_synchronize(sched);
-        cur_pos_ = std::move(pos_queue_.front());
-        pos_queue_.erase(pos_queue_.begin());
-        for (const CaptureNode & n : pending_capture_) {
-            harvest_capture(n.t, n.il, n.which);
+        const int64_t sync_us = ggml_time_us() - t_sync;
+        const int64_t read_before = perf_.multi_read_us;
+        const int64_t host_before = perf_.multi_host_us;
+        const char * batch_env = getenv("KVMEM_MULTI_D2H_BATCH");
+        const bool is_cuda = !model_.devices.empty() &&
+                std::strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(model_.devices[0].dev)), "CUDA") == 0;
+        const bool batch_on = is_cuda && (!batch_env || batch_env[0] != '0');
+        const bool batched = batch_on && multi_d2h_submit();
+        if (!batched) {
+            cur_pos_ = std::move(pos_queue_.front());
+            pos_queue_.erase(pos_queue_.begin());
+            for (const CaptureNode & n : pending_capture_) {
+                harvest_capture(n.t, n.il, n.which);
+            }
         }
+        const int64_t t_block = ggml_time_us();
         harvest_full_blocks_async();
+        const int64_t block_us = ggml_time_us() - t_block;
+        if (perf_.enabled) {
+            fprintf(stderr, "KVMEM_MULTI_HARVEST mode=%s n=%zu sync_ms=%.3f read_ms=%.3f host_ms=%.3f block_ms=%.3f\n",
+                    batched ? "batch" : "legacy", cur_pos_.size(), sync_us / 1000.0,
+                    (perf_.multi_read_us - read_before) / 1000.0,
+                    (perf_.multi_host_us - host_before) / 1000.0, block_us / 1000.0);
+        }
         return;
     }
     ggml_backend_t be = nullptr;
@@ -2268,14 +2442,16 @@ void llama_memory_kvmem::bytes_to_f16_token_major(const uint8_t * data, ggml_typ
     }
 }
 
-void llama_memory_kvmem::tensor_to_f32_token_major(const ggml_tensor * t, std::vector<float> & out) {
+void llama_memory_kvmem::tensor_to_f32_token_major(const ggml_tensor * t, std::vector<float> & out, int64_t * read_us) {
     std::vector<uint8_t> tmp;
     const uint8_t * data = nullptr;
     if (t->buffer && ggml_backend_buffer_is_host(t->buffer)) {
         data = static_cast<const uint8_t *>(t->data);
     } else {
         tmp.resize(ggml_nbytes(t));
+        const int64_t t_read = read_us ? ggml_time_us() : 0;
         kvmem_tensor_get(t, tmp.data(), 0, tmp.size());
+        if (read_us) *read_us += ggml_time_us() - t_read;
         data = tmp.data();
     }
     bytes_to_f32_token_major(data, t->type, t->ne[0], t->ne[1], t->ne[2],
@@ -2337,7 +2513,11 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
         return;
     }
     std::vector<float> flat;
-    tensor_to_f32_token_major(t, flat);
+    const bool timed = perf_.enabled && multi_gpu_;
+    const int64_t t_host = timed ? ggml_time_us() : 0;
+    int64_t read_us = 0;
+    tensor_to_f32_token_major(t, flat, timed ? &read_us : nullptr);
+    if (timed) perf_.multi_read_us += read_us;
     const uint32_t n = static_cast<uint32_t>(cur_pos_.size());
     if (n == 0) {
         return;
@@ -2371,6 +2551,7 @@ void llama_memory_kvmem::harvest_capture(ggml_tensor * t, int il, char which) {
             q_count_[static_cast<uint32_t>(il)]++;
         }
     }
+    if (timed) perf_.multi_host_us += ggml_time_us() - t_host - read_us;
 }
 
 void llama_memory_kvmem::harvest_write_batch() {
