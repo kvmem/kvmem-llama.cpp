@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -486,6 +487,11 @@ kvmem_spec_gen_stats kvmem_spec_generate(
     kvmem_diag("KVMEM_TRACE spec_stats n_gen=%d n_drafted=%d n_accept=%d n_restore=%d accept_pct=%.1f\n",
             st.n_gen, st.n_drafted, st.n_accept, st.n_restore,
             st.n_drafted > 0 ? 100.0 * st.n_accept / st.n_drafted : 0.0);
+    const char * perf = std::getenv("KVMEM_PERF");
+    if (perf && perf[0] && std::strcmp(perf, "0") != 0) {
+        fprintf(stderr, "KVMEM_SPEC_STATS n_gen=%d n_drafted=%d n_accept=%d n_restore=%d\n",
+                st.n_gen, st.n_drafted, st.n_accept, st.n_restore);
+    }
     kvmem_diag("KVMEM_GDN_PERF mode=%s verify_calls=%llu committed_rows=%llu verify_ms=%.3f fold_ms=%.3f\n",
             sess.use_gdn_replay ? "replay" : "snapshots", (unsigned long long) verify_calls,
             (unsigned long long) committed_rows, verify_us / 1000.0, fold_us / 1000.0);

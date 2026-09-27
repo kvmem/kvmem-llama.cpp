@@ -1,0 +1,2 @@
+scripts/build-rocm.sh text eol=lf
+scripts/rocm/*.sh text eol=lf

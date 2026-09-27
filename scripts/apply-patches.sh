@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LLAMA="${KVMEM_LLAMA_DIR:-$ROOT/llama.cpp}"
 PATCH="$ROOT/patches/llama-kvmem-current.patch"
+RDNA2_FATTN="$ROOT/patches/0005-hip-rdna2-quantized-kv-fa-vec.patch"
 BUDGET_UPGRADE="$ROOT/patches/reasoning-budget-upgrade.patch"
 REPLAY_UPGRADE="$ROOT/patches/replayssm-upgrade.patch"
 UPGRADE="$ROOT/patches/multimodal-upgrade.patch"
@@ -46,4 +47,12 @@ else
     echo "llama.cpp differs from the supported pin or KVMem baseline; no files changed" >&2
     echo "inspect local changes before replaying $PATCH" >&2
     exit 1
+fi
+
+if git apply --ignore-space-change --reverse --check "$RDNA2_FATTN" 2>/dev/null; then
+    echo "RDNA2 quantized-KV Flash Attention patch already applied"
+else
+    git apply --ignore-space-change --check "$RDNA2_FATTN"
+    git apply --ignore-space-change "$RDNA2_FATTN"
+    echo "applied RDNA2 quantized-KV Flash Attention patch"
 fi

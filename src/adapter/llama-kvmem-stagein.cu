@@ -1,9 +1,7 @@
 #include "llama-kvmem-stagein.h"
 #include "llama-kvmem-transfer.h"
+#include "llama-kvmem-gpu.h"
 
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
 
 #include <cmath>
 #include <cstdint>
@@ -309,7 +307,11 @@ __global__ void meank_add_bf16(const uint8_t * k, float * acc, int tok0, int n_k
     float s = acc[d];
     for (int t = 0; t < n_keep; ++t) {
         const size_t off = (size_t) (tok0 + t) * nb2 + (size_t) head * nb1 + (size_t) dim * nb0;
+#if defined(GGML_USE_HIP)
+        s += __bfloat162float(*reinterpret_cast<const nv_bfloat16 *>(k + off));
+#else
         s += __bfloat162float(*reinterpret_cast<const __nv_bfloat16 *>(k + off));
+#endif
     }
     acc[d] = s;
 }

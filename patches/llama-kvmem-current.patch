@@ -348,40 +348,43 @@ diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_de
  
      // recurrent state -> gdn_out tail (after attention scores), or the cache when fusing
      float * state_d           = dst_d + S_v * H * n_tokens * n_seqs;
-@@ -325,3 +319,63 @@
+@@ -325,3 +319,72 @@
          ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_cuda_gated_delta_net_fused_cache cache) {
      ggml_cuda_op_gated_delta_net_impl(ctx, dst, &cache);
  }
 +
 +static __global__ void gdn_fold_f32(const ggml_cuda_gdn_replay_layer * layers, int n_keep) {
++    constexpr int width = ggml_cuda_get_physical_warp_size();
++    constexpr int rows = 128 / width;
++    static_assert(width == 32 || width == 64, "unsupported GDN wave size");
 +    const auto layer = layers[blockIdx.y];
 +    const int head = blockIdx.x;
 +    const int lane = threadIdx.x;
 +    const int col = blockIdx.z * blockDim.y + threadIdx.y;
 +    float * state = layer.state + (head * 128 + col) * 128;
-+    float s[4];
++    float s[rows];
 +#pragma unroll
-+    for (int r = 0; r < 4; ++r) {
-+        s[r] = state[r * 32 + lane];
++    for (int r = 0; r < rows; ++r) {
++        s[r] = state[r * width + lane];
 +    }
 +    for (int t = 0; t < n_keep; ++t) {
 +        const float * key = layer.key + (t * 16 + head % 16) * 128;
-+        float k[4];
++        float k[rows];
 +#pragma unroll
-+        for (int r = 0; r < 4; ++r) {
-+            k[r] = key[r * 32 + lane];
++        for (int r = 0; r < rows; ++r) {
++            k[r] = key[r * width + lane];
 +        }
 +        const float decay = expf(layer.gate[t * 48 + head]);
-+        const float delta = gdn_delta_f32<4, 32>(s, k, decay,
++        const float delta = gdn_delta_f32<rows, width>(s, k, decay,
 +                layer.value[(t * 48 + head) * 128 + col], layer.beta[t * 48 + head]);
 +#pragma unroll
-+        for (int r = 0; r < 4; ++r) {
++        for (int r = 0; r < rows; ++r) {
 +            s[r] = gdn_update_f32(s[r], k[r], decay, delta);
 +        }
 +    }
 +#pragma unroll
-+    for (int r = 0; r < 4; ++r) {
-+        state[r * 32 + lane] = s[r];
++    for (int r = 0; r < rows; ++r) {
++        state[r * width + lane] = s[r];
 +    }
 +}
 +
@@ -407,7 +410,13 @@ diff --git a/ggml/src/ggml-cuda/gated_delta_net.cu b/ggml/src/ggml-cuda/gated_de
 +    if (n_keep == 0) return true;
 +    if (!layers || n_layers <= 0 || n_keep < 0 || n_keep > capacity || capacity > 6) return false;
 +    const auto stream = static_cast<cudaStream_t>(stream_ptr);
++#if defined(GGML_USE_HIP)
++    const int width = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
++    if (width != 32 && width != 64) return false;
++    gdn_fold_f32<<<dim3(48, n_layers, 32), dim3(width, 4), 0, stream>>>(layers, n_keep);
++#else
 +    gdn_fold_f32<<<dim3(48, n_layers, 32), dim3(32, 4), 0, stream>>>(layers, n_keep);
++#endif
 +    if (cudaGetLastError() != cudaSuccess) return false;
 +    gdn_conv_fold_f32<<<dim3(40, n_layers), 256, 0, stream>>>(layers, n_keep);
 +    return cudaGetLastError() == cudaSuccess;
@@ -517,7 +526,7 @@ diff --git a/include/llama.h b/include/llama.h
 diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 --- a/src/CMakeLists.txt
 +++ b/src/CMakeLists.txt
-@@ -63,6 +63,41 @@
+@@ -63,6 +63,43 @@
  
  target_link_libraries(llama PUBLIC ggml)
  
@@ -550,9 +559,11 @@ diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
 +        add_subdirectory(${LLAMA_KVMEM_ROOT}/kvmem ${CMAKE_BINARY_DIR}/kvmem-from-llama)
 +    endif()
 +    target_link_libraries(llama PRIVATE kvmem)
-+    find_package(CUDAToolkit QUIET)
-+    if (CUDAToolkit_FOUND)
-+        target_link_libraries(llama PRIVATE CUDA::cudart)
++    if (GGML_CUDA)
++        find_package(CUDAToolkit QUIET)
++        if (CUDAToolkit_FOUND)
++            target_link_libraries(llama PRIVATE CUDA::cudart)
++        endif()
 +    endif()
 +endif()
 +
@@ -1787,3 +1798,39 @@ diff --git a/common/sampling.cpp b/common/sampling.cpp
              LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
          }
      }
+diff --git a/ggml/src/ggml-hip/CMakeLists.txt b/ggml/src/ggml-hip/CMakeLists.txt
+--- a/ggml/src/ggml-hip/CMakeLists.txt
++++ b/ggml/src/ggml-hip/CMakeLists.txt
+@@ -145,1 +145,32 @@ endif()
++# HIP 7.15 can spill hundreds of VGPRs in the RDNA4 Q2_K MMQ kernel.
++# Limit loop unrolling only for built RDNA4 targets and this translation unit.
++option(GGML_HIP_Q2_K_UNROLL_WORKAROUND "Limit Q2_K MMQ loop unrolling with HIP 7.15+" ON)
++if (GGML_HIP_Q2_K_UNROLL_WORKAROUND AND hip_VERSION VERSION_GREATER_EQUAL "7.15")
++    set(KVMEM_Q2_K_RDNA4_FLAGS "")
++    foreach(KVMEM_Q2_K_ARCH IN ITEMS gfx1200 gfx1201)
++        if (KVMEM_Q2_K_ARCH IN_LIST CMAKE_HIP_ARCHITECTURES OR KVMEM_Q2_K_ARCH IN_LIST GPU_TARGETS)
++            string(APPEND KVMEM_Q2_K_RDNA4_FLAGS " -Xarch_${KVMEM_Q2_K_ARCH} -mllvm=--unroll-threshold=50")
++        endif()
++    endforeach()
++    if (KVMEM_Q2_K_RDNA4_FLAGS)
++        string(STRIP "${KVMEM_Q2_K_RDNA4_FLAGS}" KVMEM_Q2_K_RDNA4_FLAGS)
++        set_source_files_properties(
++            "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/template-instances/mmq-instance-q2_k.cu"
++            PROPERTIES COMPILE_FLAGS "${KVMEM_Q2_K_RDNA4_FLAGS}")
++        message(STATUS "HIP ${hip_VERSION}: RDNA4 Q2_K MMQ unroll workaround for ${CMAKE_HIP_ARCHITECTURES}")
++    endif()
++endif()
++
++# Keep the IQ3_XXS register rewrite workaround local to verified Windows gfx1200.
++option(GGML_HIP_IQ3_XXS_REG_WORKAROUND "Avoid IQ3_XXS partial-register rewrite with HIP 7.15+" ON)
++if (WIN32 AND GGML_HIP_IQ3_XXS_REG_WORKAROUND AND hip_VERSION VERSION_GREATER_EQUAL "7.15")
++    if ("gfx1200" IN_LIST CMAKE_HIP_ARCHITECTURES OR "gfx1200" IN_LIST GPU_TARGETS)
++        set_property(SOURCE
++            "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/template-instances/mmq-instance-iq3_xxs.cu"
++            APPEND_STRING PROPERTY COMPILE_FLAGS
++            " -Xarch_gfx1200 -mllvm=--amdgpu-enable-rewrite-partial-reg-uses=false")
++        message(STATUS "HIP ${hip_VERSION}: Windows gfx1200 IQ3_XXS register rewrite workaround")
++    endif()
++endif()
++
+ if (GGML_STATIC)

@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Real IQ3/projector regression on the 5060 Ti. Starts only its own test server."""
+"""IQ3 regression adapted for Windows + ROCm/HIP (e.g. RX 9060 XT).
+
+Differences from multimodal_canary.py (CUDA/Linux original, untouched):
+- Logged device buffer allocations are recorded separately from measured VRAM.
+  The script does not measure a Windows device VRAM peak.
+- RSS read via Windows psapi WorkingSetSize (peak via PeakWorkingSetSize)
+- swap-stop disabled (no /proc on Windows); VmSwap/system swap columns are None
+- no CUDA_VISIBLE_DEVICES/LD_LIBRARY_PATH; ROCm bin dir prepended to PATH
+"""
+import statistics
 import argparse
 import base64
 import ctypes
@@ -17,71 +26,99 @@ import urllib.error
 import urllib.request
 import zlib
 
-from mtp_kv_ab import Sampler, stop_server
-
-ROOT = Path(__file__).resolve().parents[1]
-OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+from mtp_kv_ab import stop_server
 
 
-class RocmSampler(threading.Thread):
-    """Whole-device VRAM sampler with the same artifact format as Sampler."""
+class LogVramSampler(threading.Thread):
+    """Record logged allocations, not device usage or a measured VRAM peak."""
 
-    def __init__(self, gpu, folder):
+    LINE = re.compile(r'ROCm0\s+.*?buffer size\s*=\s*([\d.]+)\s*MiB')
+
+    def __init__(self, folder):
         super().__init__(daemon=True)
-        self.gpu, self.folder = gpu, folder
+        self.folder = folder
         self.phase = 'loading'
         self.stop_event = threading.Event()
         self.rows = []
         self.errors = []
-        self.error_count = 0
 
     def run(self):
         start = time.monotonic()
-        with (self.folder / 'vram.csv').open('w') as output:
-            writer = csv.writer(output)
-            writer.writerow(['elapsed_s', 'phase', 'used_mib', 'free_mib', 'reserved_mib',
+        offset = 0
+        with (self.folder / 'logged-device-buffers.csv').open('w', newline='') as fh:
+            writer = csv.writer(fh)
+            writer.writerow(['elapsed_s', 'phase', 'logged_buffer_sum_mib', 'free_mib', 'reserved_mib',
                              'temperature_c', 'sm_clock_mhz', 'power_w'])
             while not self.stop_event.is_set():
-                try:
-                    result = subprocess.run(
-                        ['amd-smi', 'metric', '--mem-usage', '--gpu', str(self.gpu), '--json'],
-                        capture_output=True, text=True, check=True, timeout=5)
-                    memory = json.loads(result.stdout)['gpu_data'][0]['mem_usage']
-                    used = float(memory['used_vram']['value'])
-                    free = float(memory['free_vram']['value'])
-                    row = [time.monotonic() - start, self.phase, used, free, 0.0, None, None, None]
-                    self.rows.append(row)
-                    writer.writerow(row)
-                    output.flush()
-                except (KeyError, IndexError, ValueError, json.JSONDecodeError,
-                        OSError, subprocess.SubprocessError) as exc:
-                    self.error_count += 1
-                    if len(self.errors) < 8:
-                        self.errors.append(repr(exc))
-                self.stop_event.wait(0.15)
+                log = self.folder / 'server.stderr.log'
+                if log.is_file():
+                    with log.open(errors='replace') as tail:
+                        tail.seek(offset)
+                        chunk = tail.read()
+                        offset = tail.tell()
+                    if 'KVMEM_CHAT_PREFILL ' in chunk and self.phase == 'prefill':
+                        self.phase = 'decode'
+                    hits = [float(x) for x in self.LINE.findall(chunk)]
+                    if hits:
+                        prev = self.rows[-1][2] if self.rows else 0.0
+                        row = [time.monotonic() - start, self.phase,
+                               prev + sum(hits), None, None, None, None, None]
+                        self.rows.append(row)
+                        writer.writerow(row)
+                        fh.flush()
+                self.stop_event.wait(0.5)
 
     def finish(self):
         self.stop_event.set()
         self.join()
+        note = 'Logged buffer allocation sum; actual device VRAM peak is not measured.'
+        if not self.rows:
+            return {'peak_vram_mib': None, 'phase_metrics': {}, 'sample_count': 0,
+                    'sampling_errors': self.errors, 'max_sample_gap_ms': 0,
+                    'sampler_note': note}
         phases = {}
-        for phase in sorted({row[1] for row in self.rows}):
-            rows = [row for row in self.rows if row[1] == phase]
-            phases[phase] = {
-                'peak_mib': max(row[2] for row in rows),
-                'last_mib': rows[-1][2],
-                'min_free_mib': min(row[3] for row in rows),
-                'samples': len(rows),
-            }
-        return {
-            'peak_vram_mib': max((row[2] for row in self.rows), default=None),
-            'phase_metrics': phases,
-            'sample_count': len(self.rows),
-            'sampling_errors': self.errors,
-            'sampling_error_count': self.error_count,
-            'max_sample_gap_ms': max(
-                (b[0] - a[0] for a, b in zip(self.rows, self.rows[1:])), default=0) * 1000
-                if len(self.rows) > 1 else None,
-        }
+        for phase in sorted({r[1] for r in self.rows}):
+            rows = [r for r in self.rows if r[1] == phase]
+            phases[phase] = {'logged_buffer_sum_mib': max(r[2] for r in rows),
+                             'last_mib': rows[-1][2], 'samples': len(rows)}
+        return {'peak_vram_mib': None,
+                'logged_buffer_sum_mib': max(r[2] for r in self.rows),
+                'phase_metrics': phases, 'sample_count': len(self.rows),
+                'sampling_errors': self.errors, 'max_sample_gap_ms': 0,
+                'sampler_note': note}
+
+
+def _read_rss_mib(pid):
+    """Windows WorkingSetSize in MiB via psapi; None when the process is gone."""
+    psapi = ctypes.windll.psapi
+    kernel32 = ctypes.windll.kernel32
+    kernel32.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+
+    class _PMC(ctypes.Structure):
+        _fields_ = [('cb', ctypes.c_ulong), ('PageFaultCount', ctypes.c_ulong)] + [
+            (f, ctypes.c_size_t) for f in (
+                'PeakWorkingSetSize', 'WorkingSetSize',
+                'QuotaPeakPagedPoolUsage', 'QuotaPagedPoolUsage',
+                'QuotaPeakNonPagedPoolUsage', 'QuotaNonPagedPoolUsage',
+                'PagefileUsage', 'PeakPagefileUsage')]
+
+    try:
+        counters = _PMC()
+        counters.cb = ctypes.sizeof(counters)
+        if not psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return None
+        return counters.WorkingSetSize / 2**20
+    finally:
+        kernel32.CloseHandle(handle)
+
+ROOT = Path(__file__).resolve().parents[1]
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def fixture(size=896, changed=False):
@@ -109,17 +146,15 @@ def fixture(size=896, changed=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--binary', type=Path, default=ROOT / 'build/bin/llama-kvmem-server')
-    ap.add_argument('--gpu-api', choices=['auto', 'nvml', 'rocm'], default='auto')
-    ap.add_argument('--gpu-index', type=int, default=0)
+    ap.add_argument('--binary', type=Path, default=ROOT / 'build-hip-win/bin/llama-kvmem-server.exe')
     ap.add_argument('--model', type=Path, default=ROOT / 'models/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF/Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf')
     ap.add_argument('--mmproj', type=Path, default=ROOT / 'models/unsloth/Qwen3.8-27B-GGUF/mmproj-Q8_0.gguf')
     ap.add_argument('--no-projector', action='store_true')
-    ap.add_argument('--load-mode', choices=['auto', 'none', 'mmap', 'dio'], default='auto')
     ap.add_argument('--query-replay', choices=['legacy', 'auto'])
     ap.add_argument('--query-policy', choices=['legacy', 'user'])
     ap.add_argument('--mtp-state', choices=['snapshots', 'auto', 'replay'])
     ap.add_argument('--mtp', type=int, default=2, help='Maximum MTP draft length')
+    ap.add_argument('--load-mode', choices=['auto', 'none', 'mmap', 'dio'], default='none')
     ap.add_argument('--device', choices=['gpu', 'cpu'], default='gpu')
     ap.add_argument('--spec', choices=['none', 'draft-mtp'], default='draft-mtp')
     ap.add_argument('--kv', default='q8_0')
@@ -128,8 +163,6 @@ def main():
     ap.add_argument('--reserve', type=int, default=2048)
     ap.add_argument('--ctx', type=int, default=16384)
     ap.add_argument('--batch', type=int, default=512)
-    ap.add_argument('--threads', type=int, default=0,
-                    help='server/model and CPU projector threads; 0 keeps server defaults')
     ap.add_argument('--image-max-tokens', type=int, default=1024)
     ap.add_argument('--long-words', type=int, default=0)
     ap.add_argument('--port', type=int, default=18201)
@@ -145,8 +178,6 @@ def main():
     ap.add_argument('--long-context-benchmark', action='store_true',
                     help='Replay tool results until prompt plus generation nearly fills --ctx')
     ap.add_argument('--long-chunk-tokens', type=int, default=8192)
-    ap.add_argument('--max-tool-rounds', type=int, default=0,
-                    help='Stop a diagnostic long-context run after this many tool rounds; 0 runs to the final 256K round')
     ap.add_argument('--swap-stop-mib', type=int, default=512,
                     help='Stop the test if server VmSwap reaches this value')
     ap.add_argument('--system-swap-growth-stop-mib', type=int, default=1024)
@@ -172,10 +203,6 @@ def main():
         ap.error('--long-context-benchmark cannot be combined with another query benchmark')
     if args.long_chunk_tokens < 512:
         ap.error('--long-chunk-tokens must be at least 512')
-    if args.max_tool_rounds < 0 or (args.max_tool_rounds and not args.long_context_benchmark):
-        ap.error('--max-tool-rounds requires --long-context-benchmark and must be nonnegative')
-    if args.threads < 0:
-        ap.error('--threads must be nonnegative')
     if args.swap_stop_mib <= 0 or args.system_swap_growth_stop_mib <= 0:
         ap.error('swap stop thresholds must be positive')
     if args.no_projector and not (args.query_benchmark or args.query_quality or args.long_context_benchmark):
@@ -184,6 +211,8 @@ def main():
         ap.error(f'projector file not found: {args.mmproj}')
     folder = ROOT / args.folder
     folder.mkdir(parents=True, exist_ok=True)
+    if any(folder.iterdir()):
+        ap.error('Use a new empty evidence directory; existing results are not overwritten.')
     print('ARTIFACTS', folder, flush=True)
     image = fixture()
     (folder / 'shapes.png').write_bytes(image)
@@ -191,21 +220,10 @@ def main():
     part = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + encoded}}
     changed = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(fixture(changed=True)).decode()}}
     env = os.environ.copy()
-    gpu_api = args.gpu_api
-    if gpu_api == 'auto':
-        gpu_api = 'rocm' if 'build-rocm' in args.binary.resolve().parts else 'nvml'
-    library_path = str(args.binary.resolve().parent)
-    inherited_libraries = env.get('LD_LIBRARY_PATH')
-    if inherited_libraries:
-        library_path += ':' + inherited_libraries
-    env.update(LD_LIBRARY_PATH=library_path,
+    rocm = env.get('ROCM_PATH') or env.get('HIP_PATH')
+    rocm_bin = env.get('ROCM_BIN') or (str(Path(rocm) / 'bin') if rocm else '')
+    env.update(PATH=(rocm_bin + os.pathsep if rocm_bin else '') + env.get('PATH', ''),
                NO_PROXY='127.0.0.1,localhost', no_proxy='127.0.0.1,localhost')
-    if gpu_api == 'rocm':
-        env.pop('CUDA_VISIBLE_DEVICES', None)
-        env.pop('CUDA_DEVICE_ORDER', None)
-        env['HIP_VISIBLE_DEVICES'] = str(args.gpu_index)
-    else:
-        env.update(CUDA_VISIBLE_DEVICES=str(args.gpu_index), CUDA_DEVICE_ORDER='PCI_BUS_ID')
     if args.trace:
         env['KVMEM_TRACE'] = '1'
     cmd = [str(args.binary.resolve()),
@@ -216,9 +234,6 @@ def main():
            '--kvmem-block-tokens', '128', '--kv-dtype', args.kv,
            '--spec-type', args.spec, '--spec-draft-n-max', str(args.mtp), '--enable-thinking',
            '--reasoning-budget', str(args.thinking_budget if args.thinking_budget is not None else 0)]
-    cmd += ['--load-mode', args.load_mode]
-    if args.threads:
-        cmd += ['--threads', str(args.threads), '--threads-batch', str(args.threads)]
     if not args.no_projector:
         cmd += ['--mmproj', str(args.mmproj.resolve()),
                 '--mmproj-offload' if args.device == 'gpu' else '--no-mmproj-offload']
@@ -232,26 +247,16 @@ def main():
         cmd += ['--kvmem-mtp-state', args.mtp_state]
     if args.no_kvmem:
         cmd += ['--no-kvmem']
-    (folder / 'argv.json').write_text(json.dumps(cmd, indent=2))
-    nvml = None
-    if gpu_api == 'rocm':
-        sampler = RocmSampler(args.gpu_index, folder)
-    else:
-        nvml = ctypes.CDLL('libnvidia-ml.so.1')
-        assert nvml.nvmlInit_v2() == 0
-        device = ctypes.c_void_p()
-        assert nvml.nvmlDeviceGetHandleByIndex_v2(
-            ctypes.c_uint(args.gpu_index), ctypes.byref(device)) == 0
-        sampler = Sampler(nvml, device, folder)
+    cmd += ['--load-mode', args.load_mode]
+    (folder / 'argv.json').write_text(json.dumps(cmd, indent=2), encoding='utf-8')
+    sampler = LogVramSampler(folder)
     def system_swap():
-        raw = Path('/proc/meminfo').read_text()
-        values = dict((k, int(v)) for k, v in re.findall(r'^(SwapTotal|SwapFree):\s+(\d+)', raw, re.M))
-        return (values['SwapTotal'] - values['SwapFree']) / 1024, raw
+        return 0.0, ''  # no /proc on Windows; swap-stop disabled
     baseline_swap, _ = system_swap()
     swap_stop = {}
     with (folder / 'server.stderr.log').open('w') as fh:
         proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=fh)
-    (folder / 'pid').write_text(str(proc.pid))
+    (folder / 'pid').write_text(str(proc.pid), encoding='utf-8')
     sampler.start()
     rss_stop = threading.Event()
     rss_samples = []
@@ -263,36 +268,15 @@ def main():
             writer.writerow(['elapsed_s', 'phase', 'rss_mib', 'anon_mib', 'file_mib', 'swap_mib'])
             while not rss_stop.is_set():
                 try:
-                    status = Path(f'/proc/{proc.pid}/status').read_text()
-                    match = re.search(r'^VmRSS:\s+(\d+)', status, re.M)
-                    if match:
-                        value = int(match[1]) / 1024
-                        phase = sampler.phase
-                        rss_samples.append(value)
-                        rss_phase_peaks[phase] = max(rss_phase_peaks.get(phase, 0), value)
-                        extra = []
-                        for field in ('RssAnon', 'RssFile', 'VmSwap'):
-                            m = re.search(r'^' + field + r':\s+(\d+)', status, re.M)
-                            extra.append(int(m[1]) / 1024 if m else None)
-                        writer.writerow([time.monotonic() - start, phase, value, *extra])
-                        output.flush()
-                        used_swap, meminfo = system_swap()
-                        if (extra[-1] is not None and extra[-1] >= args.swap_stop_mib) or used_swap - baseline_swap >= args.system_swap_growth_stop_mib:
-                            swap_stop.update(phase=phase, pid=proc.pid, process_swap_mib=extra[-1],
-                                             system_swap_mib=used_swap, baseline_system_swap_mib=baseline_swap,
-                                             elapsed_s=time.monotonic() - start,
-                                             process_limit_mib=args.swap_stop_mib,
-                                             system_growth_limit_mib=args.system_swap_growth_stop_mib)
-                            try:
-                                (folder / 'SWAP_STOP.json').write_text(json.dumps(swap_stop, indent=2)+'\n')
-                                (folder / 'swap-stop-status.txt').write_text(status)
-                                (folder / 'swap-stop-meminfo.txt').write_text(meminfo)
-                                print('SWAP_STOP', json.dumps(swap_stop), flush=True)
-                            finally:
-                                # Force termination after the normal grace period even
-                                # if the HTTP reader is blocked or --keep-server is set.
-                                stop_server(proc)
-                            return
+                    value = _read_rss_mib(proc.pid)
+                    if value is None:
+                        break
+                    phase = sampler.phase
+                    rss_samples.append(value)
+                    rss_phase_peaks[phase] = max(rss_phase_peaks.get(phase, 0), value)
+                    extra = [None, None, None]  # no RssAnon/RssFile/VmSwap on Windows
+                    writer.writerow([time.monotonic() - start, phase, value, *extra])
+                    output.flush()
                 except FileNotFoundError:
                     break
                 rss_stop.wait(.2)
@@ -309,7 +293,7 @@ def main():
                            top_p=.95, top_k=20, min_p=0, presence_penalty=0,
                            frequency_penalty=0, repetition_penalty=1)
         payload.update(extra or {})
-        (folder / (label + '.request.json')).write_text(json.dumps(payload, ensure_ascii=False))
+        (folder / (label + '.request.json')).write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
         sampler.phase = label
         log_start = (folder / 'server.stderr.log').stat().st_size
         start = time.monotonic()
@@ -321,7 +305,7 @@ def main():
                 code = response.status
                 if payload.get('stream'):
                     lines = []
-                    with (folder / (label + '.response.txt')).open('w') as streamed:
+                    with (folder / (label + '.response.txt')).open('w', encoding='utf-8') as streamed:
                         for wire in response:
                             line = wire.decode()
                             lines.append(line)
@@ -337,7 +321,7 @@ def main():
                     raw = response.read().decode()
         except urllib.error.HTTPError as exc:
             code, raw = exc.code, exc.read().decode()
-        (folder / (label + '.response.txt')).write_text(raw)
+        (folder / (label + '.response.txt')).write_text(raw, encoding='utf-8')
         assert code == status, (label, code, raw)
         if payload.get('stream') and code == 200:
             chunks = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith('data: {')]
@@ -434,18 +418,13 @@ def main():
                 last_prompt = usage['prompt_tokens']
                 (folder / 'long-context.json').write_text(json.dumps({
                     'target_ctx': args.ctx, 'generation_limit': extra['max_tokens'],
-                    'completed': final, 'rounds': rounds}, indent=2))
+                    'rounds': rounds}, indent=2))
                 print('CONTEXT', last_prompt, '/', args.ctx, 'final', final, flush=True)
-                if final or (args.max_tool_rounds and len(rounds) >= args.max_tool_rounds):
+                if final:
                     break
-            assert rounds, 'no tool rounds'
+            assert rounds and rounds[-1]['final'], rounds[-1:] or 'no tool rounds'
+            assert args.ctx - 1024 <= last_prompt < args.ctx - extra['max_tokens'], last_prompt
             assert all(r['usage']['prompt_cache_hit_tokens'] > 0 for r in results[2:]), 'lost retained prefix'
-            if not args.max_tool_rounds or rounds[-1]['final']:
-                assert rounds[-1]['final'], rounds[-1:]
-                assert args.ctx - 1024 <= last_prompt < args.ctx - extra['max_tokens'], last_prompt
-                final_usage = results[-1]['usage'] or {}
-                assert final_usage.get('completion_tokens') == extra['max_tokens'], (
-                    'final code generation stopped before its token limit', final_usage)
             return
         if args.query_benchmark:
             tools = [{'type': 'function', 'function': {'name': 'read_file', 'description': 'Read source code',
@@ -643,22 +622,17 @@ def main():
     finally:
         rss_stop.set()
         rss_thread.join()
-        try:
-            stats = sampler.finish()
-            stats['peak_process_rss_mib'] = max(rss_samples, default=0)
-            stats['peak_runtime_rss_mib'] = max((v for k, v in rss_phase_peaks.items() if k != 'loading'), default=None)
-            stats['peak_loading_rss_mib'] = rss_phase_peaks.get('loading')
-            stats['phase_rss_peak_mib'] = rss_phase_peaks
-            stats['swap_stop'] = swap_stop or None
-            stats['gpu_api'] = gpu_api
-            stats.update(options=vars(args), requests=results)
-            (folder / 'summary.json').write_text(json.dumps(stats, indent=2, ensure_ascii=False, default=str))
-            print('PEAK_MIB', stats['peak_vram_mib'], flush=True)
-        finally:
-            if swap_stop or not args.keep_server:
-                stop_server(proc)
-            if nvml is not None:
-                nvml.nvmlShutdown()
+        stats = sampler.finish()
+        stats['peak_process_rss_mib'] = max(rss_samples, default=0)
+        stats['peak_runtime_rss_mib'] = max((v for k, v in rss_phase_peaks.items() if k != 'loading'), default=None)
+        stats['peak_loading_rss_mib'] = rss_phase_peaks.get('loading')
+        stats['phase_rss_peak_mib'] = rss_phase_peaks
+        stats['swap_stop'] = swap_stop or None
+        stats.update(options=vars(args), requests=results)
+        (folder / 'summary.json').write_text(json.dumps(stats, indent=2, ensure_ascii=False, default=str), encoding='utf-8')
+        print('PEAK_MIB', stats['peak_vram_mib'], flush=True)
+        if swap_stop or not args.keep_server:
+            stop_server(proc)
 
 
 if __name__ == '__main__':

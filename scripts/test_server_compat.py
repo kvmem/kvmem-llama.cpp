@@ -138,7 +138,8 @@ try:
                               (timeout_reply == b'' or b'408' in timeout_reply or b'400' in timeout_reply))
                     check('UI public', request('/')[1] == b'compat-ui')
                     check('UI asset public', request('/asset.js')[1] == b'compat-asset')
-                    for route in ['/props', '/v1/models', '/v1/chat/completions', '/unknown']:
+                    for route in ['/props', '/v1/models', '/v1/chat/completions',
+                                  '/v1/responses', '/responses', '/unknown']:
                         check('unauthorized ' + route, request(route)[0] == 401)
                     status, body = request('/v1/chat/completions', b'not-json')
                     check('auth before JSON parsing', status == 401 and json.loads(body)['error']['type'] == 'authentication_error')
@@ -184,6 +185,90 @@ try:
                     content = ''.join(chunk['choices'][0].get('delta', {}).get('content', '') or ''
                                       for chunk in chunks if chunk.get('choices'))
                     check('authenticated SSE', status == 200 and content.strip() == '5' and b'data: [DONE]' in body)
+                    payload = {'input': 'What is 2+3? Answer with the number only.',
+                               'max_output_tokens': 32, 'reasoning': {'effort': 'none'},
+                               'temperature': 0, 'stream': False}
+                    status, body = request('/v1/responses', json.dumps(payload).encode(), headers)
+                    response = json.loads(body)
+                    text = ''.join(part.get('text', '')
+                                   for item in response.get('output', [])
+                                   if item.get('type') == 'message'
+                                   for part in item.get('content', [])
+                                   if part.get('type') == 'output_text')
+                    check('responses non-stream', status == 200 and
+                          response.get('object') == 'response' and
+                          str(response.get('id', '')).startswith('resp_') and
+                          text.strip() == '5')
+                    payload['stream'] = True
+                    status, body = request('/v1/responses', json.dumps(payload).encode(), headers)
+                    stream_text = body.decode()
+                    events = []
+                    for block in stream_text.split('\n\n'):
+                        lines = [line for line in block.splitlines() if line.strip()]
+                        if not lines or lines[0] == 'data: [DONE]':
+                            continue
+                        name = lines[0][7:] if lines[0].startswith('event: ') else None
+                        data = json.loads(lines[1][6:]) if len(lines) > 1 and lines[1].startswith('data: ') else {}
+                        events.append((name, data))
+                    types = [name or data.get('type') for name, data in events]
+                    deltas = ''.join(data.get('delta', '')
+                                     for name, data in events if name == 'response.output_text.delta')
+                    done = [data for name, data in events if name == 'response.completed']
+                    output = done[0]['response'].get('output', []) if done else []
+                    streamed = ''.join(part.get('text', '')
+                                       for item in output if item.get('type') == 'message'
+                                       for part in item.get('content', [])
+                                       if part.get('type') == 'output_text')
+                    check('responses stream', status == 200 and
+                          body.decode().splitlines()[0].startswith('event: response.created') and
+                          types.count('response.created') == 1 and
+                          types.count('response.in_progress') == 1 and
+                          types.count('response.output_item.added') >= 1 and
+                          types.count('response.output_text.delta') >= 1 and
+                          types.count('response.output_text.done') == 1 and
+                          types.count('response.content_part.done') == 1 and
+                          types.count('response.completed') == 1 and
+                          types[-1] == 'response.completed' and
+                          bool(done) and done[0]['response'].get('object') == 'response' and
+                          str(done[0]['response'].get('id', '')).startswith('resp_') and
+                          done[0]['response'].get('status') == 'completed' and
+                          done[0]['response'].get('usage', {}).get('input_tokens', 0) > 0 and
+                          deltas.strip() == '5' and
+                          streamed.strip() == '5' and
+                          deltas.strip() == text.strip())
+                    # The event: line and the JSON type field must agree, or an
+                    # SDK dispatching on either sees a different stream.
+                    check('responses stream event/type agree',
+                          all(name is not None and data.get('type') == name for name, data in events))
+                    if a.image and a.mmproj:
+                        image_payload = {'input': [{'role': 'user', 'content': [
+                            {'type': 'input_text', 'text': 'Read the four digits in the image. Output only the digits.'},
+                            {'type': 'input_image', 'image_url': dataurl}]}],
+                            'max_output_tokens': 128, 'reasoning': {'effort': 'none'},
+                            'temperature': 0, 'stream': False}
+                        status, body = request('/v1/responses', json.dumps(image_payload).encode(), headers)
+                        image_response = json.loads(body)
+                        image_text = ''.join(part.get('text', '')
+                                             for item in image_response.get('output', [])
+                                             if item.get('type') == 'message'
+                                             for part in item.get('content', [])
+                                             if part.get('type') == 'output_text')
+                        check('responses vision non-stream', status == 200 and
+                              ''.join(image_text.strip().strip('。.!').split()) == '6037')
+                        image_payload['stream'] = True
+                        status, body = request('/v1/responses', json.dumps(image_payload).encode(), headers)
+                        image_deltas = []
+                        completed = []
+                        for line in body.decode().splitlines():
+                            if line.startswith('data: ') and line != 'data: [DONE]':
+                                event = json.loads(line[6:])
+                                if event.get('type') == 'response.output_text.delta':
+                                    image_deltas.append(event.get('delta', ''))
+                                elif event.get('type') == 'response.completed':
+                                    completed.append(event)
+                        check('responses vision stream', status == 200 and
+                              ''.join(''.join(image_deltas).strip().strip('。.!').split()) == '6037' and
+                              len(completed) == 1)
                     payload = {'messages': [{'role': 'user', 'content':
                         'Write numbers 1 through 60 in ascending order, separated by commas. Output only the list.'}],
                         'reasoning_effort': 'none', 'temperature': 0, 'stream': False}

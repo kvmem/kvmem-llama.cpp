@@ -469,6 +469,9 @@ static bool run_prefill_multimodal(ServerState & st, StreamIo * io, int * n_cach
                 ref_bytes, unique_bytes, st.mm_checkpoint_accounting->live_bytes, st.mm_checkpoint_accounting->peak_bytes);
         if (copies_before.enabled) {
             const auto copies = llama_kvmem_get_transfer_stats();
+            fprintf(stderr, "KVMEM_PREFILL_PHASE path=%s first_ms=%.3f replay_ms=%.3f retrieval_ms=%.3f replay_rows=%u query=[%d,%d)\n",
+                    path.c_str(), p.first_ms, p.replay_ms, p.retrieval_ms,
+                    st.mm_replayed, query, eval_end);
             fprintf(stderr, "KVMEM_PREFILL_DIAGNOSTIC target_ms=%.3f draft_ms=%.3f extra_sync=1 adapter_h2d_bytes=%llu adapter_d2h_bytes=%llu adapter_d2d_bytes=%llu h2d_calls=%llu d2h_calls=%llu d2d_calls=%llu\n",
                     p.target_ms, p.draft_ms,
                     (unsigned long long) (copies.bytes[0] - copies_before.bytes[0]),

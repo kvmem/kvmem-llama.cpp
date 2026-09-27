@@ -1,6 +1,6 @@
 # KVMem + llama.cpp
 
-**Prebuilt downloads:** [Windows x64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Linux / WSL2 x86_64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Windows / Linux ROCm (beta)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta)
+**Prebuilt downloads:** [Windows x64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Linux / WSL2 x86_64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Windows / Linux ROCm (beta 2)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2)
 
 **QQ community / QQ 交流群：1040777853**
 
@@ -70,8 +70,8 @@ The project builds on llama.cpp's CUDA backend, with the platform above used for
 | Windows x64 — CUDA 12.9.86 | [v0.16.0-rc3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) | Alternative **runtime** ZIP; GPU targets 70/75/80/86/89/90/120a, including Volta. Quantizer is a separate optional ZIP. |
 | Linux / WSL2 x86_64 — CUDA 13.2.86 | [v0.16.0-rc3 tar.gz](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.16.0-rc3/kvmem-v0.16.0-rc3-linux-x86_64-cuda13.2.86.tar.gz) | Runtime with CUDA libraries and both UIs; GPU targets 75/80/86/89/90/120a. Requires glibc 2.35+ and AVX2/FMA/F16C/BMI2. |
 | Linux / WSL2 x86_64 — CUDA 12.9.86 | [v0.16.0-rc3 tar.gz](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.16.0-rc3/kvmem-v0.16.0-rc3-linux-x86_64-cuda12.9.86.tar.gz) | Runtime with CUDA libraries and both UIs; GPU targets 70/75/80/86/89/90/120a, including Volta. Requires glibc 2.35+ and AVX2/FMA/F16C/BMI2. |
-| Windows x64 — ROCm (beta) | [rc3-rocm-beta](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta) | Native HIP runtime ZIP for gfx1100/gfx1200/gfx1201 (RX 7900 / 9060 XT / 9070 series). |
-| Linux / WSL2 x86_64 — ROCm (beta) | [rc3-rocm-beta](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta) | Runtime tar.gz built on Ubuntu 24.04 with ROCm 7.2.x; other distributions may need a source build. |
+| Windows x64 — ROCm (beta 2) | [rc3-rocm-beta2](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2) | Native HIP runtime ZIP for gfx1100/gfx1200/gfx1201 (RX 7900 / 9060 XT / 9070 series). |
+| Linux / WSL2 x86_64 — ROCm (beta 2) | [rc3-rocm-beta2](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2) | Runtime tar.gz built on Ubuntu 24.04 with ROCm 7.2.x; other distributions may need a source build. |
 
 Linux rc3 packages use the same source as Windows and include independent `scripts/linux/start-iq3.sh` / `start-iq4.sh` launchers. CUDA Toolkit, Python and Node.js are not required to run these packages. See the [Linux / WSL2 quick start and validation notes](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) and verify downloads with [SHA256SUMS](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.16.0-rc3/SHA256SUMS). The source-tree launcher commands below apply to source builds; use the packaged README for prebuilt launcher arguments.
 
@@ -479,6 +479,7 @@ progress-reporting approach from [PR #9](https://github.com/kvmem/kvmem-llama.cp
 - `GET /health`
 - `GET /v1/models`
 - `POST /v1/chat/completions` (sampling, stream, tools, optional images)
+- `POST /v1/responses` and `POST /responses` (OpenAI Responses, non-streaming and SSE streaming). With `--mmproj`, `input_image.image_url` accepts image URLs or Base64 data URLs through the same vision pipeline as Chat Completions. File IDs are not supported. The per-request `detail` value is ignored; image resolution is controlled by the server's image token settings. `scripts/test_responses_sdk.py` exercises both paths through the official OpenAI Python SDK, whose Responses stream parser is stricter than a hand-rolled client.
 
 No auth or TLS unless an API key is set. Binds `127.0.0.1` by default. To serve
 on the LAN, pass `--host 0.0.0.0` to the server or to the launchers

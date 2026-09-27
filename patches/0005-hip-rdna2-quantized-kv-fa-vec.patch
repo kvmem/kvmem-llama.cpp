@@ -1,0 +1,23 @@
+diff --git a/ggml/src/ggml-cuda/fattn.cu b/ggml/src/ggml-cuda/fattn.cu
+index ab7a3b297..37b386359 100644
+--- a/ggml/src/ggml-cuda/fattn.cu
++++ b/ggml/src/ggml-cuda/fattn.cu
+@@ -457,6 +457,18 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
+     // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
+     const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 && K->ne[1] % FATTN_KQ_STRIDE == 0;
+ 
++#ifdef GGML_USE_HIP
++    // RDNA2 returns zero occupancy for the larger quantized-KV tile kernels even
++    // though the vector kernel has a valid Wave32 launch configuration. Select
++    // VEC, which dequantizes K/V in registers and does not allocate the tile
++    // path's full-cache F16 staging buffers.
++    if (GGML_CUDA_CC_IS_RDNA2(cc) &&
++            (ggml_is_quantized(K->type) || ggml_is_quantized(V->type)) &&
++            can_use_vector_kernel) {
++        return BEST_FATTN_KERNEL_VEC;
++    }
++#endif // GGML_USE_HIP
++
+     // If Turing tensor cores are available, use them:
+     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
+         if (can_use_vector_kernel) {

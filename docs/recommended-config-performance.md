@@ -100,7 +100,10 @@ python3 scripts/summarize_canary.py logs/task2-iq3 logs/task2-iq4
 
 ## 复测任务一
 
-脚本使用固定的 RTX 5060 Ti UUID，换机器前需调整 `scripts/multimodal_canary.py` 中的 `GPU`。运行前应确保该 GPU 和测试端口 18201 可用；每组完成后脚本会关闭自己启动的服务。
+脚本支持 NVML 和 ROCm 显存采样；可用 `--gpu-api auto|nvml|rocm` 与
+`--gpu-index` 选择后端和设备。运行前应确保该 GPU 和测试端口 18201 可用；
+每组完成后脚本会关闭自己启动的服务。ROCm 的 README 对齐配置和复测结果见
+[ROCm README 对齐配置与 5060 Ti 基线对比](rocm-recommended-config-performance.md)。
 
 ```bash
 python3 scripts/multimodal_canary.py \

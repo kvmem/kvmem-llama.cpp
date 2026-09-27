@@ -7,6 +7,7 @@
 #include "llama-kvmem-capture.h"
 #include "llama-kvmem-factory.h"
 #include "llama-kvmem-hooks.h"
+#include "llama-kvmem-gpu.h"
 #include "llama-kvmem-quant.h"
 #include "llama-kvmem-stagein.h"
 #include "llama-kvmem-transfer.h"
@@ -23,8 +24,6 @@
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
 #include "ggml-cuda.h"
-
-#include <cuda_runtime.h>
 
 #include <algorithm>
 #include <atomic>

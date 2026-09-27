@@ -1,5 +1,10 @@
 #include "kvmem/raw_kv_store.hpp"
+#if defined(_WIN32)
+// The POSIX implementation cannot be built on Windows; see the header.
+#include "kvmem/nvme_kv_tier_win.hpp"
+#else
 #include "kvmem/nvme_kv_tier.hpp"
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -10,6 +15,10 @@
 #include <utility>
 
 namespace {
+// steady_clock is the portable spelling of CLOCK_MONOTONIC: it never steps
+// backwards and ignores wall-clock adjustments. libstdc++ implements it as
+// clock_gettime(CLOCK_MONOTONIC) on Linux, so behaviour there is unchanged;
+// MSVC has neither clock_gettime nor CLOCK_MONOTONIC.
 uint64_t monotonic_ns() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());

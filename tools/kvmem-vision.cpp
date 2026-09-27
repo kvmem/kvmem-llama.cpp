@@ -82,20 +82,22 @@ std::string kvmem_parse_media_messages(const std::string & body, bool allow_imag
     return parsed.dump();
 }
 
-kvmem_vision::kvmem_vision(llama_model * model, const std::string & path, bool gpu, int min_tokens, int max_tokens) {
+kvmem_vision::kvmem_vision(llama_model * model, const std::string & path, bool gpu,
+                           int min_tokens, int max_tokens, int n_threads) {
     auto params = mtmd_context_params_default();
     params.media_marker = get_media_marker();
     params.use_gpu = gpu;
     params.image_min_tokens = min_tokens;
     params.image_max_tokens = max_tokens;
+    if (n_threads > 0) params.n_threads = n_threads;
     // Native lazy warmup uses the real image instead of a fixed 2116-token dummy.
     params.warmup = false;
     params.print_timings = true;
     ctx_ = mtmd_init_from_file(path.c_str(), model, params);
     if (!ctx_) throw std::runtime_error("failed to load mmproj: " + path);
     n_embd_ = llama_model_n_embd_inp(model);
-    kvmem_diag("KVMEM_TRACE vision_load device=%s embedding_width=%d min_tokens=%d max_tokens=%d\n",
-            gpu ? "GPU" : "CPU", n_embd_, min_tokens, max_tokens);
+    kvmem_diag("KVMEM_TRACE vision_load device=%s embedding_width=%d min_tokens=%d max_tokens=%d threads=%d\n",
+            gpu ? "GPU" : "CPU", n_embd_, min_tokens, max_tokens, params.n_threads);
 }
 
 kvmem_vision::~kvmem_vision() { mtmd_free(ctx_); }

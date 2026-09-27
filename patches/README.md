@@ -7,6 +7,12 @@ It also fixes reasoning-budget initialization from a template's generation prefi
 `scripts/apply-patches.sh` applies it
 without creating commits and checks for an already applied tree.
 
+`0005-hip-rdna2-quantized-kv-fa-vec.patch` is @zintown's PR #58 RDNA2
+quantized-KV Flash Attention dispatch fix. It selects the existing VEC kernel
+for supported dimensions, avoiding the larger tile kernel's zero-occupancy
+assertion. It is applied after the cumulative patch by both Linux and Windows
+build entry points. F16 draft KV is not covered by this fix.
+
 `reasoning-budget-upgrade.patch` upgrades the v0.15.0 ReplaySSM tree.
 `replayssm-upgrade.patch` upgrades the preceding multimodal/query-replay tree.
 `multimodal-upgrade.patch` upgrades the KVMem working tree recorded before
