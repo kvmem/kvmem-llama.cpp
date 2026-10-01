@@ -125,13 +125,15 @@ public:
     void set_replay(bool replay);
     bool replay() const { return replay_; }
     bool want_prefill_capture() const {
-        return prefill_capture_ && !retrieval_pinned_ && !replay_;
+        // Pass-through never feeds a host tier, so skip the capture nodes.
+        return prefill_capture_ && !passthrough_ && !retrieval_pinned_ && !replay_;
     }
     // Recapture Q for retrieval even while replaying a cached query span.
     bool want_q_capture() const {
-        return method_ == 1 && !retrieval_pinned_ && !query_frozen_ &&
+        return method_ == 1 && !passthrough_ && !retrieval_pinned_ && !query_frozen_ &&
             (explicit_spans_ ? !turn_spans_.query.empty() : query_begin_ >= 0);
     }
+    bool passthrough_active() const { return passthrough_; }
     bool want_decode_mean() const {
         return retrieval_pinned_ && method_ == 1 && !replay_;
     }
@@ -384,6 +386,11 @@ private:
     uint32_t block_tokens_ = 128;
     uint32_t kv_size_ = 0;
     uint32_t n_slots_ = 0;
+    // True when the working set covers the whole context and no spill tier is
+    // configured: KVMem can never offload, so raw-KV capture (a forced
+    // per-ubatch backend synchronize plus D2H copy) and the per-ubatch reselect
+    // are pure overhead. Bypass both and behave like a plain KV cache.
+    bool passthrough_ = false;
     bool multi_gpu_ = false;
     bool trace_ = false;
 

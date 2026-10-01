@@ -16,7 +16,11 @@
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
 
+// llama-kvmem-transfer.h already pulls in the runtime shim (CUDA, HIP or the
+// host backend); this direct include is only for the device builds.
+#if !defined(KVMEM_GPU_BACKEND_HOST)
 #include <cuda_runtime.h>
+#endif
 
 #include <algorithm>
 #include <cmath>

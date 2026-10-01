@@ -28,3 +28,5 @@ CLAUDE.md
 /build-hip*/
 /dist/
 /artifacts/
+build-host/
+build-m4/

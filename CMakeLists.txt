@@ -78,6 +78,11 @@ endif()
 # switch, which is what the KVMEM_GPU_BACKEND block below wires up.
 if (KVMEM_BUILD_LLAMA AND GGML_HIP)
     set(KVMEM_GPU_BACKEND "HIP")
+elseif (KVMEM_BUILD_LLAMA AND GGML_METAL)
+    # Apple silicon. The Metal backend allocates KV buffers in shared storage,
+    # so the adapter's stage-in pipeline runs as host code and every "device
+    # copy" is a memcpy. No device kernels are needed for a correct port.
+    set(KVMEM_GPU_BACKEND "HOST")
 else()
     set(KVMEM_GPU_BACKEND "CUDA")
 endif()
@@ -100,7 +105,7 @@ if (KVMEM_BUILD_LLAMA)
         # let ggml select the local GPU architecture. This keeps the CUDA path
         # portable without changing its backend semantics.
         option(GGML_CUDA "ggml: use CUDA" ON)
-    else()
+    elseif (KVMEM_GPU_BACKEND STREQUAL "HIP")
         # ROCm: the CUDA backend must stay off and no CUDA arch may be forced.
         set(GGML_CUDA OFF CACHE BOOL "ggml: use CUDA" FORCE)
         if (NOT ROCM_PATH)
@@ -195,6 +200,12 @@ if (KVMEM_BUILD_LLAMA)
         find_package(hip REQUIRED)
 
         message(STATUS "KVMem: ROCm/HIP backend, GPU_TARGETS=${GPU_TARGETS}, ROCM_PATH=${ROCM_PATH}")
+    else()
+        # Host/Metal: keep CUDA off and force Metal on so the llama.cpp side
+        # matches the backend the adapter was switched to.
+        set(GGML_CUDA  OFF CACHE BOOL "ggml: use CUDA"  FORCE)
+        set(GGML_METAL ON  CACHE BOOL "ggml: use Metal" FORCE)
+        message(STATUS "KVMem: host/Metal backend (Apple unified memory, CPU stage-in)")
     endif()
     # Default llama.cpp FA vec kernels are only F16/Q4_0/Q8_0/BF16. q5_0 KV
     # (and q4_1/q5_1) need this or FlashAttention refuses those types and
@@ -204,6 +215,42 @@ if (KVMEM_BUILD_LLAMA)
     set(LLAMA_KVMEM ON CACHE BOOL "" FORCE)
     set(LLAMA_KVMEM_ROOT "${CMAKE_SOURCE_DIR}" CACHE PATH "" FORCE)
     add_subdirectory(llama.cpp)
+
+    if (KVMEM_GPU_BACKEND STREQUAL "HOST")
+        # The stage-in kernels compile as plain C++: .cu is only a CUDA source
+        # when the CUDA language is enabled, so force the language here. They
+        # live in their own object library to keep the host shim's macros
+        # (blockIdx/threadIdx emulation) out of every other translation unit.
+        add_library(kvmem-stagein-host OBJECT src/adapter/llama-kvmem-stagein.cu)
+        # LANGUAGE CXX alone is not enough: clang still switches to CUDA mode on
+        # the .cu extension, so force the input language explicitly.
+        set_source_files_properties(src/adapter/llama-kvmem-stagein.cu PROPERTIES
+            LANGUAGE CXX
+            COMPILE_OPTIONS "-x;c++")
+        target_include_directories(kvmem-stagein-host PRIVATE
+            src/adapter
+            llama.cpp/include
+            llama.cpp/ggml/include)
+        target_compile_definitions(kvmem-stagein-host PRIVATE
+            LLAMA_KVMEM=1
+            KVMEM_GPU_BACKEND_HOST=1)
+        target_sources(llama PRIVATE $<TARGET_OBJECTS:kvmem-stagein-host>)
+
+        # llama-memory-kvmem*.cpp and the tools include the runtime shim too,
+        # so the backend switch has to reach the whole adapter.
+        target_compile_definitions(llama PRIVATE KVMEM_GPU_BACKEND_HOST=1)
+
+        # Numerical check of the host stage-in pipeline against a reference
+        # implementation. No model needed.
+        add_executable(kvmem-stagein-host-test tests/stagein-host-test.cpp)
+        target_include_directories(kvmem-stagein-host-test PRIVATE
+            src/adapter
+            llama.cpp/ggml/include)
+        target_compile_definitions(kvmem-stagein-host-test PRIVATE KVMEM_GPU_BACKEND_HOST=1)
+        target_link_libraries(kvmem-stagein-host-test PRIVATE ggml)
+        target_sources(kvmem-stagein-host-test PRIVATE $<TARGET_OBJECTS:kvmem-stagein-host>)
+        add_test(NAME kvmem-stagein-host-test COMMAND kvmem-stagein-host-test)
+    endif()
 
     if (KVMEM_GPU_BACKEND STREQUAL "HIP")
         if (WIN32 AND EXISTS "${ROCM_PATH}/lib/llvm/amdgcn/bitcode/ocml.bc")
@@ -324,10 +371,15 @@ if (KVMEM_BUILD_LLAMA)
         set_tests_properties(kvmem-mtp-kv-test PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
-    add_executable(kvmem-gdn-replay-test tests/gdn-replay-test.cpp)
-    target_link_libraries(kvmem-gdn-replay-test PRIVATE ggml)
-    add_test(NAME kvmem-gdn-replay-test COMMAND kvmem-gdn-replay-test)
-    set_tests_properties(kvmem-gdn-replay-test PROPERTIES SKIP_RETURN_CODE 77)
+    # Exercises ggml_backend_cuda_gdn_fold, which only exists in the CUDA/HIP
+    # backends. The host backend disables GDN replay instead (see
+    # llama_memory_kvmem::gdn_replay_enabled).
+    if (NOT KVMEM_GPU_BACKEND STREQUAL "HOST")
+        add_executable(kvmem-gdn-replay-test tests/gdn-replay-test.cpp)
+        target_link_libraries(kvmem-gdn-replay-test PRIVATE ggml)
+        add_test(NAME kvmem-gdn-replay-test COMMAND kvmem-gdn-replay-test)
+        set_tests_properties(kvmem-gdn-replay-test PROPERTIES SKIP_RETURN_CODE 77)
+    endif()
 
     add_executable(kvmem-gdn-output-fusion-test tests/gdn-output-fusion-test.cpp)
     target_link_libraries(kvmem-gdn-output-fusion-test PRIVATE ggml)

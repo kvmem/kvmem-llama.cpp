@@ -216,7 +216,14 @@ void llama_memory_kvmem::set_recurrent(llama_memory_recurrent * recr) {
 }
 
 bool llama_memory_kvmem::gdn_replay_enabled() const {
+#if defined(KVMEM_GPU_BACKEND_HOST)
+    // The Gated DeltaNet replay kernel lives in ggml-cuda and has no host
+    // equivalent. Report it as unavailable so callers recompute the hybrid
+    // state instead of calling a device entry point that does not exist.
+    return false;
+#else
     return gdn_replay_ != nullptr;
+#endif
 }
 
 bool llama_memory_kvmem::gdn_replay_begin(llama_pos start, uint32_t width) {
@@ -225,6 +232,13 @@ bool llama_memory_kvmem::gdn_replay_begin(llama_pos start, uint32_t width) {
 
 bool llama_memory_kvmem::gdn_replay_commit(llama_context * ctx, uint32_t n_keep) {
     if (!gdn_replay_ || !recr_->replay_recording || n_keep > recr_->replay_width) return false;
+#if defined(KVMEM_GPU_BACKEND_HOST)
+    // See gdn_replay_enabled(): no device replay kernel on this backend.
+    (void) ctx;
+    recr_->replay_poisoned = true;
+    recr_->replay_finish(0);
+    return false;
+#else
     llama_synchronize(ctx);
     auto & replay = *gdn_replay_;
     const int64_t started = ggml_time_us();
@@ -251,6 +265,7 @@ bool llama_memory_kvmem::gdn_replay_commit(llama_context * ctx, uint32_t n_keep)
     replay.fold_us += ggml_time_us() - started;
     replay.folds += n_keep != 0;
     return true;
+#endif  // !KVMEM_GPU_BACKEND_HOST
 }
 static std::atomic<uint64_t> transfer_bytes[3]{};
 static std::atomic<uint64_t> transfer_calls[3]{};
@@ -906,6 +921,31 @@ llama_memory_kvmem::llama_memory_kvmem(
     query_begin_ = g_kvmem_params.query_begin;
     query_end_ = g_kvmem_params.query_end;
     force_pos_ = g_kvmem_params.force_pos;
+    {
+        const uint32_t ctx_tokens = kvmem_align_tokens(
+                static_cast<uint32_t>(cparams.n_ctx_seq), block_tokens_);
+        // Nothing can ever be offloaded when the working set covers the whole
+        // context and no spill tier is armed. Capture then costs a forced
+        // per-ubatch backend synchronize plus a D2H copy for a raw store nobody
+        // reads, and reselect recomputes a plan that is always "keep
+        // everything". Skip both.
+        passthrough_ = g_kvmem_params.cpu_bytes == 0 &&
+                       g_kvmem_params.nvme_bytes == 0 &&
+                       !g_kvmem_params.harvest_v &&
+                       !g_kvmem_params.raw_k_nvme &&
+                       force_pos_ < 0 &&
+                       std::getenv("KVMEM_DUMP_CAPTURE") == nullptr &&
+                       (ctx_tokens == 0 || pool.budget >= ctx_tokens);
+        const char * pte = std::getenv("KVMEM_PASSTHROUGH");
+        if (pte && pte[0] == '0') {
+            passthrough_ = false;
+        }
+        if (passthrough_) {
+            LLAMA_LOG_INFO("%s: KVMem pass-through armed: budget %u covers ctx %u, "
+                           "no spill tier; prefill capture and reselect disabled\n",
+                           __func__, pool.budget, ctx_tokens);
+        }
+    }
     kvmem::RawKvStoreConfig & rcfg = raw_cfg_;
     rcfg.n_layer = n_layer_;
     rcfg.n_embd_k = n_embd_k_;
@@ -2247,7 +2287,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
     // block_count() > budget is true and a recency pressure reselect would
     // drop the resurrected needle on the first generated token. Pin the
     // working set and place decode tokens into gen_reserve slots.
-    if (!retrieval_pinned_ && !keep_selected_) {
+    if (!passthrough_ && !retrieval_pinned_ && !keep_selected_) {
         try {
             need_offload = runtime_->maybe_offload_during_prefill(
                     n_new_tokens, resident_tokens(), kv_size_, incoming);
@@ -3126,6 +3166,12 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
 void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
     if (want_decode_mean()) {
         decode_mean_ingest(sched);
+        return;
+    }
+    if (passthrough_) {
+        // No host tier to fill, so do not force a backend synchronize here:
+        // that is the whole point of the pass-through path.
+        pending_capture_.clear();
         return;
     }
     const int64_t t_entry = ggml_time_us();
@@ -4349,6 +4395,9 @@ bool llama_memory_kvmem::set_query(const llama_kvmem_query_state & state) {
 }
 
 void llama_memory_kvmem::apply_retrieval() {
+    // Pass-through keeps every block resident, so there is nothing to select
+    // and no raw-K to score against.
+    if (passthrough_) { return; }
     if (method_ != 1) { harvest_flush(); return; }
     apply_selection(preview_retrieval());
 }

@@ -785,7 +785,12 @@ private:
             std::lock_guard<std::mutex> lock(cache_drop_mu_);
             int rc;
             do {
+#if defined(__APPLE__)
+                // macOS has no fdatasync; F_FULLFSYNC is the closest guarantee.
+                rc = ::fcntl(fd, F_FULLFSYNC);
+#else
                 rc = ::fdatasync(fd);
+#endif
             } while (rc != 0 && errno == EINTR);
             if (rc != 0) {
                 warn_cache_drop_failure("fdatasync", errno);

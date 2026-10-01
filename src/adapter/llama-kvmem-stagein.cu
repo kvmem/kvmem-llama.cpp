@@ -9,17 +9,23 @@
 #include <cstring>
 #include <vector>
 
+#if defined(KVMEM_GPU_BACKEND_HOST)
+// The kernels spell half precision the CUDA way; on the host backend the shim
+// supplies an equivalent type backed by ggml's own conversion routines.
+using half = kvmem_half_t;
+#endif
+
 namespace {
 
 constexpr int QK8_0 = 32;
 constexpr int QK4_0 = 32;
 
-struct __align__(2) block_q8_0 {
+struct KVMEM_ALIGN(2) block_q8_0 {
     half    d;
     int8_t  qs[QK8_0];
 };
 
-struct __align__(2) block_q4_0 {
+struct KVMEM_ALIGN(2) block_q4_0 {
     half    d;
     uint8_t qs[QK4_0 / 2];
 };
@@ -100,7 +106,7 @@ cudaStream_t stream() {
 }
 
 template <int N>
-__global__ void fwht_kernel(float * x, int64_t n_rows, float scale) {
+KVMEM_GLOBAL void fwht_kernel(float * x, int64_t n_rows, float scale) {
     const int64_t r = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= n_rows) {
         return;
@@ -127,7 +133,7 @@ __global__ void fwht_kernel(float * x, int64_t n_rows, float scale) {
     }
 }
 
-__global__ void dequant_q8_0(const block_q8_0 * x, float * y, int64_t n_blocks) {
+KVMEM_GLOBAL void dequant_q8_0(const block_q8_0 * x, float * y, int64_t n_blocks) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_blocks) {
         return;
@@ -139,7 +145,7 @@ __global__ void dequant_q8_0(const block_q8_0 * x, float * y, int64_t n_blocks) 
     }
 }
 
-__global__ void dequant_q4_0(const block_q4_0 * x, float * y, int64_t n_blocks) {
+KVMEM_GLOBAL void dequant_q4_0(const block_q4_0 * x, float * y, int64_t n_blocks) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_blocks) {
         return;
@@ -154,7 +160,7 @@ __global__ void dequant_q4_0(const block_q4_0 * x, float * y, int64_t n_blocks) 
     }
 }
 
-__global__ void rope_neox_kernel(float * x, int64_t n_tokens, int n_head, int n_embd_head,
+KVMEM_GLOBAL void rope_neox_kernel(float * x, int64_t n_tokens, int n_head, int n_embd_head,
                                  int n_rot, int32_t pos0, const float * theta) {
     const int t = (int) (blockIdx.x * blockDim.x + threadIdx.x);
     const int h = (int) blockIdx.y;
@@ -175,7 +181,7 @@ __global__ void rope_neox_kernel(float * x, int64_t n_tokens, int n_head, int n_
     }
 }
 
-__global__ void quant_q8_0(const float * x, block_q8_0 * y, int64_t n_blocks) {
+KVMEM_GLOBAL void quant_q8_0(const float * x, block_q8_0 * y, int64_t n_blocks) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_blocks) {
         return;
@@ -195,7 +201,7 @@ __global__ void quant_q8_0(const float * x, block_q8_0 * y, int64_t n_blocks) {
     }
 }
 
-__global__ void quant_q4_0(const float * x, block_q4_0 * y, int64_t n_blocks) {
+KVMEM_GLOBAL void quant_q4_0(const float * x, block_q4_0 * y, int64_t n_blocks) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n_blocks) {
         return;
@@ -230,7 +236,7 @@ __global__ void quant_q4_0(const float * x, block_q4_0 * y, int64_t n_blocks) {
     }
 }
 
-__global__ void copy_bytes(const CopyOp * ops, int n) {
+KVMEM_GLOBAL void copy_bytes(const CopyOp * ops, int n) {
     const int i = (int) blockIdx.x;
     if (i >= n) {
         return;
@@ -264,7 +270,7 @@ struct MeanKAcc {
 };
 MeanKAcc g_mk;
 
-__global__ void meank_add_f32(const uint8_t * k, float * acc, int tok0, int n_keep,
+KVMEM_GLOBAL void meank_add_f32(const uint8_t * k, float * acc, int tok0, int n_keep,
                               int n_embd, int ne0, size_t nb0, size_t nb1, size_t nb2) {
     const int d = (int) blockIdx.x * (int) blockDim.x + (int) threadIdx.x;
     if (d >= n_embd || ne0 <= 0) {
@@ -280,7 +286,7 @@ __global__ void meank_add_f32(const uint8_t * k, float * acc, int tok0, int n_ke
     acc[d] = s;
 }
 
-__global__ void meank_add_f16(const uint8_t * k, float * acc, int tok0, int n_keep,
+KVMEM_GLOBAL void meank_add_f16(const uint8_t * k, float * acc, int tok0, int n_keep,
                               int n_embd, int ne0, size_t nb0, size_t nb1, size_t nb2) {
     const int d = (int) blockIdx.x * (int) blockDim.x + (int) threadIdx.x;
     if (d >= n_embd || ne0 <= 0) {
@@ -296,7 +302,7 @@ __global__ void meank_add_f16(const uint8_t * k, float * acc, int tok0, int n_ke
     acc[d] = s;
 }
 
-__global__ void meank_add_bf16(const uint8_t * k, float * acc, int tok0, int n_keep,
+KVMEM_GLOBAL void meank_add_bf16(const uint8_t * k, float * acc, int tok0, int n_keep,
                                int n_embd, int ne0, size_t nb0, size_t nb1, size_t nb2) {
     const int d = (int) blockIdx.x * (int) blockDim.x + (int) threadIdx.x;
     if (d >= n_embd || ne0 <= 0) {
@@ -474,8 +480,7 @@ static bool dequant_from(ggml_type ty, const void * src, int64_t n_rows, int64_t
             return false;
         }
         const int64_t n_blocks = n_rows * (n_embd / QK8_0);
-        const int blocks = (int) ((n_blocks + threads - 1) / threads);
-        dequant_q8_0<<<blocks, threads, 0, stream()>>>(
+        KVMEM_LAUNCH1(dequant_q8_0, n_blocks, threads,
                 static_cast<const block_q8_0 *>(src), g_st.dev_f32, n_blocks);
         return cuda_ok(cudaGetLastError(), "dequant q8_0");
     }
@@ -484,8 +489,7 @@ static bool dequant_from(ggml_type ty, const void * src, int64_t n_rows, int64_t
             return false;
         }
         const int64_t n_blocks = n_rows * (n_embd / QK4_0);
-        const int blocks = (int) ((n_blocks + threads - 1) / threads);
-        dequant_q4_0<<<blocks, threads, 0, stream()>>>(
+        KVMEM_LAUNCH1(dequant_q4_0, n_blocks, threads,
                 static_cast<const block_q4_0 *>(src), g_st.dev_f32, n_blocks);
         return cuda_ok(cudaGetLastError(), "dequant q4_0");
     }
@@ -527,8 +531,7 @@ bool kvmem_stagein_rope_neox(int64_t n_tokens, int n_head, int n_embd_head, int 
     }
     const int threads = 64;
     const int blocks_t = (int) ((n_tokens + threads - 1) / threads);
-    dim3 grid(blocks_t, n_head, 1);
-    rope_neox_kernel<<<grid, threads, 0, stream()>>>(
+    KVMEM_LAUNCH2(rope_neox_kernel, blocks_t, n_head, threads,
             g_st.dev_f32, n_tokens, n_head, n_embd_head, n_rot, pos0, g_st.dev_theta);
     return cuda_ok(cudaGetLastError(), "rope launch");
 }
@@ -558,19 +561,18 @@ bool kvmem_stagein_fwht(int64_t n_rows, int64_t n_embd, int nrot) {
     const int64_t nrows = n_rows * (n_embd / nrot);
     const float scale = 1.0f / sqrtf((float) nrot);
     const int threads = 128;
-    const int blocks = (int) ((nrows + threads - 1) / threads);
     switch (nrot) {
         case 64:
-            fwht_kernel<64><<<blocks, threads, 0, stream()>>>(g_st.dev_f32, nrows, scale);
+            KVMEM_LAUNCH1(fwht_kernel<64>, nrows, threads, g_st.dev_f32, nrows, scale);
             break;
         case 128:
-            fwht_kernel<128><<<blocks, threads, 0, stream()>>>(g_st.dev_f32, nrows, scale);
+            KVMEM_LAUNCH1(fwht_kernel<128>, nrows, threads, g_st.dev_f32, nrows, scale);
             break;
         case 256:
-            fwht_kernel<256><<<blocks, threads, 0, stream()>>>(g_st.dev_f32, nrows, scale);
+            KVMEM_LAUNCH1(fwht_kernel<256>, nrows, threads, g_st.dev_f32, nrows, scale);
             break;
         case 512:
-            fwht_kernel<512><<<blocks, threads, 0, stream()>>>(g_st.dev_f32, nrows, scale);
+            KVMEM_LAUNCH1(fwht_kernel<512>, nrows, threads, g_st.dev_f32, nrows, scale);
             break;
         default:
             return false;
@@ -588,8 +590,7 @@ bool kvmem_stagein_quantize(ggml_type ty, void * gpu_dst, int64_t n_rows, int64_
             return false;
         }
         const int64_t n_blocks = n_rows * (n_embd / QK8_0);
-        const int blocks = (int) ((n_blocks + threads - 1) / threads);
-        quant_q8_0<<<blocks, threads, 0, stream()>>>(
+        KVMEM_LAUNCH1(quant_q8_0, n_blocks, threads,
                 g_st.dev_f32, static_cast<block_q8_0 *>(gpu_dst), n_blocks);
         return cuda_ok(cudaGetLastError(), "q8_0 launch");
     }
@@ -598,8 +599,7 @@ bool kvmem_stagein_quantize(ggml_type ty, void * gpu_dst, int64_t n_rows, int64_
             return false;
         }
         const int64_t n_blocks = n_rows * (n_embd / QK4_0);
-        const int blocks = (int) ((n_blocks + threads - 1) / threads);
-        quant_q4_0<<<blocks, threads, 0, stream()>>>(
+        KVMEM_LAUNCH1(quant_q4_0, n_blocks, threads,
                 g_st.dev_f32, static_cast<block_q4_0 *>(gpu_dst), n_blocks);
         return cuda_ok(cudaGetLastError(), "q4_0 launch");
     }
@@ -625,8 +625,7 @@ static bool rope_from_dev(int64_t n_tokens, int n_head, int n_embd_head,
     }
     const int threads = 64;
     const int blocks_t = (int) ((n_tokens + threads - 1) / threads);
-    dim3 grid(blocks_t, n_head, 1);
-    rope_neox_kernel<<<grid, threads, 0, stream()>>>(
+    KVMEM_LAUNCH2(rope_neox_kernel, blocks_t, n_head, threads,
             g_st.dev_f32, n_tokens, n_head, n_embd_head, n_rot, pos0, g_st.dev_theta);
     return cuda_ok(cudaGetLastError(), "rope launch");
 }
@@ -897,7 +896,7 @@ int kvmem_stageout_submit(int64_t * copy_us) {
                                     (size_t) nitem * sizeof(CopyOp),
                                     cudaMemcpyHostToDevice, stream()),
                     "gather ops H2D")) {
-            copy_bytes<<<nitem, 256, 0, stream()>>>(g_st.dev_ops, nitem);
+            KVMEM_LAUNCH1(copy_bytes, nitem, 256, g_st.dev_ops, nitem);
             packed = cuda_ok(cudaGetLastError(), "gather kernel");
             if (packed) {
                 uint64_t bytes = 0;
@@ -989,7 +988,7 @@ bool kvmem_d2d_batched(const void * const * src, void * const * dst,
                  "layout ops H2D")) {
         return false;
     }
-    copy_bytes<<<n, 256, 0, stream()>>>(g_st.dev_ops, n);
+    KVMEM_LAUNCH1(copy_bytes, n, 256, g_st.dev_ops, n);
     const bool ok = cuda_ok(cudaGetLastError(), "layout copy kernel");
     if (ok) {
         uint64_t bytes = 0;
@@ -1048,15 +1047,14 @@ bool kvmem_meank_add(uint32_t il, ggml_type ty, const void * gpu_k,
     float * acc = g_mk.acc + (size_t) il * g_mk.n_embd;
     const uint8_t * k = static_cast<const uint8_t *>(gpu_k);
     const int threads = 64;
-    const int blocks = ((int) n_embd + threads - 1) / threads;
     if (ty == GGML_TYPE_F32) {
-        meank_add_f32<<<blocks, threads, 0, stream()>>>(
+        KVMEM_LAUNCH1(meank_add_f32, n_embd, threads,
                 k, acc, (int) tok0, (int) n_keep, (int) n_embd, (int) ne0, nb0, nb1, nb2);
     } else if (ty == GGML_TYPE_F16) {
-        meank_add_f16<<<blocks, threads, 0, stream()>>>(
+        KVMEM_LAUNCH1(meank_add_f16, n_embd, threads,
                 k, acc, (int) tok0, (int) n_keep, (int) n_embd, (int) ne0, nb0, nb1, nb2);
     } else if (ty == GGML_TYPE_BF16) {
-        meank_add_bf16<<<blocks, threads, 0, stream()>>>(
+        KVMEM_LAUNCH1(meank_add_bf16, n_embd, threads,
                 k, acc, (int) tok0, (int) n_keep, (int) n_embd, (int) ne0, nb0, nb1, nb2);
     } else {
         return false;
