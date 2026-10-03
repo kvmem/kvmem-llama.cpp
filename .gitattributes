@@ -1,3 +1,4 @@
-scripts/build-rocm.sh text eol=lf
+scripts/*.sh text eol=lf
 scripts/rocm/*.sh text eol=lf
 patches/cuda-graph-reactivation.patch text eol=lf
+backends/patches/*.patch -text -whitespace

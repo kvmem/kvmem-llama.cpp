@@ -38,7 +38,7 @@ P0 先验证高风险接口，再铺开其余改动。每阶段完成后保留�
 - [x] 做最小 batch 原型：逻辑行映射在 ubatch 分割/重排后保持正确，不更改原生模型位置。
 - [x] 做最小 MTP 输入原型：视觉输入嵌入与上一行 hidden state 分开进入已有 `embd`、`h` tensor，跨 batch 不错位。
 
-涉及位置：`CMakeLists.txt`、`llama.cpp/tools/mtmd`、`llama.cpp/tools/server/server-common.*`、`llama.cpp/src/llama-batch.*`、`llama.cpp/src/llama-graph.*`、`llama.cpp/src/models/qwen35.cpp`。
+涉及位置：`CMakeLists.txt`、`backends/llamacpp/tools/mtmd`、`backends/llamacpp/tools/server/server-common.*`、`backends/llamacpp/src/llama-batch.*`、`backends/llamacpp/src/llama-graph.*`、`backends/llamacpp/src/models/qwen35.cpp`。
 
 产物：原生对照数据、接口约定、最小验证记录。必要的小范围 llama.cpp 扩展在本仓库补丁机制中维护；不另写视觉编码或 attention 实现。
 
@@ -106,7 +106,7 @@ P0 先验证高风险接口，再铺开其余改动。每阶段完成后保留�
 - [x] 在 checkpoint 中纳入草稿游标及 carry 状态，生成前验证草稿覆盖到正确的已提交边界。
 - [x] 图片后的文本启用现有 MTP 2；同步失败明确报错，不悄悄用普通 decode 完成请求。
 
-涉及位置：`llama.cpp/common/speculative.cpp`、`llama.cpp/src/llama-batch.*`、`llama.cpp/src/llama-graph.*`、`llama.cpp/src/models/qwen35.cpp`、`tools/kvmem-spec.*`、`src/adapter/llama-memory-kvmem-mtp.*`。
+涉及位置：`backends/llamacpp/common/speculative.cpp`、`backends/llamacpp/src/llama-batch.*`、`backends/llamacpp/src/llama-graph.*`、`backends/llamacpp/src/models/qwen35.cpp`、`tools/kvmem-spec.*`、`src/adapter/llama-memory-kvmem-mtp.*`。
 
 验证：先做固定输入的普通 decode/MTP greedy 对照，检查近并列 logits 导致的数值差异；再测试全接受、部分接受、全拒绝和回滚。官方随机采样测试记录接受率、吞吐与采样行为，不要求跨不同执行路径的同 seed 输出机械一致。
 

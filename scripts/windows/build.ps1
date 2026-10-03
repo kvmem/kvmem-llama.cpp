@@ -3,6 +3,7 @@
 param(
     [string]$SourceDir,
     [string]$BuildDir,
+    [string]$Python = 'python',
     [string]$CudaPath = $env:CUDA_PATH,
     [switch]$ExperimentalCuda129,
     [switch]$Vulkan,
@@ -64,8 +65,8 @@ $escapedPrefix = $includePrefix.Replace('\', '\\').Replace('"', '\"')
 [IO.File]::WriteAllText($rulesOverride, "set(CMAKE_CL_SHOWINCLUDES_PREFIX `"$escapedPrefix`")`n", [Text.UTF8Encoding]::new($false))
 
 
-if (!$HostOnly -and !(Test-Path -LiteralPath (Join-Path $SourceDir 'llama.cpp/src/llama-kvmem-factory.h'))) {
-    throw 'The vendored llama.cpp integration sources are missing; use a complete checkout.'
+if (!$HostOnly) {
+    Invoke-Checked $Python @((Join-Path $SourceDir 'scripts/prepare-backends.py'), '--backend', 'llamacpp')
 }
 
 $options = @('-S', $SourceDir, '-B', $BuildDir, '-G', 'Ninja',

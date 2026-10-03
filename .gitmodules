@@ -1,0 +1,8 @@
+[submodule "llamacpp"]
+	path = backends/llamacpp
+	url = https://github.com/ggml-org/llama.cpp.git
+	shallow = true
+[submodule "ninfer"]
+	path = backends/ninfer
+	url = https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco.git
+	shallow = true

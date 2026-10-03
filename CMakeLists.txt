@@ -89,6 +89,9 @@ else()
 endif()
 
 if (KVMEM_BUILD_LLAMA OR KVMEM_BUILD_SERVER_TESTS)
+    if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/backends/llamacpp/src/llama-kvmem-factory.h")
+        message(FATAL_ERROR "Prepare the pinned backend first: python scripts/prepare-backends.py --backend llamacpp")
+    endif()
     set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
@@ -209,7 +212,7 @@ if (KVMEM_BUILD_LLAMA)
         "compile all FlashAttention KV quants (needed for --kv-dtype q5_0)" FORCE)
     set(LLAMA_KVMEM ON CACHE BOOL "" FORCE)
     set(LLAMA_KVMEM_ROOT "${CMAKE_SOURCE_DIR}" CACHE PATH "" FORCE)
-    add_subdirectory(llama.cpp)
+    add_subdirectory(backends/llamacpp)
 
     if (KVMEM_GPU_BACKEND STREQUAL "HIP")
         if (WIN32 AND EXISTS "${ROCM_PATH}/lib/llvm/amdgcn/bitcode/ocml.bc")
@@ -231,8 +234,8 @@ if (KVMEM_BUILD_LLAMA)
         endif()
         target_include_directories(kvmem-stagein-hip PRIVATE
             src/adapter
-            llama.cpp/include
-            llama.cpp/ggml/include)
+            backends/llamacpp/include
+            backends/llamacpp/ggml/include)
         target_compile_definitions(kvmem-stagein-hip PRIVATE
             LLAMA_KVMEM=1
             GGML_USE_HIP
@@ -277,24 +280,24 @@ if (KVMEM_BUILD_LLAMA)
     add_executable(llama-kvmem-cli tools/llama-kvmem-cli.cpp tools/kvmem-spec.cpp)
     target_include_directories(llama-kvmem-cli PRIVATE
         src/adapter
-        llama.cpp/include
-        llama.cpp/common)
+        backends/llamacpp/include
+        backends/llamacpp/common)
     target_link_libraries(llama-kvmem-cli PRIVATE llama llama-common)
     target_compile_features(llama-kvmem-cli PRIVATE cxx_std_17)
 
     add_executable(llama-kvmem-server tools/llama-kvmem-server.cpp tools/llama-kvmem-driver.cpp tools/kvmem-spec.cpp
         tools/kvmem-vision.cpp tools/kvmem-responses.cpp tools/kvmem-responses-stream.cpp
-        llama.cpp/tools/server/server-common.cpp
-        llama.cpp/tools/server/server-chat.cpp)
+        backends/llamacpp/tools/server/server-common.cpp
+        backends/llamacpp/tools/server/server-chat.cpp)
     target_include_directories(llama-kvmem-server PRIVATE
         kvmem/include
         src/adapter
-        llama.cpp/include
-        llama.cpp/common
-        llama.cpp/tools/server
-        llama.cpp/tools/mtmd
-        llama.cpp/vendor
-        llama.cpp/vendor/cpp-httplib)
+        backends/llamacpp/include
+        backends/llamacpp/common
+        backends/llamacpp/tools/server
+        backends/llamacpp/tools/mtmd
+        backends/llamacpp/vendor
+        backends/llamacpp/vendor/cpp-httplib)
     target_link_libraries(llama-kvmem-server PRIVATE llama llama-common cpp-httplib mtmd kvmem)
     target_compile_features(llama-kvmem-server PRIVATE cxx_std_17)
     # std::getenv is standard C++ and portable; MSVC marks it deprecated in
@@ -317,7 +320,7 @@ if (KVMEM_BUILD_LLAMA)
     # The test also skips (exit 77) unless an MTP GGUF is supplied explicitly.
     if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
         add_executable(kvmem-mtp-kv-test tests/mtp-kv-test.cpp tools/kvmem-spec.cpp)
-        target_include_directories(kvmem-mtp-kv-test PRIVATE src/adapter tools llama.cpp/src)
+        target_include_directories(kvmem-mtp-kv-test PRIVATE src/adapter tools backends/llamacpp/src)
         target_link_libraries(kvmem-mtp-kv-test PRIVATE llama llama-common kvmem)
         if (GGML_CUDA)
             find_package(CUDAToolkit REQUIRED)
@@ -342,7 +345,7 @@ if (KVMEM_BUILD_LLAMA)
 elseif (KVMEM_BUILD_SERVER_TESTS)
     # These tests use llama-common and mtmd, without the GPU-only KVMem adapter.
     set(LLAMA_KVMEM OFF CACHE BOOL "" FORCE)
-    add_subdirectory(llama.cpp)
+    add_subdirectory(backends/llamacpp)
 endif()
 
 if (KVMEM_BUILD_SERVER_TESTS)
@@ -362,27 +365,27 @@ if (KVMEM_BUILD_SERVER_TESTS)
     add_test(NAME kvmem-chat-id-test COMMAND kvmem-chat-id-test)
 
     add_executable(kvmem-server-options-test tests/server-options-test.cpp)
-    target_include_directories(kvmem-server-options-test PRIVATE tools llama.cpp/include llama.cpp/ggml/include)
+    target_include_directories(kvmem-server-options-test PRIVATE tools backends/llamacpp/include backends/llamacpp/ggml/include)
     add_test(NAME kvmem-server-options-test COMMAND kvmem-server-options-test)
 
     find_package(Threads REQUIRED)
     add_executable(kvmem-server-progress-test tests/server-progress-test.cpp)
-    target_include_directories(kvmem-server-progress-test PRIVATE tools llama.cpp/vendor)
+    target_include_directories(kvmem-server-progress-test PRIVATE tools backends/llamacpp/vendor)
     target_link_libraries(kvmem-server-progress-test PRIVATE Threads::Threads)
     add_test(NAME kvmem-server-progress-test COMMAND kvmem-server-progress-test)
 
     add_executable(kvmem-output-limit-test tests/output-limit-test.cpp)
-    target_include_directories(kvmem-output-limit-test PRIVATE tools llama.cpp/vendor/cpp-httplib)
+    target_include_directories(kvmem-output-limit-test PRIVATE tools backends/llamacpp/vendor/cpp-httplib)
     target_link_libraries(kvmem-output-limit-test PRIVATE llama-common cpp-httplib)
     add_test(NAME kvmem-output-limit-test COMMAND kvmem-output-limit-test)
 
     add_executable(kvmem-responses-test tests/responses-test.cpp tests/responses-media-test.cpp
         tools/kvmem-responses.cpp tools/kvmem-responses-stream.cpp
-        llama.cpp/tools/server/server-chat.cpp llama.cpp/tools/server/server-common.cpp)
+        backends/llamacpp/tools/server/server-chat.cpp backends/llamacpp/tools/server/server-common.cpp)
     target_include_directories(kvmem-responses-test PRIVATE
-        tools llama.cpp/common llama.cpp/include llama.cpp/ggml/include
-        llama.cpp/tools/server llama.cpp/tools/mtmd llama.cpp/vendor
-        llama.cpp/vendor/cpp-httplib)
+        tools backends/llamacpp/common backends/llamacpp/include backends/llamacpp/ggml/include
+        backends/llamacpp/tools/server backends/llamacpp/tools/mtmd backends/llamacpp/vendor
+        backends/llamacpp/vendor/cpp-httplib)
     target_link_libraries(kvmem-responses-test PRIVATE llama-common mtmd cpp-httplib nlohmann)
     add_test(NAME kvmem-responses-test COMMAND kvmem-responses-test)
 endif()

@@ -42,7 +42,7 @@ Q5 相对 F16 的 decode 变化：`(30.57 / 35.16 - 1) × 100% = -13.05%`。Q8 �
 
 两个不同的代码输出都未通过 `c++ -std=c++17 -pthread -fsyntax-only`，均误把 key 用作 `list::splice` 的迭代器参数。原始输出保留，未人为修正；本次结果用于性能对比，不能当作编程正确率评测。
 
-F16 的 KV 本体比 Q5 大 112.55 MiB，但整卡采样峰值低 42 MiB。源码中的一个可能原因是额外计算空间：[`fattn.cu`](../llama.cpp/ggml/src/ggml-cuda/fattn.cu) 的 `ggml_cuda_flash_attn_ext_get_alloc_size` 为 TILE/MMA_F16 路径请求 F16 K/V；[`fattn-common.cuh`](../llama.cpp/ggml/src/ggml-cuda/fattn-common.cuh) 的 `ggml_cuda_flash_attn_ext_get_f16_extra_data` 在源类型不是 F16 时分配转换空间。量化 KV 本体节省不等于整卡峰值下降。本次没有逐项追踪实际分配，不能把全部差额精确归因于该空间。
+F16 的 KV 本体比 Q5 大 112.55 MiB，但整卡采样峰值低 42 MiB。源码中的一个可能原因是额外计算空间：[`fattn.cu`](../backends/llamacpp/ggml/src/ggml-cuda/fattn.cu) 的 `ggml_cuda_flash_attn_ext_get_alloc_size` 为 TILE/MMA_F16 路径请求 F16 K/V；[`fattn-common.cuh`](../backends/llamacpp/ggml/src/ggml-cuda/fattn-common.cuh) 的 `ggml_cuda_flash_attn_ext_get_f16_extra_data` 在源类型不是 F16 时分配转换空间。量化 KV 本体节省不等于整卡峰值下降。本次没有逐项追踪实际分配，不能把全部差额精确归因于该空间。
 
 ## 代码与复现记录
 

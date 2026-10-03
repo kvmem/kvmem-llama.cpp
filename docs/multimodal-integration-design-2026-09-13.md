@@ -28,11 +28,11 @@
 
 源码入口：
 
-- [`mtmd.h`](../llama.cpp/tools/mtmd/mtmd.h)、[`mtmd-helper.cpp`](../llama.cpp/tools/mtmd/mtmd-helper.cpp)：加载、编码、位置生成和分批解码。
-- [`server-common.cpp`](../llama.cpp/tools/server/server-common.cpp)：`server_tokens`、媒体请求转换、图片 ID 与前缀比较。
-- [`server-context.cpp`](../llama.cpp/tools/server/server-context.cpp)：原生服务按公共前缀推进多模态请求的调用方式。
+- [`mtmd.h`](../backends/llamacpp/tools/mtmd/mtmd.h)、[`mtmd-helper.cpp`](../backends/llamacpp/tools/mtmd/mtmd-helper.cpp)：加载、编码、位置生成和分批解码。
+- [`server-common.cpp`](../backends/llamacpp/tools/server/server-common.cpp)：`server_tokens`、媒体请求转换、图片 ID 与前缀比较。
+- [`server-context.cpp`](../backends/llamacpp/tools/server/server-context.cpp)：原生服务按公共前缀推进多模态请求的调用方式。
 - [`llama-kvmem-batch.cpp`](../src/adapter/llama-kvmem-batch.cpp)、[`llama-memory-kvmem.cpp`](../src/adapter/llama-memory-kvmem.cpp)：槽映射、占用、换出换入与位置假设。
-- [`speculative.cpp`](../llama.cpp/common/speculative.cpp)、[`qwen35.cpp`](../llama.cpp/src/models/qwen35.cpp)、[`llama-graph.cpp`](../llama.cpp/src/llama-graph.cpp)：MTP 跟随与输入填充。
+- [`speculative.cpp`](../backends/llamacpp/common/speculative.cpp)、[`qwen35.cpp`](../backends/llamacpp/src/models/qwen35.cpp)、[`llama-graph.cpp`](../backends/llamacpp/src/llama-graph.cpp)：MTP 跟随与输入填充。
 
 注意：原生服务提示多模态不支持的 `cache_reuse` 指移动非前缀片段的优化，不代表不支持普通公共前缀命中。`server-context.cpp` 仍调用 `get_common_prefix`。
 
@@ -62,7 +62,7 @@ HTTP 解析、token/chunk 表示优先直接编译复用 `server-common` 的相�
 | 编号 | 含义 | 消费方 |
 |---|---|---|
 | `logical_id` | 每个文本 token 或视觉 patch 的唯一、递增缓存行编号 | KVMem 块号、预算、换出、前缀长度、回滚边界 |
-| `model_pos` | llama.cpp/mtmd 生成的原始模型位置，含视觉 `t/y/x` 等分量 | 原生 RoPE、KV cell 扩展位置和 attention mask |
+| `model_pos` | backends/llamacpp/mtmd 生成的原始模型位置，含视觉 `t/y/x` 等分量 | 原生 RoPE、KV cell 扩展位置和 attention mask |
 | `slot` | 当前 GPU 中存放该行的物理位置 | 原有 D2D、D2H、H2D 与 KV tensor |
 
 例如忽略视觉边界标记，60000 个文本 token 后追加一个 24×24 patch 网格：图片占 576 个缓存行，但 RoPE 游标只推进 24。随后文本的 `logical_id` 与 `model_pos` 就不同了。不能让它们重新合并，也不能把图片 RoPE 位置改成 576 个连续位置来迎合旧缓存代码。

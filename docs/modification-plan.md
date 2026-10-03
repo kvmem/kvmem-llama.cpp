@@ -95,7 +95,7 @@ kvmem_llamacpp/
       nvme_kv_tier_test.cpp
       reselect_diff_test.cpp
     CMakeLists.txt
-  llama.cpp/                      ← git submodule，钉 tag
+  backends/llamacpp/                      ← git submodule，钉 tag
   patches/                        ← 对该 tag 的 git am 队列
     0001-memory-factory-hook.patch
     0002-attn-qk-capture-hook.patch      ← P2
@@ -177,7 +177,7 @@ qw3-native **不在本计划里强制改成依赖公共库**。P0 结束可以�
 
 - 文件（上游，以当时树为准）：`src/llama-model.cpp` 里 `create_memory()`，或等价开关。
 - 行为：`--kvmem` 时创建 `llama_memory_kvmem`，否则原路径。
-- 我们的实现放在树外 `src/adapter/llama-memory-kvmem.cpp`，通过补丁把工厂接到这个类型。若编译系统不便链外部 .cpp，允许把 adapter 以 `llama.cpp/src/llama-memory-kvmem.cpp` 形式打进补丁，但逻辑仍视为 adapter，禁止在此文件里写选择策略。
+- 我们的实现放在树外 `src/adapter/llama-memory-kvmem.cpp`，通过补丁把工厂接到这个类型。若编译系统不便链外部 .cpp，允许把 adapter 以 `backends/llamacpp/src/llama-memory-kvmem.cpp` 形式打进补丁，但逻辑仍视为 adapter，禁止在此文件里写选择策略。
 
 ### Hook 2 — Q/K capture（P2）
 
@@ -729,7 +729,7 @@ P1 失败则停止扩检索，先修位置/mask 模型。不要用 P2 掩盖 P1 
 | P0-1 | scaffold kvmem library and cmake | — | 构建 |
 | P0-2 | import host block store | P0-1 | `kvmem/src/host/kvmem_store.cpp` |
 | P0-3 | CPU/NVMe tiers + KvMemRuntime | P0-2 | `kvmem_runtime.cpp` |
-| P1-1 | pin llama.cpp tag | P0-3 | `llama.cpp/` submodule |
+| P1-1 | pin llama.cpp tag | P0-3 | `backends/llamacpp/` submodule |
 | P1-2 | memory factory + slot-pool skeleton | P1-1 | `patches/0001`, `llama-memory-kvmem.cpp` |
 | P1-3 | recency window positions | P1-2 | `llama-kvmem-batch.cpp` |
 | P1-4 | llama-kvmem-cli + canaries | P1-3 | `tools/`, `scripts/` |

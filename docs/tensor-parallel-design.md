@@ -90,8 +90,8 @@ KVMem 通过现有 `kvmem_tensor_get/set` 操作逻辑 KV tensor，GGML Meta buf
 
 ## 关键代码依据
 
-- `llama.cpp/src/llama.cpp`：tensor 模式创建一个 Meta device，包装所选物理设备。
-- `llama.cpp/src/llama-model.cpp`：K/V cache、Qwen3.5 GDN state 的分片规则与粒度。
-- `llama.cpp/ggml/src/ggml-backend-meta.cpp`：Meta buffer 的 `get_tensor`/`set_tensor` 对 axis-0 分片执行拼接/分发。
+- `backends/llamacpp/src/llama.cpp`：tensor 模式创建一个 Meta device，包装所选物理设备。
+- `backends/llamacpp/src/llama-model.cpp`：K/V cache、Qwen3.5 GDN state 的分片规则与粒度。
+- `backends/llamacpp/ggml/src/ggml-backend-meta.cpp`：Meta buffer 的 `get_tensor`/`set_tensor` 对 axis-0 分片执行拼接/分发。
 - `src/adapter/llama-memory-kvmem.cpp`：当前的多卡判据、每层归属断言、池容量计算和同步传输。
 - `src/adapter/llama-memory-kvmem-hybrid.cpp`、`src/adapter/llama-memory-kvmem-mtp.cpp`：ReplaySSM 与 MTP follower 的物理 CUDA 指针假设。

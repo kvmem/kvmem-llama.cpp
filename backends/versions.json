@@ -1,17 +1,23 @@
 {
-  "layout": "vendored-sources",
+  "layout": "git-submodules-with-patches",
   "llamacpp": {
-    "path": "llama.cpp",
+    "path": "backends/llamacpp",
     "upstream": "https://github.com/ggml-org/llama.cpp.git",
     "base_commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
-    "license_file": "llama.cpp/LICENSE",
-    "local_changes": "KVMem hooks, KV payload transfers, recurrent state and speculative execution integration; tracked in this repository"
+    "license_file": "backends/llamacpp/LICENSE",
+    "local_changes": "KVMem integration is maintained in the versioned patch; the submodule remains pinned to base_commit",
+    "patch": "backends/patches/llamacpp-kvmem.patch",
+    "patch_sha256": "3d24ff686dac57f170e7577c6e6bddfb80733a051b962802e3b6958e29236a96",
+    "patched_tree": "33b84ca6308bfe68fccdfca4b805991d2c220681"
   },
   "ninfer": {
     "path": "backends/ninfer",
     "upstream": "https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco.git",
     "base_commit": "6e9189c1089f6968e29fe2e1c51b4596e2346eed",
     "license_file": "backends/ninfer/LICENSE",
-    "local_changes": "KVMem memory backend, MTP/RK8V4/ngram, history and cold snapshots; tracked in this repository"
+    "local_changes": "KVMem integration is maintained in the versioned patch; the submodule remains pinned to base_commit",
+    "patch": "backends/patches/ninfer-kvmem.patch",
+    "patch_sha256": "617e906082d17aac7ebcca6405e3eab11d694172816be3d37dc0e409be3fbc79",
+    "patched_tree": "46f37b010410bbd7e6cfa0722447a8e878f2b76e"
   }
 }

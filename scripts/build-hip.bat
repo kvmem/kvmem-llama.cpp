@@ -27,11 +27,9 @@ setlocal EnableDelayedExpansion
 set "ROOT=%~dp0.."
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 
-REM The llama.cpp integration is versioned directly in this repository.
-if not exist "%ROOT%\llama.cpp\src\llama-kvmem-factory.h" (
-    echo [error] Missing vendored llama.cpp integration sources. Use a complete checkout.
-    exit /b 1
-)
+if "%PYTHON%"=="" set "PYTHON=python"
+"%PYTHON%" "%ROOT%\scripts\prepare-backends.py" --backend llamacpp
+if errorlevel 1 exit /b 1
 
 if "%JOBS%"=="" set "JOBS=12"
 if "%BUILD_DIR%"=="" set "BUILD_DIR=%ROOT%\build-hip-win"

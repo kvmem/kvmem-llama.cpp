@@ -19,7 +19,7 @@
 - 关闭 KVMem 后，tensor 双卡比 layer 双卡再多 **245 ms**。在相同两卡和分配比下，这主要反映 tensor 分片每层跨卡归约/同步和较慢分片拖住整体的代价；精确的算子/通信占比尚未测量。
 - 开启 KVMem 相对原生 KV，多 **74 ms（单卡）/ 168 ms（layer）/ 164 ms（tensor）**。双卡 tensor 的 KVMem 增量比单卡多约 **90 ms**。按这些中位数作描述性拆分，单卡 KVMem 到双卡 tensor KVMem 的 443 ms 差距约等于 **109 ms（原生 layer 相对单卡）+ 245 ms（原生 tensor 相对 layer）+ 90 ms（KVMem 的额外多卡增量）**。这是配置间差分，不是逐算子计时，不能据此认定精确的根因占比。
 
-代码路径支持上述解释。Windows 默认采用内部 CUDA AllReduce；`llama.cpp/ggml/src/ggml-cuda/allreduce.cu` 明确说明其通过页锁定主机内存交换双卡数据，并为较大的 prefill 归约采用 copy engine 的 D2H/H2D 分块。`llama.cpp/ggml/src/ggml-backend-meta.cpp` 的每个子图后都可能触发归约。KVMem 在多卡 `harvest_pending` 中先同步整图，再逐个 tensor 从所属后端读取 KV；单卡则尝试异步 D2D/分批 D2H 路径。这些实现位置说明 **tensor 跨卡归约和多卡 KV 收集是主要候选瓶颈**，但目前没有逐算子 GPU profiler，不能给出两者准确百分比。
+代码路径支持上述解释。Windows 默认采用内部 CUDA AllReduce；`backends/llamacpp/ggml/src/ggml-cuda/allreduce.cu` 明确说明其通过页锁定主机内存交换双卡数据，并为较大的 prefill 归约采用 copy engine 的 D2H/H2D 分块。`backends/llamacpp/ggml/src/ggml-backend-meta.cpp` 的每个子图后都可能触发归约。KVMem 在多卡 `harvest_pending` 中先同步整图，再逐个 tensor 从所属后端读取 KV；单卡则尝试异步 D2D/分批 D2H 路径。这些实现位置说明 **tensor 跨卡归约和多卡 KV 收集是主要候选瓶颈**，但目前没有逐算子 GPU profiler，不能给出两者准确百分比。
 
 另以 `KVMEM_PERF=1` 做一次诊断（不用于吞吐表，因为计数会拖慢运行）：314-token 预填充的适配层 D2H 均为 **143,261,696 bytes = 136.625 MiB**。单卡是 **4 次 D2H + 112 次 D2D**；layer/tensor 双卡均为 **112 次 D2H、0 次 D2D**。因此双卡 KVMem 的问题并非多复制了一份 KV 字节数，而是同样数据量改为更零碎的跨设备收集，且多卡路径显式等待计算图完成。计数仅涵盖 KVMem 适配层的拷贝，不含 Meta AllReduce 内部经主机内存的流量。
 

@@ -80,11 +80,11 @@ foreach ($script in 'start-backend.ps1', 'native-process.ps1') {
 }
 Copy-Item -LiteralPath (Join-Path $source 'docs/multi-backend.md') -Destination (Join-Path $OutputDir 'README.md')
 Copy-Item -LiteralPath (Join-Path $CudaPath 'EULA.txt') -Destination (Join-Path $OutputDir 'licenses/CUDA-EULA.txt')
-Copy-Item -LiteralPath (Join-Path $source 'llama.cpp/LICENSE') -Destination (Join-Path $OutputDir 'licenses/llama-MIT.txt')
+Copy-Item -LiteralPath (Join-Path $source 'backends/llamacpp/LICENSE') -Destination (Join-Path $OutputDir 'licenses/llama-MIT.txt')
 Copy-Item -LiteralPath (Join-Path $source 'README.md') -Destination (Join-Path $OutputDir 'licenses/KVMem-README.md')
 Copy-Item -LiteralPath (Join-Path $NinferSource 'LICENSE') -Destination (Join-Path $OutputDir 'licenses/ninfer-LICENSE')
 foreach ($tree in @(@('ninfer-third-party', (Join-Path $NinferSource 'third_party')),
-                   @('llama-vendor', (Join-Path $source 'llama.cpp/vendor')))) {
+                   @('llama-vendor', (Join-Path $source 'backends/llamacpp/vendor')))) {
     foreach ($file in Get-ChildItem -LiteralPath $tree[1] -Recurse -File) {
         if ($file.Name -notmatch '^(LICENSE|COPYING|NOTICE)') { continue }
         $relative = $file.FullName.Substring($tree[1].Length).TrimStart('\')
@@ -102,6 +102,7 @@ if ($VcpkgInstalled) {
 }
 if ($ValidationReport) { Copy-Item -LiteralPath $ValidationReport -Destination (Join-Path $OutputDir 'provenance/validation.json') }
 $manifest = @{ workers=$workerInfo; models_included=$false; kv_cross_backend_transfer=$false;
+    backend_sources=(Get-Content -LiteralPath (Join-Path $source 'backends/versions.json') -Raw | ConvertFrom-Json);
     runtime_validation='See attached validation report; packaging certifies dependency loading only' }
 $utf8 = [Text.UTF8Encoding]::new($false)
 [IO.File]::WriteAllText((Join-Path $OutputDir 'BUILD-INFO.json'), ($manifest | ConvertTo-Json -Depth 6), $utf8)

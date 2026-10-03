@@ -3,6 +3,7 @@
 param(
     [ValidateSet('core', 'llamacpp', 'ninfer', 'all')][string]$Backend = 'core',
     [string]$BuildRoot,
+    [string]$Python = 'python',
     [string]$CudaPath = $env:CUDA_PATH,
     [string]$CudaArchitectures = '120a',
     [ValidateRange(1, 64)][int]$Jobs = 2,
@@ -53,6 +54,10 @@ if (!$env:VSCMD_VER) {
 }
 if ($CudaPath) { $env:PATH = "$CudaPath/bin;$CudaPath/bin/x64;$env:PATH" }
 foreach ($plan in $plans) {
+    if ($plan.backend -ne 'core') {
+        & $Python (Join-Path $source 'scripts/prepare-backends.py') --backend $plan.backend
+        if ($LASTEXITCODE -ne 0) { throw "Backend preparation failed: $($plan.backend)" }
+    }
     if (!$BuildOnly) {
         $configureArgs = $plan.configure
         & cmake @configureArgs

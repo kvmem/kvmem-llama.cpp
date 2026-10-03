@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import zipfile
 
@@ -104,9 +105,11 @@ def main():
     if build == output or output in build.parents or ROOT == output or output in ROOT.parents:
         raise RuntimeError('Output must not be a source/build directory or its ancestor.')
     cache = (build / 'CMakeCache.txt').read_text()
+    subprocess.run([sys.executable, str(ROOT / 'scripts/prepare-backends.py'),
+                    '--backend', 'llamacpp', '--check'], check=True)
     source_status = subprocess.run(
         ['git', '-C', str(ROOT), 'status', '--porcelain', '--untracked-files=normal',
-         '--', '.', ':(exclude)llama.cpp'], check=True, capture_output=True, text=True)
+         '--', '.', ':(exclude)backends/llamacpp', ':(exclude)backends/ninfer'], check=True, capture_output=True, text=True)
     source_dirty = bool(source_status.stdout.strip())
     if source_dirty and not args.local_dirty_source:
         raise RuntimeError('Source tree has uncommitted changes. Commit reviewed code before release packaging, or use --local-dirty-source for a local test package.')
@@ -154,8 +157,8 @@ def main():
     copy(ROOT / 'docs/rocm.md', output / 'README.md')
     copy(ROOT / 'docs/rocm-contributors.md', output / 'rocm-contributors.md')
     copy(args.validation, output / 'VALIDATION.md')
-    copy(ROOT / 'llama.cpp/LICENSE', output / 'licenses/llama.cpp-MIT.txt')
-    for tree in ('kvmem', 'llama.cpp/vendor'):
+    copy(ROOT / 'backends/llamacpp/LICENSE', output / 'licenses/llama.cpp-MIT.txt')
+    for tree in ('kvmem', 'backends/llamacpp/vendor'):
         for file in (ROOT / tree).rglob('*'):
             if file.is_file() and re.match(r'^(LICENSE|COPYING|NOTICE)', file.name, re.I):
                 copy(file, output / 'licenses' / file.relative_to(ROOT))
@@ -163,8 +166,8 @@ def main():
             'GGML_NATIVE', 'GGML_OPENMP', 'CMAKE_BUILD_TYPE', 'BUILD_SHARED_LIBS')
     info = dict(source_commit=git('rev-parse', 'HEAD'),
                 source_worktree_dirty=source_dirty,
-                llama_commit=git('rev-parse', 'HEAD:llama.cpp'),
-                patch_sha256=sha(ROOT / 'patches/llama-kvmem-current.patch'),
+                llama_commit=git('rev-parse', 'HEAD:backends/llamacpp'),
+                patch_sha256=sha(ROOT / 'backends/patches/llamacpp-kvmem.patch'),
                 platform='windows-x64' if windows else 'linux-x86_64',
                 build_options={k: options.get(k) for k in keys},
                 external_dependencies=external, models_included=False,

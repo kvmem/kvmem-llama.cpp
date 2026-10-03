@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Export the committed monorepo, including its vendored backends, without private files."""
+"""Export committed framework and exactly prepared backend sources without private files."""
 import argparse
 import hashlib
 import io
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -19,13 +20,18 @@ def main():
     if output.exists():
         raise RuntimeError('Archive already exists.')
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', '.'],
+    subprocess.run(['git', 'diff', '--exit-code', '--ignore-submodules=all', 'HEAD', '--', '.'],
                    cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run([sys.executable, str(ROOT / 'scripts/prepare-backends.py'), '--check'], check=True)
     versions = json.loads((ROOT / 'backends/versions.json').read_text(encoding='utf-8'))
-    manifest = dict(source_commit=commit, vendored_backends=versions, files={})
+    manifest = dict(base_commit=commit, llama_commit=versions['llamacpp']['base_commit'],
+                    backends=versions, files={})
+    repositories = [(ROOT, commit, '')] + [
+        (ROOT / versions[name]['path'], versions[name]['patched_tree'], versions[name]['path'] + '/')
+        for name in ('llamacpp', 'ninfer')]
     output.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(output, 'x:gz') as target:
-        for repository, ref, prefix in [(ROOT, commit, '')]:
+        for repository, ref, prefix in repositories:
             data = subprocess.check_output(['git', '-c', 'core.autocrlf=false', 'archive', ref], cwd=repository)
             with tarfile.open(fileobj=io.BytesIO(data)) as source:
                 for member in source:

@@ -1,4 +1,0 @@
-module XGrammar {
-    umbrella header "xgrammar/xgrammar.h"
-    export *
-}

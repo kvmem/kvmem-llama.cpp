@@ -1,6 +1,6 @@
 # KVMem: llama.cpp and ninfer backends
 
-> Development branch: the multi-backend framework now vendors llama.cpp and ninfer in one repository. See [repository layout and builds](docs/multi-backend-repository.md) and [backend capabilities](docs/multi-backend.md). P6-P10 final qualification is still in progress.
+> Development branch: the framework references pinned llama.cpp and ninfer submodules under `backends/`, with versioned KVMem integration patches. See [repository layout and builds](docs/multi-backend-repository.md) and [backend capabilities](docs/multi-backend.md). P6-P10 final qualification is still in progress.
 
 
 This development checkout adds a Windows single-GPU ninfer text backend with native KVMem history storage, retrieval and multi-turn checkpoints. See [multi-backend startup and build instructions](docs/multi-backend.md). Existing llama.cpp entry points remain available; the prebuilt releases below describe the earlier llama.cpp product.
@@ -67,7 +67,7 @@ For example, add `--kvmem-conversations 3 --kvmem-session-ram-gb 12 --kvmem-sess
 
 `kvmem/` holds the host store and retrieval logic; `src/adapter/` connects it through llama.cpp’s memory interface. Attention kernels and original positions stay unchanged. Reselection transfers only blocks that changed.
 
-`llama.cpp/` and `backends/ninfer/` are ordinary versioned source directories. Commit backend edits together with the matching core and adapter changes; there is no submodule or patch replay step.
+`backends/llamacpp/` and `backends/ninfer/` reference existing upstream projects at fixed commits. `backends/patches/` retains the tested KVMem integration; build wrappers initialize and prepare their selected backend automatically. For direct CMake builds, run `python scripts/prepare-backends.py` first. See the [backend workflow](docs/multi-backend-repository.md).
 
 ## Tested platform
 
@@ -115,9 +115,9 @@ Check `nvcc --version` for the compiler selected by CMake; `release 13.2` alone 
 The [native Windows CUDA build](scripts/windows/README.md) disables the legacy raw-block NVMe tier and includes PowerShell launchers; the session snapshot cache described above is independent of that build option. The performance results below remain Linux/WSL2 measurements.
 
 ```bash
-git clone --branch feat/multi-backend-framework https://github.com/kvmem/kvmem-llama.cpp.git
+git clone --recurse-submodules --branch feat/multi-backend-framework https://github.com/kvmem/kvmem-llama.cpp.git
 cd kvmem-llama.cpp
-git checkout master
+python scripts/prepare-backends.py --backend llamacpp
 scripts/build-cuda.sh
 ```
 
@@ -577,7 +577,7 @@ tools/            llama-kvmem-cli, llama-kvmem-server, vision helpers
 scripts/          backend builds, GPU bind, start helpers
 patches/          Diffs against the llama.cpp pin
 docs/             Architecture, milestones, multimodal
-llama.cpp/        Vendored llama.cpp with KVMem integration
+backends/llamacpp/        Vendored llama.cpp with KVMem integration
 backends/ninfer/  Vendored ninfer with KVMem integration
 models/           Local GGUFs (gitignored)
 ```

@@ -11,7 +11,7 @@
 // response.completed ...).
 //
 // This mirrors llama.cpp's server_task_result_cmpl_partial/final
-// to_json_oaicompat_resp() in llama.cpp/tools/server/server-task.cpp. That
+// to_json_oaicompat_resp() in backends/llamacpp/tools/server/server-task.cpp. That
 // emitter is a member of the server task classes, and the KVMem server does not
 // compile server-task.cpp (it owns its own single-slot request path), so the
 // sequence is reproduced here instead of called. Keep the two in sync: clients

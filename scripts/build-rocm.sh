@@ -37,7 +37,7 @@ fi
 export PATH="${rocm_bin}:${PATH}"
 export ROCM_PATH="${rocm}"
 
-# Backend integration is already present in the versioned llama.cpp sources.
+"${PYTHON:-python3}" "${root}/scripts/prepare-backends.py" --backend llamacpp
 
 configure_args=()
 target_args=()

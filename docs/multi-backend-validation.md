@@ -82,6 +82,36 @@ not qualify the full P6-P10/MTP4 combination matrix.
 - Fresh vendored ninfer CMake configure: passed with CUDA 13.2, SM120a and existing vcpkg dependencies. The portable core resolves inside this same checkout.
 - A fresh full CUDA build and model inference from the reorganized checkout were not repeated as part of this repository-only change. Earlier deployed binaries and their validation remain separate evidence.
 
+## Referenced backend layout (2026-10-03)
+
+The engines now reference existing upstream projects through pinned submodules at
+`backends/llamacpp` and `backends/ninfer`. The versioned integration patches reconstruct
+the source trees from the cache-fix commit `3c6048d503655588f730766e13eab6e11ceb6a1d`
+exactly: llama.cpp tree `33b84ca6308bfe68fccdfca4b805991d2c220681`, ninfer tree
+`46f37b010410bbd7e6cfa0722447a8e878f2b76e`. Baseline pins and patch hashes are recorded
+in `backends/versions.json`.
+
+- Fresh independent Windows checkout: both fixed commits fetched from their public
+  upstream repositories; patch preparation and strict whole-tree verification passed.
+- Repeated preparation is idempotent. An additional developer edit was preserved;
+  strict verification rejected it and passed after restoration.
+- Fresh VS2022 Release Host/server build with CUDA/HIP disabled: 21/21 CTest suites passed.
+- Existing portable-core rebuild: 14/14 suites passed. UI builder: 3/3; ROCm entry:
+  13/13; backend launcher, Windows runtime/quantizer packaging, shell and PowerShell
+  syntax checks passed. Python checks used local Python 3.14.
+- ninfer build wrapper configured successfully with CUDA 13.2, SM120a and the existing
+  compatible vcpkg installation; the core resolves inside this checkout.
+- Source export includes 6441 manifest-verified files, including 3620 llama.cpp and
+  2513 ninfer files. Preparation passed without Git metadata; modifying a bundled
+  backend file was rejected.
+
+Local evidence is retained in `backend-reference-20261003/layout-verification.json`,
+`patch-reconstruction.json` and `host-tests.log` in the experiment workspace. This
+layout check did not repeat full CUDA builds, UI npm builds, real-model inference
+or performance measurements. The deployed port 18201 worker and configuration were
+not changed by this source reorganization; the release qualification below remains
+separate.
+
 ## Before release / merging to master
 
 Complete the remaining ngram, RK8V4 disk/restart, long-context MTP and full

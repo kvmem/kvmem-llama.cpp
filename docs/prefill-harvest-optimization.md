@@ -94,9 +94,9 @@ Low GPU util is **not** "FA over 60k saturating HBM." 232 MiB compute scratch an
 
 **2. Harvest serializes the compute thread every ubatch.**
 
-`llama.cpp/src/llama-context.cpp` `process_ubatch` (after `graph_compute` → `ggml_backend_sched_graph_compute_async`):
+`backends/llamacpp/src/llama-context.cpp` `process_ubatch` (after `graph_compute` → `ggml_backend_sched_graph_compute_async`):
 
-```1410:1418:llama.cpp/src/llama-context.cpp
+```1410:1418:backends/llamacpp/src/llama-context.cpp
     const auto status = graph_compute(res->get_gf(), ubatch.n_tokens > 1);
     // ...
 #if defined(LLAMA_KVMEM)
@@ -116,7 +116,7 @@ Next ubatch `set_input` uses `ggml_backend_tensor_set`. CUDA `ggml_backend_cuda_
 - D2H async, later `cudaEventSynchronize(s.done)` on the next ubatch.
 - `harvest_from_host` → `bytes_to_f32_token_major` (FP16→F32) → `RawKvStore::write_layer_tokens` packs F32→FP16 again.
 
-Capture: `llama.cpp/src/llama-graph.cpp` `kvmem_capture_k` marks pre-RoPE K as `ggml_set_output` (no extra `cpy`). V is not captured on prefill (`kvmem_capture_v` is dump-only). Q is captured only on the query-last span, **in the same pinned buffer** as K (`d2h_submit` packs all `pending_capture_`).
+Capture: `backends/llamacpp/src/llama-graph.cpp` `kvmem_capture_k` marks pre-RoPE K as `ggml_set_output` (no extra `cpy`). V is not captured on prefill (`kvmem_capture_v` is dump-only). Q is captured only on the query-last span, **in the same pinned buffer** as K (`d2h_submit` packs all `pending_capture_`).
 
 The 2-slot `CaptureD2hPipe` is not a real overlap pipeline for NVMe: pack+`pwrite` of N still run on the compute thread at the start of harvest N+1 and can outlast graph N+1.
 
@@ -417,9 +417,9 @@ PR 1 **cannot** drop inline `d2h_commit`. Land PR 1+MTP fence together. PR 3 is 
 
 #### 1.A Compute fence (host-wait graph; stream-order D2D/D2H)
 
-**In-scope files.** `src/adapter/llama-memory-kvmem.cpp`, `.h`; `src/adapter/llama-memory-kvmem-mtp.cpp`, `.h`; small shared helper (new `.h/.cpp` under `src/adapter/` or methods on a shared `CaptureD2hPipe` type); `llama.cpp/src/CMakeLists.txt` PRIVATE include of `../ggml/src` so the adapter can include `ggml-backend-impl.h`.
+**In-scope files.** `src/adapter/llama-memory-kvmem.cpp`, `.h`; `src/adapter/llama-memory-kvmem-mtp.cpp`, `.h`; small shared helper (new `.h/.cpp` under `src/adapter/` or methods on a shared `CaptureD2hPipe` type); `backends/llamacpp/src/CMakeLists.txt` PRIVATE include of `../ggml/src` so the adapter can include `ggml-backend-impl.h`.
 
-**Do not change.** `llama.cpp/src/llama-graph.cpp` capture. `process_ubatch` hook stays `llama_kvmem_harvest_ubatch`. Do **not** patch `set_input` onto the compute stream.
+**Do not change.** `backends/llamacpp/src/llama-graph.cpp` capture. `process_ubatch` hook stays `llama_kvmem_harvest_ubatch`. Do **not** patch `set_input` onto the compute stream.
 
 **Fence protocol (implement exactly this).**
 
@@ -438,7 +438,7 @@ struct llama_memory_kvmem::CaptureD2hPipe {
 
 Add `ggml_backend_event_t compute_done` and `ggml_backend_event_t snap_be`, allocated with `ggml_backend_event_new(ggml_backend_get_device(be))`. If `event_new` returns null (`GGML_CUDA_NO_PEER_COPY`; off in this build, landmine on rebase), fall back to `ggml_backend_synchronize(be)` + host-wait snap (today’s path). Keep the existing non-blocking harvest `cudaStream_t` and per-slot `done` events.
 
-Include path: `llama.cpp/src/CMakeLists.txt` `target_include_directories(llama PRIVATE ... ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src)` under `LLAMA_KVMEM`. Then `#include "ggml-backend-impl.h"` in the adapter `.cpp` only. `ggml_backend_event` is incomplete in the public header; `event->context` is the `cudaEvent_t`.
+Include path: `backends/llamacpp/src/CMakeLists.txt` `target_include_directories(llama PRIVATE ... ${CMAKE_CURRENT_SOURCE_DIR}/../ggml/src)` under `LLAMA_KVMEM`. Then `#include "ggml-backend-impl.h"` in the adapter `.cpp` only. `ggml_backend_event` is incomplete in the public header; `event->context` is the `cudaEvent_t`.
 
 Exact sequence in `d2h_submit` after graph_compute_async has returned (PR 1 still calls `d2h_commit` of the other slot **first**, as today):
 
@@ -689,7 +689,7 @@ PR 1 already ran T5 with graphs ON and OFF. Stage 3 is a write-up, not the first
 - Does ggml CUDA graph capture the 512/2048 prefill graph with slot-pool `n_kv` stable?
 - Harvest must not break capture: stream wait is OK if ON T5 passed; if ON failed, PR 1 already fell back to host-wait snap.
 - If graphs never capture 4087 nodes, **stop**. Do not start a FlashInfer port.
-- Allowed ggml-side work, if any: adapter-only, or existing fused GDN (`ggml_gated_delta_net` in `llama.cpp/src/models/delta-net-base.cpp`) — already used.
+- Allowed ggml-side work, if any: adapter-only, or existing fused GDN (`ggml_gated_delta_net` in `backends/llamacpp/src/models/delta-net-base.cpp`) — already used.
 
 **Label remaining engine gap versus qw3:** IQ3 GEMM, ggml FA, 4087 nodes, no `nvfp4_ffn_prefill`. Recommend **not** starting a FlashInfer port unless the user later asks.
 
@@ -753,7 +753,7 @@ Mean-K remains RAM-resident for retrieval scoring (`score_retrieval` → `raw_->
 | Stage | Files |
 |---|---|
 | 0 | `src/adapter/llama-memory-kvmem.cpp` (`harvest_flush` SUM), `src/adapter/llama-memory-kvmem-mtp.cpp`, `kvmem/src/host/raw_kv_store.cpp`, `kvmem/include/kvmem/raw_kv_store.hpp` |
-| 1.A / PR 1 | `src/adapter/llama-memory-kvmem.cpp/.h`, `src/adapter/llama-memory-kvmem-mtp.cpp/.h` (shared pipe, MTP fence, gate `mtp_selected`, `harvest_flush`), `llama.cpp/src/CMakeLists.txt` (ggml/src include) |
+| 1.A / PR 1 | `src/adapter/llama-memory-kvmem.cpp/.h`, `src/adapter/llama-memory-kvmem-mtp.cpp/.h` (shared pipe, MTP fence, gate `mtp_selected`, `harvest_flush`), `backends/llamacpp/src/CMakeLists.txt` (ggml/src include) |
 | 1.B / PR 2 | `kvmem/include/kvmem/raw_kv_store.hpp`, `kvmem/src/host/raw_kv_store.cpp`, `kvmem/tests/raw_kv_store_test.cpp`, adapter `harvest_from_host` |
 | 1.C / PR 3 | `kvmem/src/host/raw_kv_store.cpp/.hpp`, tests (coalesce + races + dtor), adapter `harvest_pending` (stop inline commit **here**, not in PR 1) |
 | 1.D / PR 4 | `src/adapter/llama-memory-kvmem-mtp.cpp/.h` (F16/worker already shared; shrink `nvme_bytes`) |
@@ -922,8 +922,8 @@ These need a user decision; implementation can start Stage 0/PR 1 without them.
 - This repo: `docs/modification-plan.md`, `docs/architecture.md`, `docs/milestones/v0.5.0.md`
 - Harvest: `src/adapter/llama-memory-kvmem.cpp` (`CaptureD2hPipe`, `d2h_submit`, `harvest_pending`, `harvest_from_host`, `bytes_to_f32_token_major`)
 - MTP: `src/adapter/llama-memory-kvmem-mtp.cpp` (`harvest_pending`, `harvest_capture`, ungated `mtp_selected`, NVMe config)
-- Capture hooks: `src/adapter/llama-kvmem-capture.cpp`, `llama.cpp/src/llama-graph.cpp` `kvmem_capture_*`, `llama.cpp/src/llama-context.cpp` `process_ubatch` / `pipeline_parallel`
-- CUDA set_input: `ggml_backend_cuda_buffer_set_tensor` (`cudaStreamPerThread`) in `llama.cpp/ggml/src/ggml-cuda/ggml-cuda.cu`
+- Capture hooks: `src/adapter/llama-kvmem-capture.cpp`, `backends/llamacpp/src/llama-graph.cpp` `kvmem_capture_*`, `backends/llamacpp/src/llama-context.cpp` `process_ubatch` / `pipeline_parallel`
+- CUDA set_input: `ggml_backend_cuda_buffer_set_tensor` (`cudaStreamPerThread`) in `backends/llamacpp/ggml/src/ggml-cuda/ggml-cuda.cu`
 - Events: `ggml_backend_cuda_event_record` / `event_wait` / `event_new` (`GGML_CUDA_NO_PEER_COPY` → nullptr)
 - Store: `kvmem/src/host/raw_kv_store.cpp`, `kvmem/include/kvmem/nvme_kv_tier.hpp` (`write_spans` merge rules, `write_block`, `drop_page_cache`)
 - Prefill+MTP: `tools/kvmem-spec.cpp` `kvmem_spec_decode_span`
@@ -946,7 +946,7 @@ Independently reviewable, mergeable PRs. Do not mix engine fusion into harvest I
 
 ### PR 1 — `kvmem: split harvest fence; host-wait compute_done; MTP same gate`
 
-- **Files/components:** `src/adapter/llama-memory-kvmem.cpp/.h`, `src/adapter/llama-memory-kvmem-mtp.cpp/.h`, `llama.cpp/src/CMakeLists.txt` (PRIVATE `ggml/src`).
+- **Files/components:** `src/adapter/llama-memory-kvmem.cpp/.h`, `src/adapter/llama-memory-kvmem-mtp.cpp/.h`, `backends/llamacpp/src/CMakeLists.txt` (PRIVATE `ggml/src`).
 - **Depends on:** PR 0 (so T5 can show `snap_wait_us` / `sync_us` change).
 - **Changes:** Alternative **(F)**. Record `compute_done` on the compute stream; harvest stream waits then D2D; **`cudaEventRecord(snap, d2h_->stream)`** (never `ggml_backend_event_record(snap, be)`); compute stream waits on snap; async D2H; **HOST-WAIT `compute_done` before harvest returns**. **Keep inline `d2h_commit`.** Shared D2H helper; MTP stops `ggml_backend_tensor_get`; `mtp->harvest_flush()` before `follow_retrieval`; gate `mtp_selected` on `trace_`. `KVMEM_HARVEST_SYNC=1` wraps the old functions. Null `event_new` → today’s synchronize. If graphs ON fails T5/T0, host-wait snap too.
 - **Gate:** T0, T0s, T1–T4; T3 **`n_no_raw=0` hard fail**; T5 + T5g (graphs ON and OFF). Expect `snap_wait_us` host time to drop, **not** a tok/s miracle.

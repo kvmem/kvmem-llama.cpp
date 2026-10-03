@@ -29,6 +29,10 @@ jobs:
       - run: python3 tests/test_launcher_key_file.py
       - run: python3 scripts/test_start_server.py
       - run: python3 scripts/test_build_rocm.py
+      - name: Prepare pinned llama.cpp integration
+        run: |
+          python3 scripts/prepare-backends.py --backend llamacpp
+          python3 scripts/prepare-backends.py --backend llamacpp --check
       - name: Configure host and model-free server tests
         env:
           NVME: ${{ matrix.nvme }}
@@ -49,6 +53,10 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/test_build_rocm.py
+      - name: Prepare pinned llama.cpp integration
+        run: |
+          python scripts/prepare-backends.py --backend llamacpp
+          python scripts/prepare-backends.py --backend llamacpp --check
       - name: Configure host and model-free server tests
         run: >-
           cmake -S . -B build -A x64
@@ -85,6 +93,10 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build libssl-dev python3 time ccache zstd
       - uses: actions/checkout@v4
+      - name: Prepare pinned llama.cpp integration
+        run: |
+          python3 scripts/prepare-backends.py --backend llamacpp
+          python3 scripts/prepare-backends.py --backend llamacpp --check
       - name: Identify the compiler toolchain
         id: toolchain
         run: |
@@ -98,7 +110,7 @@ jobs:
         with:
           path: ${{ env.CCACHE_DIR }}
           # Keep one snapshot per build/kernel configuration, rather than per commit.
-          key: cuda12.8.1-120a-ccache-v1-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/workflows/server-compat.yml', 'CMakeLists.txt', 'kvmem/CMakeLists.txt', 'patches/**', 'llama.cpp/ggml/src/ggml-cuda/**') }}
+          key: cuda12.8.1-120a-ccache-v1-${{ steps.toolchain.outputs.id }}-${{ hashFiles('.github/workflows/server-compat.yml', 'CMakeLists.txt', 'kvmem/CMakeLists.txt', 'backends/versions.json', 'backends/patches/**', 'backends/llamacpp/ggml/src/ggml-cuda/**') }}
           restore-keys: |
             cuda12.8.1-120a-ccache-v1-${{ steps.toolchain.outputs.id }}-
             cuda12.8.1-120a-ccache-v1-

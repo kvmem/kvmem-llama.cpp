@@ -96,9 +96,9 @@ foreach ($name in 'native-process.ps1', 'start-server.ps1', 'start-iq3.ps1', 'st
 $readme = 'README.md'
 if ($Component -eq 'Quantizer') { $readme = 'README-quantizer.md' }
 Copy-Item -LiteralPath (Join-Path $SourceDir ('scripts/windows/' + $readme)) -Destination (Join-Path $OutputDir 'README.md')
-Copy-Item -LiteralPath (Join-Path $SourceDir 'llama.cpp/LICENSE') -Destination (Join-Path $OutputDir 'licenses/llama.cpp-MIT.txt')
+Copy-Item -LiteralPath (Join-Path $SourceDir 'backends/llamacpp/LICENSE') -Destination (Join-Path $OutputDir 'licenses/llama.cpp-MIT.txt')
 Copy-Item -LiteralPath (Join-Path $SourceDir 'README.md') -Destination (Join-Path $OutputDir 'licenses/KVMem-README.md')
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $SourceDir 'llama.cpp/vendor') -Recurse -File) {
+foreach ($file in Get-ChildItem -LiteralPath (Join-Path $SourceDir 'backends/llamacpp/vendor') -Recurse -File) {
     if ($file.Name -notmatch '^(LICENSE|COPYING|NOTICE)') { continue }
     $relative = $file.FullName.Substring($SourceDir.Length + 1)
     $dest = Join-Path $OutputDir "licenses/$relative"

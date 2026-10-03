@@ -404,7 +404,7 @@ prompt eval time =     650.16 ms /    46 tokens (   14.13 ms per token,    70.75
 
 ## 5. 以后想更新上游代码
 
-本分支直接跟踪 `llama.cpp/` 和 `backends/ninfer/` 源码，重建不需要补丁重放。更新上游时，在当前开发分支中合并源码变更、解决适配冲突并更新 `backends/versions.json`，然后执行对应后端回归。详见 [单仓库工作流](multi-backend-repository.md)。
+本分支通过 `backends/llamacpp/` 和 `backends/ninfer/` 子模块引用固定上游提交，KVMem 改动位于 `backends/patches/`。HIP 构建入口自动初始化并应用 llama.cpp 补丁；直接使用 CMake 前运行 `python scripts/prepare-backends.py --backend llamacpp`。更新上游时，同步调整子模块提交、补丁及 `backends/versions.json`，再执行对应后端回归。详见 [仓库工作流](multi-backend-repository.md)。
 
 ### ⚠️ git 可能报 unsafe repository
 

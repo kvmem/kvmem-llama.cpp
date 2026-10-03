@@ -76,6 +76,8 @@ ninfer 现在保留正常生成结束时的已执行端点，以及 Frontend 确
 
 ## 源码构建和打包
 
-公共核心可用 `KVMEM_BUILD_LLAMA=OFF` 单独构建，llama 目标继续使用现有顶层 CMake。ninfer 在自己的构建目录中增加 `-DNINFER_KVMEM_SOURCE_DIR=<kvmem checkout>/kvmem`，构建 `ninfer-serve`；两边独立配置 CUDA 与编译器，公共核心维持 C++17，ninfer 使用 C++20。
+引擎源码通过 `backends/llamacpp` 和 `backends/ninfer` 子模块引用既有项目，固定提交及 KVMem 补丁由主仓库管理。先运行 `python scripts/prepare-backends.py`；Windows 构建入口会自动准备所选后端。克隆、补丁维护和源码包说明见 [仓库工作流](multi-backend-repository.md)。
+
+公共核心可用 `KVMEM_BUILD_LLAMA=OFF -DKVMEM_BUILD_SERVER_TESTS=OFF` 单独构建，llama 目标继续使用现有顶层 CMake。ninfer 在自己的构建目录中增加 `-DNINFER_KVMEM_SOURCE_DIR=<kvmem checkout>/kvmem`，构建 `ninfer-serve`；两边独立配置 CUDA 与编译器，公共核心维持 C++17，ninfer 使用 C++20。
 
 在 VS 2022 Developer PowerShell 中运行 `scripts/windows/package-backends.ps1`，传入 `-LlamaWorker`、`-NinferWorker`、`-NinferSource`、`-OutputDir` 和 `-CudaPath`，可加 `-VcpkgInstalled` 与 `-ValidationReport`。输出目录必须不存在。脚本为每个 worker 收集 DLL，检查干净 PATH 下的启动，并写入许可文件、二进制校验值和验证报告；模型不会复制。打包成功只证明依赖可加载，推理结果以配套验证报告为准。

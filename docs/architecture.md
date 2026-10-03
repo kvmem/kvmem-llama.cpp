@@ -6,7 +6,7 @@ this library owns selection, tiering, and (later) window assembly.
 ```
 kvmem/          host policy + CPU/NVMe  (this repo, no llama.cpp headers)
 src/adapter/    llama_memory_i wrapper  (P1+)
-llama.cpp/      submodule + thin patches (P1+)
+backends/llamacpp/      submodule + thin patches (P1+)
 ```
 
 GPU attention cache is a **bounded block-slot pool** of size

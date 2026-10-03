@@ -144,8 +144,7 @@ def main():
         print(json.dumps(plan, indent=2), flush=True)
         if args.dry_run:
             return 0
-        if not (root / 'llama.cpp/CMakeLists.txt').is_file():
-            raise ValueError('llama.cpp sources are missing. Use a complete checkout or extract the complete source bundle.')
+        env['PYTHON'] = sys.executable
         return subprocess.run(plan['command'], cwd=root, env=env).returncode
     except (ValueError, OSError) as exc:
         print('error: ' + str(exc), file=sys.stderr)

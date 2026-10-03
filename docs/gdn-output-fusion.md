@@ -23,15 +23,14 @@ Scope: CUDA F32 output norm with 128-column heads; the graph scheduling change t
 - `tests/gdn-output-fusion-test.cpp` compares against the existing two-kernel path by retaining the weighted norm as an observed intermediate in the reference graph. It checks exact FP32 output equality for 1/4/64/256/512 tokens, two sequences, strided norm input, and unsupported shapes, gate layout, row weights and observed intermediates.
 - Fixed synthetic inputs are retained across repeated graph executions. Intermediate tensors still use the normal scheduler allocation and reuse rules.
 - `scripts/test-gdn-output-fusion.py` checks real model output and usage equality, rejected drafts, inactive conversation restore, checkpoint rewind and streaming cancellation. It compares explicit `0` with the unset/default-enabled mode, including actual dispatch checks. Its benchmark uses ABBA server ordering, warmup, rotating prompt order, greedy sampling and explicit cache reset.
-- `scripts/check-gdn-output-patch.py` replays the full patch stack on pinned files and compares all 47 affected files with the working tree. `--crlf` also checks Windows checkout and mixed patch line endings.
+- `scripts/prepare-backends.py --backend llamacpp --check` verifies the pinned revision and complete integration tree, including this fusion. The integration patch supersedes the historical patch stack on this development branch.
 - CUDA Compute Sanitizer checks the new kernel with `--kernel-name kns=rms_norm_silu_gate_f32`. Use `GGML_CUDA_DISABLE_GRAPHS=1` for this isolated check; the normal backend handles graph-update failure by re-instantiating the graph, and the sanitizer otherwise reports those expected API failures.
 
 ```powershell
 python scripts/test-gdn-output-fusion.py --phase correctness --output artifacts/gdn-correctness-replay
 python scripts/test-gdn-output-fusion.py --phase correctness --mtp-state snapshots --output artifacts/gdn-correctness-snapshots
 python scripts/test-gdn-output-fusion.py --phase benchmark --output artifacts/gdn-benchmark
-python scripts/check-gdn-output-patch.py
-python scripts/check-gdn-output-patch.py --crlf
+python scripts/prepare-backends.py --backend llamacpp --check
 ```
 
 Windows builds also include the MSVC dependency-prefix probe from the previous experiment, so Ninja records includes correctly on localized Visual Studio installations. This is a build fix, not a runtime optimization.

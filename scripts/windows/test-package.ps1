@@ -9,7 +9,7 @@ try {
     $source = Join-Path $temp 'source'
     $build = Join-Path $temp 'build'
     $package = Join-Path $temp 'package'
-    foreach ($dir in 'source/scripts/windows', 'source/llama.cpp/vendor', 'build/bin', 'ui') {
+    foreach ($dir in 'source/scripts/windows', 'source/backends/llamacpp/vendor', 'build/bin', 'ui') {
         $null = New-Item -ItemType Directory -Path (Join-Path $temp $dir) -Force
     }
     foreach ($name in 'native-process.ps1', 'start-server.ps1', 'start-iq3.ps1', 'start-iq4.ps1', 'README.md', 'README-quantizer.md') {
@@ -17,7 +17,7 @@ try {
     }
     [IO.File]::WriteAllText((Join-Path $source 'VERSION'), 'test-fixture')
     [IO.File]::WriteAllText((Join-Path $source 'README.md'), 'Packaging test fixture')
-    [IO.File]::WriteAllText((Join-Path $source 'llama.cpp/LICENSE'), 'Packaging test fixture')
+    [IO.File]::WriteAllText((Join-Path $source 'backends/llamacpp/LICENSE'), 'Packaging test fixture')
     [IO.File]::WriteAllText((Join-Path $temp 'ui/index.html'), '<title>Fixture UI</title>')
     foreach ($name in 'llama-kvmem-server.exe', 'llama-kvmem-cli.exe', 'llama-quantize.exe') {
         Copy-Item -LiteralPath $TestExe -Destination (Join-Path $build "bin/$name")

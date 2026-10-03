@@ -20,7 +20,8 @@ class BuilderTest(unittest.TestCase):
             root.mkdir()
             sentinel = root / 'keep.txt'
             sentinel.write_text('keep')
-            for path in [root, root.parent, root / 'llama.cpp/tools/ui', root / 'scripts/cache']:
+            for path in [root, root.parent, root / 'backends/llamacpp/tools/ui',
+                         root / 'backends/ninfer', root / 'kvmem/include', root / 'scripts/cache']:
                 with self.assertRaises(ValueError):
                     builder.prepare_workspace(path, root, True)
             unowned = root / 'build-ui/full'
