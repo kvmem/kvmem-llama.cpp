@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 330" width="920" height="330" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12">
+  <style>
+    .bg { fill: #fcfcfb; }
+    .t { fill: #0b0b0b; }
+    .t2 { fill: #52514e; }
+    .grid { stroke: #e4e3df; stroke-width: 1; }
+    .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+    .dash { stroke-dasharray: 5 4; stroke-width: 1.5; }
+    .dot { stroke: #fcfcfb; stroke-width: 2; }
+    .ring { stroke: #fcfcfb; stroke-width: 2; }
+    .whisk { stroke-width: 1.5; }
+    .s0 { stroke: #2a78d6; } .f0 { fill: #2a78d6; }
+    .s1 { stroke: #eb6834; } .f1 { fill: #eb6834; }
+    .s2 { stroke: #8a8984; } .f2 { fill: #8a8984; }
+    .s3 { stroke: #1f9e6e; } .f3 { fill: #1f9e6e; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #1a1a19; }
+      .t { fill: #ffffff; }
+      .t2 { fill: #c3c2b7; }
+      .grid { stroke: #383835; }
+      .dot, .ring { stroke: #1a1a19; }
+      .s0 { stroke: #3987e5; } .f0 { fill: #3987e5; }
+      .s1 { stroke: #d95926; } .f1 { fill: #d95926; }
+      .s2 { stroke: #8f8e87; } .f2 { fill: #8f8e87; }
+      .s3 { stroke: #2bb07f; } .f3 { fill: #2bb07f; }
+    }
+  </style>
+  <rect class="bg" width="920" height="330"/>
+  <g transform="translate(0,18)">
+    <rect x="60" y="-6" width="12" height="12" rx="2" class="f0"/>
+    <text x="84" y="4" class="t">5060 Ti</text>
+    <rect x="159" y="-6" width="12" height="12" rx="2" class="f1"/>
+    <text x="183" y="4" class="t">4090</text>
+    <text x="247" y="4" class="t2">веса одинаковы на обеих картах · на 4090 окно упирается в --max-context, а не в память</text>
+  </g>
+  <g transform="translate(0,20)">
+    <text x="60" y="30" class="t" font-weight="600">Веса в видеопамяти, ГиБ</text>
+    <g class="grid">
+      <line x1="60" y1="248.0" x2="430" y2="248.0"/>
+      <line x1="60" y1="208.0" x2="430" y2="208.0"/>
+      <line x1="60" y1="168.0" x2="430" y2="168.0"/>
+      <line x1="60" y1="128.0" x2="430" y2="128.0"/>
+      <line x1="60" y1="88.0" x2="430" y2="88.0"/>
+      <line x1="60" y1="48.0" x2="430" y2="48.0"/>
+    </g>
+    <g class="t2" text-anchor="end">
+      <text x="52" y="252.0">0</text>
+      <text x="52" y="212.0">2</text>
+      <text x="52" y="172.0">4</text>
+      <text x="52" y="132.0">6</text>
+      <text x="52" y="92.0">8</text>
+      <text x="52" y="52.0">10</text>
+    </g>
+    <g class="t2" text-anchor="middle">
+      <text x="121.7" y="266">без спек.</text>
+      <text x="245.0" y="266">MTP 3</text>
+      <text x="368.3" y="266">DFlash2 7</text>
+      <text x="245.0" y="284"></text>
+    </g>
+    <path class="f2" d="M104.7,248 V118.0 Q104.7,114.0 108.7,114.0 H134.7 Q138.7,114.0 138.7,118.0 V248 Z"><title>без спекуляции: 6,70</title></path>
+    <text x="121.7" y="109.0" class="t" text-anchor="middle" font-size="11">6,70</text>
+    <path class="f2" d="M228.0,248 V109.6 Q228.0,105.6 232.0,105.6 H258.0 Q262.0,105.6 262.0,109.6 V248 Z"><title>MTP 3: 7,12</title></path>
+    <text x="245.0" y="100.6" class="t" text-anchor="middle" font-size="11">7,12</text>
+    <path class="f2" d="M351.3,248 V85.4 Q351.3,81.4 355.3,81.4 H381.3 Q385.3,81.4 385.3,85.4 V248 Z"><title>DFlash2 7: 8,33</title></path>
+    <text x="368.3" y="76.4" class="t" text-anchor="middle" font-size="11">8,33</text>
+  </g>
+  <g transform="translate(460,20)">
+    <text x="60" y="30" class="t" font-weight="600">Наибольшее окно rk8v4, тыс. токенов</text>
+    <g class="grid">
+      <line x1="60" y1="248.0" x2="430" y2="248.0"/>
+      <line x1="60" y1="208.0" x2="430" y2="208.0"/>
+      <line x1="60" y1="168.0" x2="430" y2="168.0"/>
+      <line x1="60" y1="128.0" x2="430" y2="128.0"/>
+      <line x1="60" y1="88.0" x2="430" y2="88.0"/>
+      <line x1="60" y1="48.0" x2="430" y2="48.0"/>
+    </g>
+    <g class="t2" text-anchor="end">
+      <text x="52" y="252.0">0</text>
+      <text x="52" y="212.0">60</text>
+      <text x="52" y="172.0">120</text>
+      <text x="52" y="132.0">180</text>
+      <text x="52" y="92.0">240</text>
+      <text x="52" y="52.0">300</text>
+    </g>
+    <g class="t2" text-anchor="middle">
+      <text x="121.7" y="266">без спек.</text>
+      <text x="245.0" y="266">MTP 3</text>
+      <text x="368.3" y="266">DFlash2 7</text>
+      <text x="245.0" y="284"></text>
+    </g>
+    <path class="f0" d="M86.7,248 V77.3 Q86.7,73.3 90.7,73.3 H116.7 Q120.7,73.3 120.7,77.3 V248 Z"><title>5060 Ti, без спекуляции: 262,1</title></path>
+    <text x="103.7" y="68.3" class="t" text-anchor="middle" font-size="11">262,1</text>
+    <path class="f1" d="M122.7,248 V77.3 Q122.7,73.3 126.7,73.3 H152.7 Q156.7,73.3 156.7,77.3 V248 Z"><title>4090, без спекуляции: 262,1</title></path>
+    <text x="139.7" y="68.3" class="t" text-anchor="middle" font-size="11">262,1</text>
+    <path class="f0" d="M210.0,248 V77.3 Q210.0,73.3 214.0,73.3 H240.0 Q244.0,73.3 244.0,77.3 V248 Z"><title>5060 Ti, MTP 3: 262,1</title></path>
+    <text x="227.0" y="68.3" class="t" text-anchor="middle" font-size="11">262,1</text>
+    <path class="f1" d="M246.0,248 V77.3 Q246.0,73.3 250.0,73.3 H276.0 Q280.0,73.3 280.0,77.3 V248 Z"><title>4090, MTP 3: 262,1</title></path>
+    <text x="263.0" y="68.3" class="t" text-anchor="middle" font-size="11">262,1</text>
+    <path class="f0" d="M333.3,248 V101.8 Q333.3,97.8 337.3,97.8 H363.3 Q367.3,97.8 367.3,101.8 V248 Z"><title>5060 Ti, DFlash2 7: 225,3</title></path>
+    <text x="350.3" y="92.8" class="t" text-anchor="middle" font-size="11">225,3</text>
+    <path class="f1" d="M369.3,248 V77.3 Q369.3,73.3 373.3,73.3 H399.3 Q403.3,73.3 403.3,77.3 V248 Z"><title>4090, DFlash2 7: 262,1</title></path>
+    <text x="386.3" y="68.3" class="t" text-anchor="middle" font-size="11">262,1</text>
+  </g>
+</svg>

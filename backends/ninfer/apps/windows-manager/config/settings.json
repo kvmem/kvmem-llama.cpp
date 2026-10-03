@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "webPort": 8090,
+  "modelDirectories": [
+    "model"
+  ],
+  "defaultProfileId": "xxs-160k",
+  "startWithWindows": false,
+  "autoStartModel": true,
+  "language": "zh"
+}

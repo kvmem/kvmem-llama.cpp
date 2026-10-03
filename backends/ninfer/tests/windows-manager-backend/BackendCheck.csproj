@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable></PropertyGroup>
+  <ItemGroup><FrameworkReference Include="Microsoft.AspNetCore.App"/><Compile Include="../../apps/windows-manager/Contracts.cs" Link="Contracts.cs"/><Compile Include="../../apps/windows-manager/Backend/*.cs" Link="Backend/%(Filename)%(Extension)"/></ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../../apps/windows-manager/config/*" LogicalName="NInfer.Manager.Config/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../../apps/windows-manager/config/profiles/*.json" LogicalName="NInfer.Manager.Config/profiles/%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

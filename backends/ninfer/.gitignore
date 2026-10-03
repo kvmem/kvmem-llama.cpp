@@ -1,0 +1,103 @@
+# Build
+build/
+build-*/
+cmake-build-*/
+*.o
+*.obj
+*.so
+*.a
+compile_commands.json
+CMakeUserPresets.json
+.cache/
+
+# CUDA / profiling artifacts
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+*.sqlite
+
+# Python tooling
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.venv-*/
+venv/
+*.egg-info/
+
+# Weight artifacts (large; produced by offline tooling)
+*.qus
+*.bin
+*.safetensors
+*.gguf
+*.ninfer
+*.ninfer.conversion.json
+/models/
+out/
+vcpkg_installed/
+
+# Local workspace and transient runtime output
+/.local/
+/temp/
+/temp-*/
+/tmp/
+/tmp-*/
+/AGENTS.override.md
+/logs/
+*.log
+*.tmp
+/core
+/core.*
+
+# Measurement raw corpora & intermediates (large; produced by offline tooling).
+# The small final frequency stats under fixtures/ranking/ ARE tracked; the rest is ignored.
+tools/freq_corpus/fixtures/*
+!tools/freq_corpus/fixtures/ranking/
+
+# A/B rig outputs and control builds (bench/ab, bench/agentic_ab; the scripts and README are
+# tracked)
+/bench/ab/ab_report.md
+/bench/ab/AB_DONE.txt
+/bench/ab/runner.log
+/bench/ab/watchdog.log
+/bench/ab/serve_*.log
+/bench/ab/arm_*.jsonl
+/bench/ab/control/
+/bench/agentic_ab/control/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+profiles/
+.chatgpt/
+benchmark_results/
+
+# Local release products. Keep the publishing guide, upload archives as GitHub Release assets.
+dist/*
+!dist/README.md
+
+# Claude Code personal/local settings (may contain API tokens)
+.claude/settings.local.json
+
+# Captured request payloads kept for reproducing a specific investigation locally. Deliberately not
+# committed: they are whole real prompts, so they carry third-party system-prompt text and are
+# large (100 KB+ each) for something only the person who captured them can act on.
+repro/
+
+# WebUI releases unpacked by scripts/fetch-webui.sh for -DNINFER_WEBUI_DIR.
+third_party/webui/
+
+# Windows tray manager: source and config seeds are versioned, build products are not.
+apps/windows-manager/bin/
+apps/windows-manager/obj/
+apps/windows-manager/wwwroot/
+apps/windows-manager/web/node_modules/
+apps/windows-manager/web/*.log
+tests/windows-manager-platform/bin/
+tests/windows-manager-platform/obj/
+tests/windows-manager-backend/bin/
+tests/windows-manager-backend/obj/
+!apps/windows-manager/config/profiles/
+!apps/windows-manager/config/profiles/*.json

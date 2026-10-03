@@ -1,0 +1,29 @@
+# Preserve repository-pinned upstream sources byte-for-byte; NInfer-owned files retain Git's
+# default whitespace checks.
+/third_party/spdlog/include/** -whitespace
+/third_party/spdlog/src/** -whitespace
+
+# Shell scripts must be LF in the repository and in every checkout, not merely normalised on
+# commit. `core.autocrlf=input` was not enough: every .sh in scripts/ had CRLF committed, and
+# the two Linux launchers the README recommends (then run-qwen36-35b-a3b-c1-maxctx.sh and
+# run-qwen38-c1-maxctx.sh, now replaced by scripts/run.sh) would not parse on Linux at all:
+#
+#     syntax error near unexpected token `$'in\r''
+#
+# A `case` block is where a stray CR becomes fatal rather than merely ugly, which is why only those
+# two failed and the rest looked fine. Git Bash strips CR on read, so a Windows box reports every
+# script healthy; the breakage only appears for the people the Linux archive ships to.
+*.sh text eol=lf
+*.bash text eol=lf
+
+# The Windows counterparts want CRLF for the same reason, and pinning both directions keeps the
+# pairs from drifting apart on whichever platform last touched them.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Chat templates render byte for byte into prompts and the serve fixtures are compared verbatim, so
+# both keep LF whatever core.autocrlf says: Git for Windows defaults to core.autocrlf=true, which
+# would check them out with CRLF and change every rendered prompt.
+*.jinja text eol=lf
+tests/fixtures/** text eol=lf

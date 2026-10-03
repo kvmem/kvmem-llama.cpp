@@ -1,0 +1,325 @@
+#include "core/layout.h"
+#include "core/weight.h"
+#include "ninfer/ops/linear.h"
+#include "ninfer/ops/linear_add.h"
+#include "ninfer/ops/residual_add.h"
+
+#include "ops/linear_add/bf16/bf16_linear_add_plan.h"
+#include "ops/linear/fp8/fp8_config.h"
+#include "ops/linear/fp8/fp8_format.h"
+#include "ops/linear/gguf/gguf_linear.h"
+#include "ops/linear/nvfp4/nvfp4_config.h"
+#include "ops/linear/nvfp4/nvfp4_format.h"
+#include "ops/linear/t2/t2_a8.h"
+#include "ops/linear_add/fp8/fp8_linear_add_plan.h"
+#include "ops/linear_add/nvfp4/nvfp4_linear_add_plan.h"
+#include "ops/linear_add/q4/q4_linear_add_dispatch.h"
+#include "ops/linear_add/q5/q5_linear_add_plan.h"
+#include "ops/linear_add/q8/q8_linear_add_plan.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+
+#include "ops/linear_swiglu/q4a8/q4a8_linear_swiglu.h"
+#include "ops/linear_swiglu/q4cublas/w4_cublas_prefill.h"
+
+namespace ninfer::ops {
+namespace {
+
+void require_tensor(const Tensor& t, DType dtype, std::int32_t n0, std::int32_t columns,
+                    const char* name) {
+    if (t.dtype != dtype || t.ne[0] != n0 || t.ne[1] != columns || t.ne[2] != 1 || t.ne[3] != 1 ||
+        !t.is_contiguous() || t.data == nullptr) {
+        throw std::invalid_argument(std::string("linear_add: invalid ") + name);
+    }
+}
+
+void require_q4(const Weight& w) {
+    if (w.qtype != QType::Q4_G64_FP16 || w.layout != QuantLayout::RowSplit ||
+        w.scale_dtype != DType::FP16 || w.group_size != 64 || w.group != 64 ||
+        w.padded_shape[0] != w.n || w.padded_shape[1] != w.k || w.qdata == nullptr ||
+        w.qhigh != nullptr || w.scales == nullptr) {
+        throw std::invalid_argument("linear_add: weight must be Q4_G64_FP16 row-split");
+    }
+}
+
+void require_q5(const Weight& w) {
+    if (w.qtype != QType::Q5_G64_FP16 || w.layout != QuantLayout::RowSplit ||
+        w.scale_dtype != DType::FP16 || w.group_size != 64 || w.group != 64 ||
+        w.padded_shape[0] != w.n || w.padded_shape[1] != w.k || w.qdata == nullptr ||
+        w.qhigh == nullptr || w.scales == nullptr) {
+        throw std::invalid_argument("linear_add: weight must be Q5_G64_FP16 row-split");
+    }
+}
+
+void require_q8(const Weight& w) {
+    if (w.qtype != QType::Q8_G32_FP16 || w.layout != QuantLayout::RowSplit ||
+        w.scale_dtype != DType::FP16 || w.group_size != 32 || w.group != 32 ||
+        w.padded_shape[0] != w.n || w.padded_shape[1] != w.k || w.qdata == nullptr ||
+        w.qhigh != nullptr || w.scales == nullptr) {
+        throw std::invalid_argument("linear_add: weight must be Q8_G32_FP16 row-split");
+    }
+}
+
+void require_bf16(const Weight& w) {
+    if (w.qtype != QType::BF16 || w.layout != QuantLayout::Contiguous || w.qdata == nullptr) {
+        throw std::invalid_argument("linear_add: weight must be contiguous BF16");
+    }
+}
+
+bool aligned_to(const void* pointer, std::uintptr_t alignment) {
+    return pointer != nullptr && (reinterpret_cast<std::uintptr_t>(pointer) & (alignment - 1)) == 0;
+}
+
+bool overlaps(const Tensor& lhs, const Tensor& rhs) {
+    const auto lhs_begin = reinterpret_cast<std::uintptr_t>(lhs.data);
+    const auto rhs_begin = reinterpret_cast<std::uintptr_t>(rhs.data);
+    return lhs_begin < rhs_begin + rhs.bytes() && rhs_begin < lhs_begin + lhs.bytes();
+}
+
+void validate_policy(LinearPolicy policy) {
+    switch (policy) {
+    case LinearPolicy::A16Only:
+    case LinearPolicy::AllowA8:
+    case LinearPolicy::AllowA4:
+    case LinearPolicy::AllowA8Int:
+    case LinearPolicy::AllowA8IntDecode:
+    // The cuBLAS prefill route is registered only for linear_swiglu and linear_add. Everywhere else
+    // this policy means exactly what AllowA8Int means, and is accepted rather than rejected so that
+    // one engine-wide setting does not have to be threaded per Op.
+    case LinearPolicy::AllowPrefillCublas:
+        return;
+    }
+    throw std::invalid_argument("linear_add: invalid compute policy");
+}
+
+} // namespace
+
+std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output_rows,
+                                                std::int32_t input_rows, std::int32_t min_tokens,
+                                                std::int32_t max_tokens) {
+    return linear_add_workspace_capacity_bytes(qtype, output_rows, input_rows,
+                                               LinearPolicy::A16Only, min_tokens, max_tokens);
+}
+
+std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output_rows,
+                                                std::int32_t input_rows, LinearPolicy policy,
+                                                std::int32_t min_tokens, std::int32_t max_tokens) {
+    validate_policy(policy);
+    if (min_tokens <= 0 || max_tokens < min_tokens) {
+        throw std::invalid_argument("linear_add workspace: invalid token interval");
+    }
+    if (is_gguf(qtype)) {
+        const detail::GgufShape shape{qtype, output_rows, input_rows};
+        return detail::gguf_project_workspace_bytes({&shape, 1}, min_tokens, max_tokens);
+    }
+    if (qtype == QType::T2_G128_FP16) {
+        (void)linear_workspace_capacity_bytes(qtype, output_rows, input_rows, LinearPolicy::A16Only,
+                                              min_tokens, max_tokens);
+        WorkspaceLayoutBuilder layout;
+        (void)layout.alloc(DType::BF16, {output_rows, max_tokens});
+        return std::max(layout.peak_bytes(1),
+                        detail::t2_a8_workspace_bytes(output_rows, input_rows, policy, max_tokens));
+    }
+    if (qtype == QType::BF16) {
+        (void)detail::bf16_linear_add_select(output_rows, input_rows, min_tokens);
+        (void)detail::bf16_linear_add_select(output_rows, input_rows, max_tokens);
+        return 0;
+    }
+    if (qtype == QType::Q4_G64_FP16) {
+        (void)detail::select_q4_linear_add(output_rows, input_rows, min_tokens);
+        (void)detail::select_q4_linear_add(output_rows, input_rows, max_tokens);
+        return 0;
+    }
+    if (qtype == QType::Q8_G32_FP16) {
+        (void)detail::q8_linear_add_resolve_plan({output_rows, input_rows, input_rows, min_tokens});
+        (void)detail::q8_linear_add_resolve_plan({output_rows, input_rows, input_rows, max_tokens});
+        return 0;
+    }
+    if (qtype == QType::Q5_G64_FP16) {
+        const std::size_t a16 = detail::q5_linear_add_capacity_workspace_bytes(
+            output_rows, input_rows, input_rows, min_tokens, max_tokens);
+        const bool integer_shape =
+            output_rows == 5120 && (input_rows == 17408 || input_rows == 6144);
+        if (!allows_a8_int(policy) || !integer_shape) { return a16; }
+        // See linear_swiglu: where the cuBLAS route is admitted it is the widest claimant, so any
+        // interval reaching its width gate must reserve for it.
+        if (allows_cublas_prefill(policy) && max_tokens >= kCublasPrefillMinTokens) {
+            return std::max(a16, detail::w4_cublas_prefill_workspace_capacity_bytes(
+                                     output_rows, input_rows,
+                                     std::max(min_tokens, kCublasPrefillMinTokens), max_tokens));
+        }
+        if (min_tokens == max_tokens) {
+            return detail::q5a8_tokens_supported(min_tokens)
+                       ? detail::q5a8_add_workspace_capacity_bytes(input_rows, min_tokens,
+                                                                   max_tokens)
+                       : a16;
+        }
+        return std::max(a16, detail::q5a8_add_workspace_capacity_bytes(input_rows, min_tokens,
+                                                                       max_tokens));
+    }
+    if (qtype == QType::NVFP4) {
+        const bool supported = (output_rows == detail::Nvfp4N5120K6144::kOutputRows &&
+                                input_rows == detail::Nvfp4N5120K6144::kInputRows) ||
+                               (output_rows == detail::Nvfp4N5120K17408::kOutputRows &&
+                                input_rows == detail::Nvfp4N5120K17408::kInputRows);
+        if (!supported) {
+            throw std::invalid_argument("linear_add workspace: unsupported NVFP4 profile");
+        }
+        return detail::nvfp4_linear_add_workspace_capacity_bytes(output_rows, input_rows, policy,
+                                                                 min_tokens, max_tokens);
+    }
+    if (qtype == QType::FP8_E4M3FN_ROW_BF16) {
+        const bool supported = (output_rows == detail::Fp8N5120K6144::kOutputRows &&
+                                input_rows == detail::Fp8N5120K6144::kInputRows) ||
+                               (output_rows == detail::Fp8N5120K17408::kOutputRows &&
+                                input_rows == detail::Fp8N5120K17408::kInputRows);
+        if (!supported) {
+            throw std::invalid_argument("linear_add workspace: unsupported FP8 profile");
+        }
+        return detail::fp8_linear_add_workspace_capacity_bytes(output_rows, input_rows, policy,
+                                                               min_tokens, max_tokens);
+    }
+    throw std::invalid_argument("linear_add workspace: unsupported weight format");
+}
+
+void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, WorkspaceArena& ws,
+                cudaStream_t stream) {
+    linear_add(x, w, residual_out, LinearPolicy::A16Only, ws, stream);
+}
+
+void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPolicy policy,
+                WorkspaceArena& ws, cudaStream_t stream) {
+    validate_policy(policy);
+    const std::int32_t t = x.ne[1];
+    if (t <= 0) { throw std::invalid_argument("linear_add: T must be positive"); }
+    require_tensor(x, DType::BF16, w.k, t, "x");
+    require_tensor(residual_out, DType::BF16, w.n, t, "residual_out");
+    if (overlaps(x, residual_out)) {
+        throw std::invalid_argument("linear_add: x and residual_out must not overlap");
+    }
+
+    if (is_gguf(w.qtype)) {
+        detail::gguf_linear_add(x, w, residual_out, ws, stream);
+        return;
+    }
+
+    if (w.qtype == QType::T2_G128_FP16) {
+        if (detail::t2_a8_admits(policy) && detail::t2_a8_supported(w, t)) {
+            detail::t2_a8_linear_add(x, w, residual_out, ws, stream);
+            return;
+        }
+        // The A16 ternary routes have no fused residual epilogue: project, then add.
+        auto scope       = ws.scope();
+        Tensor projected = ws.alloc(DType::BF16, {w.n, t});
+        linear(x, w, projected, stream);
+        residual_add(projected, residual_out, stream);
+        return;
+    }
+
+    if (w.qtype == QType::BF16) {
+        require_bf16(w);
+        if (!detail::bf16_linear_add_admits(w.n, w.k, t)) {
+            throw std::invalid_argument("linear_add: unsupported BF16 shape");
+        }
+        if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16) ||
+            !aligned_to(w.qdata, 16)) {
+            throw std::invalid_argument(
+                "linear_add: BF16 requires 16-byte x/residual/weight alignment");
+        }
+        (void)ws;
+        detail::bf16_linear_add_dispatch(x, w, residual_out, stream);
+        return;
+    }
+
+    if (w.qtype == QType::Q4_G64_FP16) {
+        require_q4(w);
+        const auto launch = detail::select_q4_linear_add(w.n, w.k, t);
+        if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16) ||
+            !aligned_to(w.qdata, 16) || !aligned_to(w.scales, 16)) {
+            throw std::invalid_argument(
+                "linear_add: Q4 requires 16-byte x/residual/code/scale alignment");
+        }
+        launch(x, w, residual_out, stream);
+        return;
+    }
+
+    if (w.qtype == QType::Q5_G64_FP16) {
+        require_q5(w);
+        const bool supported_shape = (w.n == 5120 && w.k == 17408) || (w.n == 5120 && w.k == 6144);
+        if (!supported_shape) { throw std::invalid_argument("linear_add: unsupported Q5 shape"); }
+        if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16) ||
+            !aligned_to(w.qdata, 16) || !aligned_to(w.qhigh, 16) || !aligned_to(w.scales, 16)) {
+            throw std::invalid_argument(
+                "linear_add: Q5 requires 16-byte x/residual/code/high/scale alignment");
+        }
+        // About 1.9x the integer route at 4096 tokens; below the width gate it loses, because the
+        // dequantise pass costs the same whatever the token count. The shape was checked above and
+        // the route takes any token count, so unlike the integer route below it is not gated on a
+        // 128-token tile -- an unaligned final chunk is where it is furthest ahead.
+        if (allows_cublas_prefill(policy) && t >= kCublasPrefillMinTokens &&
+            detail::w4_cublas_prefill_supported(w, t)) {
+            detail::w4_cublas_add_launch(x, w, residual_out, ws, stream);
+            return;
+        }
+        if (allows_a8_int(policy) && detail::q5a8_add_supported(w, t)) {
+            detail::q5a8_add_launch(x, w, residual_out, ws, stream);
+            return;
+        }
+        detail::q5_linear_add_dispatch(x, w, residual_out, ws, stream);
+        return;
+    }
+
+    if (w.qtype == QType::Q8_G32_FP16) {
+        require_q8(w);
+        if (!detail::q8_linear_add_admits({w.n, w.k, w.padded_shape[1], t})) {
+            throw std::invalid_argument("linear_add: unsupported Q8 shape");
+        }
+        if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16) ||
+            !aligned_to(w.qdata, 16) || !aligned_to(w.scales, 16)) {
+            throw std::invalid_argument(
+                "linear_add: Q8 requires 16-byte x/residual/code/scale alignment");
+        }
+        (void)ws;
+        detail::q8_linear_add_dispatch(x, w, residual_out, stream);
+        return;
+    }
+
+    if (w.qtype == QType::NVFP4) {
+        detail::validate_nvfp4_weight(w, "nvfp4 linear_add");
+        const bool supported_shape = (w.n == detail::Nvfp4N5120K6144::kOutputRows &&
+                                      w.k == detail::Nvfp4N5120K6144::kInputRows) ||
+                                     (w.n == detail::Nvfp4N5120K17408::kOutputRows &&
+                                      w.k == detail::Nvfp4N5120K17408::kInputRows);
+        if (!supported_shape) {
+            throw std::invalid_argument("nvfp4 linear_add: unsupported weight shape");
+        }
+        if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16)) {
+            throw std::invalid_argument("linear_add: NVFP4 requires 16-byte x/residual alignment");
+        }
+        detail::nvfp4_linear_add_dispatch(x, w, residual_out, policy, ws, stream);
+        return;
+    }
+
+    if (w.qtype == QType::FP8_E4M3FN_ROW_BF16) {
+        (void)detail::validate_fp8_weight(w, "fp8 linear_add");
+        const bool supported_shape = (w.n == detail::Fp8N5120K6144::kOutputRows &&
+                                      w.k == detail::Fp8N5120K6144::kInputRows) ||
+                                     (w.n == detail::Fp8N5120K17408::kOutputRows &&
+                                      w.k == detail::Fp8N5120K17408::kInputRows);
+        if (!supported_shape) {
+            throw std::invalid_argument("fp8 linear_add: unsupported weight shape");
+        }
+        if (!aligned_to(x.data, 16) || !aligned_to(residual_out.data, 16)) {
+            throw std::invalid_argument("linear_add: FP8 requires 16-byte x/residual alignment");
+        }
+        detail::fp8_linear_add_dispatch(x, w, residual_out, policy, ws, stream);
+        return;
+    }
+
+    throw std::invalid_argument("linear_add: unsupported weight format");
+}
+
+} // namespace ninfer::ops

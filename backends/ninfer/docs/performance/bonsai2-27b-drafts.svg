@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 330" width="920" height="330" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12">
+  <style>
+    .bg { fill: #fcfcfb; }
+    .t { fill: #0b0b0b; }
+    .t2 { fill: #52514e; }
+    .grid { stroke: #e4e3df; stroke-width: 1; }
+    .shade { fill: #f0efec; }
+    .code { stroke: #2a78d6; }
+    .prose { stroke: #eb6834; }
+    .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+    .dot { stroke: #fcfcfb; stroke-width: 2; }
+    .dcode { fill: #2a78d6; }
+    .dprose { fill: #eb6834; }
+    .base { stroke: #8a8984; stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #1a1a19; }
+      .t { fill: #ffffff; }
+      .t2 { fill: #c3c2b7; }
+      .grid { stroke: #383835; }
+      .shade { fill: #262624; }
+      .code { stroke: #3987e5; }
+      .prose { stroke: #d95926; }
+      .dot { stroke: #1a1a19; }
+      .dcode { fill: #3987e5; }
+      .dprose { fill: #d95926; }
+      .base { stroke: #8f8e87; }
+    }
+  </style>
+  <rect class="bg" width="920" height="330"/>
+
+  <!-- легенда -->
+  <g transform="translate(60,18)">
+    <line x1="0" y1="0" x2="18" y2="0" class="line code"/><circle cx="9" cy="0" r="4" class="dot dcode"/>
+    <text x="24" y="4" class="t">код</text>
+    <line x1="70" y1="0" x2="88" y2="0" class="line prose"/><circle cx="79" cy="0" r="4" class="dot dprose"/>
+    <text x="94" y="4" class="t">проза</text>
+    <line x1="150" y1="0" x2="168" y2="0" class="base"/>
+    <text x="174" y="4" class="t">без спекуляции</text>
+    <text x="300" y="4" class="t2">генерация, т/с · короткий промпт, 900 токенов · шкала общая для обеих карт</text>
+  </g>
+
+  <!-- RTX 5060 Ti -->
+  <g transform="translate(0,20)">
+    <text x="60" y="30" class="t" font-weight="600">RTX 5060 Ti</text>
+    <rect x="330" y="40" width="100" height="210" class="shade"/>
+    <text x="380" y="56" class="t2" text-anchor="middle">обрыв</text>
+    <g class="grid">
+      <line x1="60" y1="250" x2="430" y2="250"/><line x1="60" y1="209.6" x2="430" y2="209.6"/>
+      <line x1="60" y1="169.2" x2="430" y2="169.2"/><line x1="60" y1="128.8" x2="430" y2="128.8"/>
+      <line x1="60" y1="88.5" x2="430" y2="88.5"/><line x1="60" y1="48.1" x2="430" y2="48.1"/>
+    </g>
+    <g class="t2" text-anchor="end">
+      <text x="52" y="254">0</text><text x="52" y="213.6">50</text><text x="52" y="173.2">100</text>
+      <text x="52" y="132.8">150</text><text x="52" y="92.5">200</text><text x="52" y="52.1">250</text>
+    </g>
+    <g class="t2" text-anchor="middle">
+      <text x="60" y="268">3</text><text x="120" y="268">4</text><text x="180" y="268">5</text><text x="240" y="268">6</text>
+      <text x="300" y="268">7</text><text x="360" y="268">8</text><text x="420" y="268">9</text>
+      <text x="240" y="286">черновиков DFlash2</text>
+    </g>
+    <polyline class="base" points="60,209.5 420,209.5"/>
+    <polyline class="line code" points="60,157.8 120,151.7 180,146.4 240,135.6 300,134.0 360,168.3 420,164.6"/>
+    <polyline class="line prose" points="60,192.5 120,192.3 180,197.1 240,196.4 300,196.4 360,211.2 420,212.6"/>
+    <g class="dot dcode">
+      <circle cx="60" cy="157.8" r="4"/><circle cx="120" cy="151.7" r="4"/><circle cx="180" cy="146.4" r="4"/>
+      <circle cx="240" cy="135.6" r="4"/><circle cx="300" cy="134.0" r="4"/><circle cx="360" cy="168.3" r="4"/><circle cx="420" cy="164.6" r="4"/>
+    </g>
+    <g class="dot dprose">
+      <circle cx="60" cy="192.5" r="4"/><circle cx="120" cy="192.3" r="4"/><circle cx="180" cy="197.1" r="4"/>
+      <circle cx="240" cy="196.4" r="4"/><circle cx="300" cy="196.4" r="4"/><circle cx="360" cy="211.2" r="4"/><circle cx="420" cy="212.6" r="4"/>
+    </g>
+    <text x="300" y="124" class="t" text-anchor="middle">143,6</text>
+    <text x="120" y="182" class="t" text-anchor="middle">71,5</text>
+    <text x="64" y="224" class="t2">50,2</text>
+  </g>
+
+  <!-- RTX 4090 -->
+  <g transform="translate(460,20)">
+    <text x="60" y="30" class="t" font-weight="600">RTX 4090</text>
+    <rect x="330" y="40" width="100" height="210" class="shade"/>
+    <text x="380" y="56" class="t2" text-anchor="middle">обрыв</text>
+    <g class="grid">
+      <line x1="60" y1="250" x2="430" y2="250"/><line x1="60" y1="209.6" x2="430" y2="209.6"/>
+      <line x1="60" y1="169.2" x2="430" y2="169.2"/><line x1="60" y1="128.8" x2="430" y2="128.8"/>
+      <line x1="60" y1="88.5" x2="430" y2="88.5"/><line x1="60" y1="48.1" x2="430" y2="48.1"/>
+    </g>
+    <g class="t2" text-anchor="end">
+      <text x="52" y="254">0</text><text x="52" y="213.6">50</text><text x="52" y="173.2">100</text>
+      <text x="52" y="132.8">150</text><text x="52" y="92.5">200</text><text x="52" y="52.1">250</text>
+    </g>
+    <g class="t2" text-anchor="middle">
+      <text x="60" y="268">3</text><text x="120" y="268">4</text><text x="180" y="268">5</text><text x="240" y="268">6</text>
+      <text x="300" y="268">7</text><text x="360" y="268">8</text><text x="420" y="268">9</text>
+      <text x="240" y="286">черновиков DFlash2</text>
+    </g>
+    <polyline class="base" points="60,171.2 420,171.2"/>
+    <polyline class="line code" points="60,67.8 120,47.7 180,58.7 240,53.7 300,56.3 360,84.1 420,88.2"/>
+    <polyline class="line prose" points="60,139.9 120,148.6 180,144.3 240,146.1 300,145.0 360,172.3 420,172.9"/>
+    <g class="dot dcode">
+      <circle cx="60" cy="67.8" r="4"/><circle cx="120" cy="47.7" r="4"/><circle cx="180" cy="58.7" r="4"/>
+      <circle cx="240" cy="53.7" r="4"/><circle cx="300" cy="56.3" r="4"/><circle cx="360" cy="84.1" r="4"/><circle cx="420" cy="88.2" r="4"/>
+    </g>
+    <g class="dot dprose">
+      <circle cx="60" cy="139.9" r="4"/><circle cx="120" cy="148.6" r="4"/><circle cx="180" cy="144.3" r="4"/>
+      <circle cx="240" cy="146.1" r="4"/><circle cx="300" cy="145.0" r="4"/><circle cx="360" cy="172.3" r="4"/><circle cx="420" cy="172.9" r="4"/>
+    </g>
+    <text x="128" y="42" class="t">250,5</text>
+    <text x="68" y="158" class="t">136,3</text>
+    <text x="64" y="186" class="t2">97,6</text>
+  </g>
+</svg>

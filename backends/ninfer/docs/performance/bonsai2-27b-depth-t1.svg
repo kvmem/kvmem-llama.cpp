@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 870 330" width="870" height="330" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12">
+  <style>
+    .bg { fill: #fcfcfb; }
+    .t { fill: #0b0b0b; }
+    .t2 { fill: #52514e; }
+    .grid { stroke: #e4e3df; stroke-width: 1; }
+    .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+    .dash { stroke-dasharray: 5 4; stroke-width: 1.5; }
+    .dot { stroke: #fcfcfb; stroke-width: 2; }
+    .ring { stroke: #fcfcfb; stroke-width: 2; }
+    .whisk { stroke-width: 1.5; }
+    .s0 { stroke: #2a78d6; } .f0 { fill: #2a78d6; }
+    .s1 { stroke: #eb6834; } .f1 { fill: #eb6834; }
+    .s2 { stroke: #8a8984; } .f2 { fill: #8a8984; }
+    .s3 { stroke: #1f9e6e; } .f3 { fill: #1f9e6e; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #1a1a19; }
+      .t { fill: #ffffff; }
+      .t2 { fill: #c3c2b7; }
+      .grid { stroke: #383835; }
+      .dot, .ring { stroke: #1a1a19; }
+      .s0 { stroke: #3987e5; } .f0 { fill: #3987e5; }
+      .s1 { stroke: #d95926; } .f1 { fill: #d95926; }
+      .s2 { stroke: #8f8e87; } .f2 { fill: #8f8e87; }
+      .s3 { stroke: #2bb07f; } .f3 { fill: #2bb07f; }
+    }
+  </style>
+  <rect class="bg" width="870" height="330"/>
+  <g transform="translate(0,18)">
+    <line x1="60" y1="0" x2="78" y2="0" class="line s0"/>
+    <circle cx="69" cy="0" r="4" class="dot f0"/>
+    <text x="84" y="4" class="t">код, temp 1,0</text>
+    <line x1="201" y1="0" x2="219" y2="0" class="line s1"/>
+    <circle cx="210" cy="0" r="4" class="dot f1"/>
+    <text x="225" y="4" class="t">проза, temp 1,0</text>
+    <line x1="356" y1="0" x2="374" y2="0" class="line s2 dash"/>
+    <text x="380" y="4" class="t">проза, temp 0 (прежняя серия)</text>
+    <text x="619" y="4" class="t2">генерация, т/с</text>
+  </g>
+  <g transform="translate(0,20)">
+    <text x="60" y="30" class="t" font-weight="600">RTX 5060 Ti, DFlash2 7, рассуждение low</text>
+    <g class="grid">
+      <line x1="60" y1="248.0" x2="840" y2="248.0"/>
+      <line x1="60" y1="208.0" x2="840" y2="208.0"/>
+      <line x1="60" y1="168.0" x2="840" y2="168.0"/>
+      <line x1="60" y1="128.0" x2="840" y2="128.0"/>
+      <line x1="60" y1="88.0" x2="840" y2="88.0"/>
+      <line x1="60" y1="48.0" x2="840" y2="48.0"/>
+    </g>
+    <g class="t2" text-anchor="end">
+      <text x="52" y="252.0">0</text>
+      <text x="52" y="212.0">36</text>
+      <text x="52" y="172.0">72</text>
+      <text x="52" y="132.0">108</text>
+      <text x="52" y="92.0">144</text>
+      <text x="52" y="52.0">180</text>
+    </g>
+    <g class="t2" text-anchor="middle">
+      <text x="60.0" y="266">0</text>
+      <text x="222.5" y="266">50K</text>
+      <text x="385.0" y="266">100K</text>
+      <text x="547.5" y="266">150K</text>
+      <text x="710.0" y="266">200K</text>
+      <text x="450.0" y="284">токенов в промпте</text>
+    </g>
+    <polyline class="line s0" points="88.3,96.3 121.3,62.6 180.7,73.1 274.6,121.7 382.8,89.4 497.2,142.5 603.7,104.0 726.4,135.7"/>
+    <circle cx="88.3" cy="96.3" r="4" class="dot f0"><title>код: 9K - 136,5 т/с</title></circle>
+    <circle cx="121.3" cy="62.6" r="4" class="dot f0"><title>код: 19K - 166,9 т/с</title></circle>
+    <circle cx="180.7" cy="73.1" r="4" class="dot f0"><title>код: 37K - 157,4 т/с</title></circle>
+    <circle cx="274.6" cy="121.7" r="4" class="dot f0"><title>код: 66K - 113,7 т/с</title></circle>
+    <circle cx="382.8" cy="89.4" r="4" class="dot f0"><title>код: 99K - 142,8 т/с</title></circle>
+    <circle cx="497.2" cy="142.5" r="4" class="dot f0"><title>код: 135K - 94,9 т/с</title></circle>
+    <circle cx="603.7" cy="104.0" r="4" class="dot f0"><title>код: 167K - 129,6 т/с</title></circle>
+    <circle cx="726.4" cy="135.7" r="4" class="dot f0"><title>код: 205K - 101,0 т/с</title></circle>
+    <text x="720.4" y="125.7" class="t" text-anchor="end">101,0</text>
+    <polyline class="line s1" points="90.3,75.7 120.6,62.4 183.8,93.7 311.0,170.8 438.1,150.2 565.2,183.3 692.3,193.7"/>
+    <circle cx="90.3" cy="75.7" r="4" class="dot f1"><title>проза: 9K - 155,1 т/с</title></circle>
+    <circle cx="120.6" cy="62.4" r="4" class="dot f1"><title>проза: 19K - 167,0 т/с</title></circle>
+    <circle cx="183.8" cy="93.7" r="4" class="dot f1"><title>проза: 38K - 138,9 т/с</title></circle>
+    <circle cx="311.0" cy="170.8" r="4" class="dot f1"><title>проза: 77K - 69,5 т/с</title></circle>
+    <circle cx="438.1" cy="150.2" r="4" class="dot f1"><title>проза: 116K - 88,0 т/с</title></circle>
+    <circle cx="565.2" cy="183.3" r="4" class="dot f1"><title>проза: 155K - 58,2 т/с</title></circle>
+    <circle cx="692.3" cy="193.7" r="4" class="dot f1"><title>проза: 195K - 48,9 т/с</title></circle>
+    <text x="686.3" y="211.7" class="t" text-anchor="end">48,9</text>
+    <polyline class="line s2 dash" points="90.4,153.8 120.7,159.6 183.9,161.3 311.0,178.7 438.1,179.0 565.3,186.6 692.3,186.7"/>
+  </g>
+</svg>

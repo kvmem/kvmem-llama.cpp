@@ -1,0 +1,145 @@
+#pragma once
+
+#include "runtime/contract/resources.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <stdexcept>
+#include <vector>
+
+namespace ninfer::runtime {
+
+struct ContextPortfolioOwnerPolicy {
+    PlanningOwnerId owner;
+    std::uint32_t private_retention_weight = 0;
+    bool explicit_shared_credit            = false;
+};
+
+struct ContextPortfolioCheckpointValue {
+    PlanningOwnerId owner;
+    // One bit per request in the manager's demand window, which is 64 wide: see
+    // kDemandWindowCapacity, sized to outlast the distance between two requests sharing a prefix.
+    std::uint64_t demand_mask          = 0;
+    std::uint64_t rebuild_ns           = 0;
+    std::uint64_t baseline_recovery_ns = 0;
+    std::uint64_t target_recovery_ns   = 0;
+    // The incoming request continues this checkpoint's own lineage (same session) and diverges
+    // from it, so no later prompt of that conversation can reuse it. Only then is it worth
+    // nothing; a checkpoint that merely cannot serve this request keeps its value.
+    bool unreachable = false;
+};
+
+struct ContextPortfolioValueResult {
+    std::uint64_t baseline_public_value   = 0;
+    std::uint64_t target_public_value     = 0;
+    std::uint64_t private_transition_loss = 0;
+    bool saturated                        = false;
+};
+
+// Folds one complete inactive checkpoint portfolio. Empirical demands and explicit shared credit
+// form public portfolio values. A private owner contributes the largest loss of one concrete
+// checkpoint capability, so a surviving later checkpoint cannot mask damage to an earlier one.
+class ContextPortfolioValue {
+public:
+    ContextPortfolioValue() { owner_scratch_.reserve(32U); }
+
+    [[nodiscard]] ContextPortfolioValueResult
+    fold(std::span<const ContextPortfolioOwnerPolicy> owners,
+         std::span<const ContextPortfolioCheckpointValue> checkpoints) {
+        std::array<std::uint64_t, 64> baseline_demand{};
+        std::array<std::uint64_t, 64> target_demand{};
+        owner_scratch_.clear();
+        for (const ContextPortfolioOwnerPolicy& policy : owners) {
+            if (std::find_if(owner_scratch_.begin(), owner_scratch_.end(), [&](const auto& item) {
+                    return item.owner == policy.owner;
+                }) != owner_scratch_.end()) {
+                throw std::logic_error("portfolio owner policy ID is duplicated");
+            }
+            owner_scratch_.push_back(
+                OwnerValue{.owner                    = policy.owner,
+                           .private_retention_weight = policy.private_retention_weight,
+                           .explicit_shared_credit   = policy.explicit_shared_credit});
+        }
+
+        for (const ContextPortfolioCheckpointValue& checkpoint : checkpoints) {
+            if (checkpoint.unreachable) { continue; }
+            const auto owner = std::find_if(
+                owner_scratch_.begin(), owner_scratch_.end(),
+                [&](const OwnerValue& item) { return item.owner == checkpoint.owner; });
+            if (owner == owner_scratch_.end()) {
+                throw std::logic_error("portfolio checkpoint has no owner policy");
+            }
+            const std::uint64_t baseline_saving =
+                checkpoint.rebuild_ns > checkpoint.baseline_recovery_ns
+                    ? checkpoint.rebuild_ns - checkpoint.baseline_recovery_ns
+                    : 0;
+            const std::uint64_t target_saving =
+                checkpoint.rebuild_ns > checkpoint.target_recovery_ns
+                    ? checkpoint.rebuild_ns - checkpoint.target_recovery_ns
+                    : 0;
+            owner->baseline_best = std::max(owner->baseline_best, baseline_saving);
+            owner->target_best   = std::max(owner->target_best, target_saving);
+            owner->private_transition_loss =
+                std::max(owner->private_transition_loss,
+                         baseline_saving > target_saving ? baseline_saving - target_saving : 0);
+            for (std::uint32_t bit = 0; bit < 64U; ++bit) {
+                if ((checkpoint.demand_mask & (1ULL << bit)) == 0) { continue; }
+                baseline_demand[bit] = std::max(baseline_demand[bit], baseline_saving);
+                target_demand[bit]   = std::max(target_demand[bit], target_saving);
+            }
+        }
+
+        ContextPortfolioValueResult result;
+        for (std::size_t bit = 0; bit < baseline_demand.size(); ++bit) {
+            add(result.baseline_public_value, baseline_demand[bit], result.saturated);
+            add(result.target_public_value, target_demand[bit], result.saturated);
+        }
+        for (const OwnerValue& owner : owner_scratch_) {
+            if (owner.private_retention_weight != 0) {
+                add_weighted(result.private_transition_loss, owner.private_transition_loss,
+                             owner.private_retention_weight, result.saturated);
+            }
+            if (owner.explicit_shared_credit) {
+                add(result.baseline_public_value, owner.baseline_best, result.saturated);
+                add(result.target_public_value, owner.target_best, result.saturated);
+            }
+        }
+        return result;
+    }
+
+private:
+    struct OwnerValue {
+        PlanningOwnerId owner;
+        std::uint32_t private_retention_weight = 0;
+        bool explicit_shared_credit            = false;
+        std::uint64_t baseline_best            = 0;
+        std::uint64_t target_best              = 0;
+        std::uint64_t private_transition_loss  = 0;
+    };
+
+    static void add(std::uint64_t& value, std::uint64_t increment, bool& saturated) noexcept {
+        if (increment > std::numeric_limits<std::uint64_t>::max() - value) {
+            value     = std::numeric_limits<std::uint64_t>::max();
+            saturated = true;
+        } else {
+            value += increment;
+        }
+    }
+
+    static void add_weighted(std::uint64_t& value, std::uint64_t increment, std::uint32_t weight,
+                             bool& saturated) noexcept {
+        if (weight != 0 && increment > std::numeric_limits<std::uint64_t>::max() / weight) {
+            add(value, std::numeric_limits<std::uint64_t>::max(), saturated);
+            saturated = true;
+            return;
+        }
+        add(value, increment * weight, saturated);
+    }
+
+    std::vector<OwnerValue> owner_scratch_;
+};
+
+} // namespace ninfer::runtime

@@ -1,0 +1,38 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release product binaries",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "NINFER_BUILD_APPS": "ON",
+        "BUILD_TESTING": "OFF",
+        "NINFER_BUILD_BENCHMARKS": "OFF"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Release products, tests and benchmarks",
+      "inherits": "release",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "NINFER_BUILD_BENCHMARKS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "dev", "configurePreset": "dev" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

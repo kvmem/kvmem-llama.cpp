@@ -1,0 +1,43 @@
+{
+  "id": "xxs-160k",
+  "name": "Swift XXS · 160K",
+  "modelPath": "model/Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.ninfer",
+  "enginePath": "engine/ninfer-serve.exe",
+  "parameters": {
+    "--host": "127.0.0.1",
+    "--port": "18081",
+    "--model-id": "swift-1.5-qwen3.8-27b-xxs",
+    "--max-context": "163840",
+    "--kv-capacity": "163840",
+    "--max-concurrency": "1",
+    "--default-max-tokens": "0",
+    "--prefill-chunk": "1024",
+    "--kv-dtype": "rk8v4",
+    "--default-reasoning-effort": "xhigh",
+    "--preserve-thinking": null,
+    "--temperature": "1.0",
+    "--top-p": "0.95",
+    "--top-k": "20",
+    "--min-p": "0.0",
+    "--presence-penalty": "0.0",
+    "--frequency-penalty": "0.0",
+    "--seed": "42",
+    "--chat-template": "config/chat_template.jinja",
+    "--device-profile": "auto",
+    "--device-profile-path": "config/device-profiles.json",
+    "--host-cache-mib": "6144",
+    "--device-snapshot-slots": "1",
+    "--cuda-graph-allowance-mib": "72",
+    "--spec": "mtp",
+    "--draft-tokens": "4",
+    "--adaptive-mtp": null,
+    "--ngram-draft-tokens": "31",
+    "--gdn-state-fp16": null,
+    "--cuda-memory-policy": "strict"
+  },
+  "environment": {
+    "NINFER_PREFILL_ALIGN": "0",
+    "NINFER_PROMPT_FAST": null,
+    "CUDA_LAUNCH_BLOCKING": null
+  }
+}

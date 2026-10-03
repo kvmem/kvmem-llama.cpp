@@ -1,0 +1,9 @@
+{
+  "name": "ninfer-manager-web",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {"build": "vue-tsc --noEmit && vite build"},
+  "dependencies": {"vue": "^3.5.22"},
+  "devDependencies": {"typescript": "^5.9.3", "vite": "^7.1.7", "@vitejs/plugin-vue": "^6.0.1", "vue-tsc": "^3.0.8"}
+}

@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 330" width="980" height="330" font-family="system-ui, -apple-system, Segoe UI, sans-serif" font-size="12">
+  <style>
+    .bg { fill: #fcfcfb; }
+    .t { fill: #0b0b0b; }
+    .t2 { fill: #52514e; }
+    .grid { stroke: #e4e3df; stroke-width: 1; }
+    .df { stroke: #2a78d6; }
+    .mtp { stroke: #eb6834; }
+    .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+    .base { stroke: #8a8984; stroke-width: 1.5; stroke-dasharray: 5 4; fill: none; }
+    .dot { stroke: #fcfcfb; stroke-width: 2; }
+    .ddf { fill: #2a78d6; }
+    .dmtp { fill: #eb6834; }
+    .dbase { fill: #8a8984; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #1a1a19; }
+      .t { fill: #ffffff; }
+      .t2 { fill: #c3c2b7; }
+      .grid { stroke: #383835; }
+      .df { stroke: #3987e5; }
+      .mtp { stroke: #d95926; }
+      .base { stroke: #8f8e87; }
+      .dot { stroke: #1a1a19; }
+      .ddf { fill: #3987e5; }
+      .dmtp { fill: #d95926; }
+      .dbase { fill: #8f8e87; }
+    }
+  </style>
+  <rect class="bg" width="980" height="330"/>
+
+  <!-- легенда -->
+  <g transform="translate(60,18)">
+    <line x1="0" y1="0" x2="18" y2="0" class="line df"/><circle cx="9" cy="0" r="4" class="dot ddf"/>
+    <text x="24" y="4" class="t">DFlash2 7</text>
+    <line x1="100" y1="0" x2="118" y2="0" class="line mtp"/><circle cx="109" cy="0" r="4" class="dot dmtp"/>
+    <text x="124" y="4" class="t">MTP 3</text>
+    <line x1="185" y1="0" x2="203" y2="0" class="base"/><circle cx="194" cy="0" r="4" class="dot dbase"/>
+    <text x="209" y="4" class="t">без спекуляции</text>
+    <text x="330" y="4" class="t2">генерация, т/с · 500 токенов после холодного предзаполнения · шкала общая</text>
+  </g>
+
+  <!-- RTX 5060 Ti -->
+  <g transform="translate(0,20)">
+    <text x="60" y="30" class="t" font-weight="600">RTX 5060 Ti</text>
+    <g class="grid">
+      <line x1="60" y1="250" x2="430" y2="250"/><line x1="60" y1="199.5" x2="430" y2="199.5"/>
+      <line x1="60" y1="149" x2="430" y2="149"/><line x1="60" y1="98.5" x2="430" y2="98.5"/>
+      <line x1="60" y1="48" x2="430" y2="48"/>
+    </g>
+    <g class="t2" text-anchor="end">
+      <text x="52" y="254">0</text><text x="52" y="203.5">50</text><text x="52" y="153">100</text>
+      <text x="52" y="102.5">150</text><text x="52" y="52">200</text>
+    </g>
+    <g class="t2" text-anchor="middle">
+      <text x="60" y="268">0</text><text x="129.2" y="268">50K</text><text x="198.5" y="268">100K</text>
+      <text x="267.7" y="268">150K</text><text x="336.9" y="268">200K</text><text x="406.2" y="268">250K</text>
+      <text x="245" y="286">токенов в промпте</text>
+    </g>
+    <polyline class="base" points="72.9,201.1 85.9,202.6 112.8,205.3 166.9,209.7 221.1,213.2 275.3,216.4 329.4,218.9"/>
+    <polyline class="line mtp" points="72.9,174.6 85.9,176.5 112.8,179.3 166.9,187.8 221.1,191.3 275.3,196.4 329.4,202.8 416.3,205.4"/>
+    <polyline class="line df" points="72.9,164.4 85.9,169.7 112.8,171.1 166.9,187.0 221.1,187.3 275.3,194.2 329.4,194.2"/>
+    <g class="dot dbase">
+      <circle cx="72.9" cy="201.1" r="3.5"/><circle cx="85.9" cy="202.6" r="3.5"/><circle cx="112.8" cy="205.3" r="3.5"/>
+      <circle cx="166.9" cy="209.7" r="3.5"/><circle cx="221.1" cy="213.2" r="3.5"/><circle cx="275.3" cy="216.4" r="3.5"/>
+      <circle cx="329.4" cy="218.9" r="3.5"/>
+    </g>
+    <g class="dot dmtp">
+      <circle cx="72.9" cy="174.6" r="4"/><circle cx="85.9" cy="176.5" r="4"/><circle cx="112.8" cy="179.3" r="4"/>
+      <circle cx="166.9" cy="187.8" r="4"/><circle cx="221.1" cy="191.3" r="4"/><circle cx="275.3" cy="196.4" r="4"/>
+      <circle cx="329.4" cy="202.8" r="4"/><circle cx="416.3" cy="205.4" r="4"/>
+    </g>
+    <g class="dot ddf">
+      <circle cx="72.9" cy="164.4" r="4"/><circle cx="85.9" cy="169.7" r="4"/><circle cx="112.8" cy="171.1" r="4"/>
+      <circle cx="166.9" cy="187.0" r="4"/><circle cx="221.1" cy="187.3" r="4"/><circle cx="275.3" cy="194.2" r="4"/>
+      <circle cx="329.4" cy="194.2" r="4"/>
+    </g>
+    <text x="72.9" y="154" class="t">84,8</text>
+    <text x="329" y="236" class="t2" text-anchor="end">дальше окно DFlash2 не влезает</text>
+    <text x="408" y="222" class="t" text-anchor="end">44,2</text>
+  </g>
+
+  <!-- RTX 4090 -->
+  <g transform="translate(480,20)">
+    <text x="60" y="30" class="t" font-weight="600">RTX 4090</text>
+    <g class="grid">
+      <line x1="60" y1="250" x2="430" y2="250"/><line x1="60" y1="199.5" x2="430" y2="199.5"/>
+      <line x1="60" y1="149" x2="430" y2="149"/><line x1="60" y1="98.5" x2="430" y2="98.5"/>
+      <line x1="60" y1="48" x2="430" y2="48"/>
+    </g>
+    <g class="t2" text-anchor="end">
+      <text x="52" y="254">0</text><text x="52" y="203.5">50</text><text x="52" y="153">100</text>
+      <text x="52" y="102.5">150</text><text x="52" y="52">200</text>
+    </g>
+    <g class="t2" text-anchor="middle">
+      <text x="60" y="268">0</text><text x="129.2" y="268">50K</text><text x="198.5" y="268">100K</text>
+      <text x="267.7" y="268">150K</text><text x="336.9" y="268">200K</text><text x="406.2" y="268">250K</text>
+      <text x="245" y="286">токенов в промпте</text>
+    </g>
+    <polyline class="base" points="72.9,154.9 85.9,157.6 112.8,164.6 166.9,173.3 221.1,180.3 275.3,186.2 329.4,191.1 416.3,197.5"/>
+    <polyline class="line mtp" points="72.9,99.2 85.9,98.3 112.8,114.8 166.9,127.2 221.1,138.2 275.3,149.5 329.4,152.8 416.3,164.9"/>
+    <polyline class="line df" points="72.9,89.8 85.9,97.3 112.8,114.7 166.9,105.5 221.1,126.4 275.3,143.9 329.4,150.5 416.3,151.5"/>
+    <g class="dot dbase">
+      <circle cx="72.9" cy="154.9" r="3.5"/><circle cx="85.9" cy="157.6" r="3.5"/><circle cx="112.8" cy="164.6" r="3.5"/>
+      <circle cx="166.9" cy="173.3" r="3.5"/><circle cx="221.1" cy="180.3" r="3.5"/><circle cx="275.3" cy="186.2" r="3.5"/>
+      <circle cx="329.4" cy="191.1" r="3.5"/><circle cx="416.3" cy="197.5" r="3.5"/>
+    </g>
+    <g class="dot dmtp">
+      <circle cx="72.9" cy="99.2" r="4"/><circle cx="85.9" cy="98.3" r="4"/><circle cx="112.8" cy="114.8" r="4"/>
+      <circle cx="166.9" cy="127.2" r="4"/><circle cx="221.1" cy="138.2" r="4"/><circle cx="275.3" cy="149.5" r="4"/>
+      <circle cx="329.4" cy="152.8" r="4"/><circle cx="416.3" cy="164.9" r="4"/>
+    </g>
+    <g class="dot ddf">
+      <circle cx="72.9" cy="89.8" r="4"/><circle cx="85.9" cy="97.3" r="4"/><circle cx="112.8" cy="114.7" r="4"/>
+      <circle cx="166.9" cy="105.5" r="4"/><circle cx="221.1" cy="126.4" r="4"/><circle cx="275.3" cy="143.9" r="4"/>
+      <circle cx="329.4" cy="150.5" r="4"/><circle cx="416.3" cy="151.5" r="4"/>
+    </g>
+    <text x="72.9" y="80" class="t">158,6</text>
+    <text x="424" y="148" class="t">97,5</text>
+    <text x="424" y="170" class="t">84,3</text>
+    <text x="424" y="201" class="t">52,0</text>
+  </g>
+</svg>

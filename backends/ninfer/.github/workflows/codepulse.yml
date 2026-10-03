@@ -1,0 +1,57 @@
+name: CodePulse Review
+
+# Triggers a CodePulse AI review on a pull request. Authentication is GitHub OIDC, so there is no
+# secret to configure here -- but two things must be set up once, outside this file, or the job
+# will warn and do nothing:
+#
+#   1. the CodePulse GitHub App installed on this repo or the org, and
+#   2. Settings -> Triggers -> "GitHub Action trigger" enabled in the CodePulse dashboard.
+#
+# This repository currently has no other CI: building it needs CUDA 12.8 and the tests need a real
+# sm_86 device, neither of which a GitHub-hosted runner has, so there is nothing here to gate on
+# yet. The job therefore runs as soon as the pull request event fires.
+#
+# When CI does arrive, gating the review on it is a one-line change: add the job names to `needs:`
+# below, e.g. `needs: [build, test]`. That is the whole point of driving the review from an action
+# rather than a webhook -- the review waits for the same jobs everything else waits for, using the
+# ordinary `needs:` mechanism.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Only the newest commit on a branch is worth reviewing; cancel a review queued for a commit that
+# has already been superseded.
+concurrency:
+  group: codepulse-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  codepulse:
+    name: Request review
+    # Cross-repository pull requests are excluded deliberately. GitHub does not grant
+    # `id-token: write` to a workflow running from another repository, so the action cannot mint
+    # the OIDC token and exits 1 -- a red check a contributor has no way to fix from inside their
+    # own PR. Those PRs are still reviewed through the App's normal webhook path.
+    #
+    # The test is head-repo-vs-base-repo, NOT `head.repo.fork`. The action's README suggests
+    # `!head.repo.fork`, but that flag means "the head repository is itself a fork" -- and this
+    # repository *is* a fork of Don-Chad/ninfer-3090. So `head.repo.fork` is true for every PR
+    # here including same-repo ones, and the job skipped every time. Comparing full names asks the
+    # question actually being asked: did this PR come from somewhere we control?
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      # The only permission the action needs: it requests a short-lived JWT (audience pinned to
+      # `codepulse`) and POSTs it with the PR number and head SHA. It reads no code and writes no
+      # contents from here; the review itself is posted by the GitHub App.
+      id-token: write
+    steps:
+      # Pinned to an immutable commit, not the mutable `v1` tag. This job holds `id-token: write`,
+      # so whatever this reference resolves to can mint an OIDC token in this repository's name --
+      # and a tag can be repointed at any commit by whoever owns the action. The SHA cannot.
+      #
+      # 4b874cb is what `v1` resolved to at the time of pinning (release v1.0.4). Updating is
+      # deliberate: check what the tag points at, read the diff, then bump both the SHA and the
+      # version in the trailing comment together.
+      - uses: codepulsehq/review-action@4b874cbef6665a3c74baa015962d5ab60bf6d082 # v1.0.4

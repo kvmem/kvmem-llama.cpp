@@ -1,0 +1,79 @@
+{
+  "schema": "ninfer.artifact-manifest",
+  "schema_version": 2,
+  "artifact": {
+    "filename": "qwen3_8_27b.ninfer",
+    "bytes": 20437521664,
+    "sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+    "container_version": 3,
+    "architecture": "Qwen3_5ForCausalLM",
+    "name": "qwen3.8-27b",
+    "components": [
+      "text",
+      "vision",
+      "mtp",
+      "dflash2"
+    ]
+  },
+  "source": {
+    "base": {
+      "repo_id": "Qwen/Qwen3.8-27B",
+      "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+      "download_source": "https://modelscope.cn/models/Qwen/Qwen3.8-27B",
+      "license": "Apache-2.0"
+    },
+    "dflash2": {
+      "repo_id": "z-lab/Qwen3.8-27B-DFlash2",
+      "revision": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+      "license": "Apache-2.0"
+    }
+  },
+  "conversion": {
+    "recipe_id": "qwen3_8_27b",
+    "converter_repository": "https://github.com/Neroued/ninfer",
+    "ranking_input": {
+      "path": "tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64",
+      "sha256": "c692dc76388132c910547589b4fb4a0503fbd6ad50aaac6a509bbcb192a8afa5"
+    }
+  },
+  "runtime": {
+    "repository": "https://github.com/Neroued/ninfer",
+    "minimum_revision": "98dada0e03cb073fd07f905400b5904bc6e82759",
+    "cuda_architecture": "sm_120a",
+    "dflash2_draft_tokens": {
+      "recommended": 7,
+      "minimum": 1,
+      "maximum": 15
+    }
+  },
+  "inventory": {
+    "objects": 1190,
+    "tensors": 1184,
+    "resources": 6,
+    "bindings": 1513,
+    "uses": 844,
+    "formats": {
+      "bf16": 627,
+      "fp32": 96,
+      "int32": 1,
+      "q4_g64_fp16": 183,
+      "q5_g64_fp16": 246,
+      "q6_g64_fp16": 1,
+      "q8_g32_fp16": 30
+    },
+    "layouts": {
+      "contiguous_le_v1": 724,
+      "row_split_k128_v1": 460
+    },
+    "encodings": {
+      "raw_bytes_v1": 6
+    },
+    "bytes": {
+      "tensor": 20424296864,
+      "resource": 12837937,
+      "object": 20437134801,
+      "payload_span": 20437148928,
+      "alignment": 14127
+    }
+  }
+}

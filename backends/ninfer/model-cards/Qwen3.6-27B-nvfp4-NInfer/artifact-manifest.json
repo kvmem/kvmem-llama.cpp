@@ -1,0 +1,74 @@
+{
+  "schema": "ninfer.artifact-manifest",
+  "schema_version": 2,
+  "artifact": {
+    "filename": "qwen3_6_27b_nvfp4.ninfer",
+    "bytes": 18324354820,
+    "sha256": "0448262d15df2ae4fda761540c110bc19e7c3b4f43c0938e4d50474429cda083",
+    "container_version": 3,
+    "architecture": "Qwen3_5ForCausalLM",
+    "name": "qwen3.6-27b",
+    "components": [
+      "text",
+      "vision",
+      "mtp"
+    ]
+  },
+  "source": {
+    "base": {
+      "repo_id": "Qwen/Qwen3.6-27B",
+      "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
+      "license": "Apache-2.0"
+    },
+    "nvfp4": {
+      "repo_id": "rdtand/Qwen3.6-27B-PrismaSCOUT-Blackwell-NVFP4-BF16-vllm",
+      "revision": "9b5389d4a1e207daab2d47732efea57d7e946dcf",
+      "license": "Apache-2.0"
+    }
+  },
+  "conversion": {
+    "recipe_id": "qwen3_6_27b_nvfp4",
+    "converter_repository": "https://github.com/Neroued/ninfer",
+    "ranking_input": {
+      "path": "tools/freq_corpus/fixtures/ranking/ranking.train.counts.i64",
+      "sha256": "c692dc76388132c910547589b4fb4a0503fbd6ad50aaac6a509bbcb192a8afa5"
+    }
+  },
+  "runtime": {
+    "repository": "https://github.com/Neroued/ninfer",
+    "minimum_revision": "98dada0e03cb073fd07f905400b5904bc6e82759",
+    "cuda_architecture": "sm_120a"
+  },
+  "inventory": {
+    "objects": 1545,
+    "tensors": 1539,
+    "resources": 6,
+    "bindings": 1422,
+    "uses": 785,
+    "formats": {
+      "bf16": 591,
+      "fp32": 581,
+      "int32": 1,
+      "nvfp4": 247,
+      "q4_g64_fp16": 55,
+      "q5_g64_fp16": 54,
+      "q6_g64_fp16": 1,
+      "q8_g32_fp16": 9
+    },
+    "layouts": {
+      "block_scale_k16_m128x4_v1": 247,
+      "contiguous_le_v1": 1173,
+      "row_split_k128_v1": 119
+    },
+    "encodings": {
+      "raw_bytes_v1": 6
+    },
+    "bytes": {
+      "tensor": 18310884112,
+      "resource": 12834216,
+      "object": 18323718328,
+      "payload_span": 18323916548,
+      "alignment": 198220
+    }
+  }
+}

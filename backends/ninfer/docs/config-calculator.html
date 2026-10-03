@@ -1,0 +1,989 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NInfer 3090 Fit Calculator</title>
+<!--
+  A committed, self-contained page: no network requests, no CDN, no web fonts, so it works from a
+  checkout with no connectivity. Every constant in DATA below is measured on this fork against an
+  RTX 3090; provenance for each is in the "How these numbers were taken" section at the foot of the
+  page. If you rerun the sweeps, update DATA and the method notes together.
+
+  Run `node docs/config-calculator.test.mjs` after touching the arithmetic below (page rounding,
+  speculative reservations, or decode interpolation/extrapolation): it extracts this script and
+  runs it against a stubbed DOM, so a change here that silently breaks the math is caught without
+  needing a browser.
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --ground:  #edf0f3;
+    --surface: #ffffff;
+    --sunken:  #e4e9ee;
+    --ink:     #121820;
+    --muted:   #5b6772;
+    --line:    #d2d9e0;
+    --accent:  #0e6e6e;
+    --accent-soft: #dcecec;
+    --ok:   #2e7d32;
+    --warn: #b26a00;
+    --over: #b3261e;
+    --seg-weights:   #3e4c59;
+    --seg-kv:        #0e6e6e;
+    --seg-overhead:  #7fa9a9;
+    --seg-workspace: #b9c4cc;
+    --seg-free:      #e4e9ee;
+    --mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", "SF Mono", Menlo, Consolas,
+            "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --ground:  #0f141a;
+      --surface: #161d25;
+      --sunken:  #1e262f;
+      --ink:     #e3e9ef;
+      --muted:   #93a0ad;
+      --line:    #28323c;
+      --accent:  #3fb6ac;
+      --accent-soft: #17322f;
+      --ok:   #6fcf7a;
+      --warn: #e0a340;
+      --over: #f2685c;
+      --seg-weights:   #5b6b7a;
+      --seg-kv:        #3fb6ac;
+      --seg-overhead:  #2f6f6a;
+      --seg-workspace: #46535f;
+      --seg-free:      #1e262f;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --ground:  #0f141a;
+    --surface: #161d25;
+    --sunken:  #1e262f;
+    --ink:     #e3e9ef;
+    --muted:   #93a0ad;
+    --line:    #28323c;
+    --accent:  #3fb6ac;
+    --accent-soft: #17322f;
+    --ok:   #6fcf7a;
+    --warn: #e0a340;
+    --over: #f2685c;
+    --seg-weights:   #5b6b7a;
+    --seg-kv:        #3fb6ac;
+    --seg-overhead:  #2f6f6a;
+    --seg-workspace: #46535f;
+    --seg-free:      #1e262f;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 72px; }
+
+  header { border-bottom: 2px solid var(--ink); padding-bottom: 18px; margin-bottom: 28px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 8px;
+  }
+  h1 {
+    font-family: var(--mono); font-weight: 600; font-size: clamp(24px, 4vw, 34px);
+    letter-spacing: -.02em; margin: 0 0 10px; text-wrap: balance;
+  }
+  .lede { margin: 0; max-width: 68ch; color: var(--muted); }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  h2 {
+    font-family: var(--mono); font-weight: 600; font-size: 15px; letter-spacing: -.01em;
+    margin: 0 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line);
+  }
+  h3 {
+    font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+  }
+
+  .grid { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); gap: 20px; }
+  @media (max-width: 900px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+
+  .panel {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 20px;
+  }
+
+  .fields { display: grid; gap: 16px; }
+  .field { display: grid; gap: 6px; }
+  .field > label {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--muted);
+  }
+  select, input[type="number"] {
+    font-family: var(--mono); font-size: 14px; color: var(--ink);
+    background: var(--sunken); border: 1px solid var(--line); border-radius: 4px;
+    padding: 8px 10px; width: 100%;
+  }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  select:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 1px;
+  }
+  .ctx-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+  .ctx-row input[type="number"] { width: 11ch; }
+  .hint { font-size: 12.5px; color: var(--muted); margin: 0; }
+
+  /* The one deliberately bold element: the card's memory budget, drawn to scale. */
+  .bar {
+    display: flex; height: 46px; border-radius: 4px; overflow: hidden;
+    border: 1px solid var(--line); background: var(--seg-free); margin: 0 0 10px;
+  }
+  .bar > span { display: block; min-width: 0; }
+  .seg-weights   { background: var(--seg-weights); }
+  .seg-kv        { background: var(--seg-kv); }
+  .seg-overhead  { background: var(--seg-overhead); }
+  .seg-workspace { background: var(--seg-workspace); }
+  .seg-spacer    { background: var(--seg-free); }
+  /* The OS reserve is drawn at the far end of the card, hatched, so that "free" on the bar means
+     free to you rather than free-minus-whatever-the-desktop-takes. */
+  .seg-reserve {
+    background: repeating-linear-gradient(-45deg, var(--line) 0 4px, transparent 4px 8px);
+  }
+  .bar-scale {
+    display: flex; justify-content: space-between; font-family: var(--mono);
+    font-size: 11px; color: var(--muted); margin-bottom: 18px;
+  }
+
+  .legend { display: grid; gap: 6px; margin: 0 0 18px; }
+  .legend-row {
+    display: grid; grid-template-columns: 12px 1fr auto auto; gap: 10px; align-items: center;
+    font-size: 13px;
+  }
+  /* Bordered so the palest segments (free, workspace) stay visible against the panel. */
+  .swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid var(--line); }
+  .legend-row .num, .legend-row .pct {
+    font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px;
+  }
+  .legend-row .pct { color: var(--muted); width: 5ch; text-align: right; }
+  .legend-row .num { width: 11ch; text-align: right; }
+
+  .verdict {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    padding: 12px 14px; border-radius: 4px; margin: 0 0 18px;
+    border-left: 4px solid var(--accent); background: var(--accent-soft);
+  }
+  .verdict.is-ok   { border-left-color: var(--ok); }
+  .verdict.is-warn { border-left-color: var(--warn); }
+  .verdict.is-over { border-left-color: var(--over); }
+  .verdict strong { font-family: var(--mono); font-size: 14px; }
+  .verdict span { font-size: 13.5px; color: var(--muted); }
+  .verdict.is-over span, .verdict.is-over strong { color: var(--over); }
+
+  .readouts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px;
+              background: var(--line); border: 1px solid var(--line); border-radius: 4px; }
+  @media (max-width: 560px) { .readouts { grid-template-columns: minmax(0, 1fr); } }
+  .readout { background: var(--surface); padding: 12px 14px; }
+  .readout dt {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 4px;
+  }
+  .readout dd {
+    margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums;
+    font-size: 19px; letter-spacing: -.02em;
+  }
+  .readout .sub { display: block; font-size: 11.5px; color: var(--muted); letter-spacing: 0; }
+
+  section { margin-top: 34px; }
+  .tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 4px;
+               background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { padding: 8px 12px; text-align: right; border-bottom: 1px solid var(--line);
+           white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  thead th {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--muted); background: var(--sunken); border-bottom: 1px solid var(--line);
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody td { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  tbody td:first-child { font-weight: 600; }
+  tr.is-current td { background: var(--accent-soft); }
+  .best { color: var(--ok); font-weight: 600; }
+  .bad  { color: var(--over); }
+  caption { caption-side: bottom; padding: 10px 12px; text-align: left; font-size: 12.5px;
+            color: var(--muted); }
+
+  .prose { max-width: 74ch; }
+  .prose p { margin: 0 0 12px; }
+  .prose code, .inline-code {
+    font-family: var(--mono); font-size: 12.5px; background: var(--sunken);
+    padding: 1px 5px; border-radius: 3px;
+  }
+  .prose ul { margin: 0 0 12px; padding-left: 20px; }
+  .prose li { margin-bottom: 6px; }
+  footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
+           font-size: 12.5px; color: var(--muted); }
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">NInfer-3090 &middot; RTX 3090 &middot; 24 GiB</p>
+  <h1>Fit Calculator</h1>
+  <p class="lede">
+    Pick a model, a KV format and a context length; this says whether it fits in 24 GiB, and what
+    it costs you in decode speed and perplexity. Every constant is <strong>measured on this
+    fork</strong>, not estimated from parameter counts &mdash; see the method notes at the foot.
+  </p>
+</header>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Configure</h2>
+    <div class="fields">
+      <div class="field">
+        <label for="model">Model</label>
+        <select id="model"></select>
+      </div>
+      <div class="field">
+        <label for="kv">KV cache format</label>
+        <select id="kv"></select>
+        <p class="hint" id="kv-hint"></p>
+      </div>
+      <div class="field">
+        <label for="ctx">Context (tokens)</label>
+        <div class="ctx-row">
+          <input type="range" id="ctx-range" min="2048" max="262144" step="2048">
+          <input type="number" id="ctx" min="256" max="1048576" step="256">
+        </div>
+        <p class="hint" id="ctx-hint"></p>
+      </div>
+      <div class="field">
+        <label for="spec">Speculation</label>
+        <select id="spec"></select>
+        <p class="hint" id="spec-hint"></p>
+      </div>
+      <div class="field">
+        <label for="reserve">Reserved for the OS</label>
+        <select id="reserve">
+          <option value="307">Headless Linux &mdash; 0.3 GiB</option>
+          <option value="1536" selected>Windows / Linux desktop &mdash; 1.5 GiB</option>
+          <option value="2560">Desktop with a browser open &mdash; 2.5 GiB</option>
+          <option value="0">Nothing &mdash; the whole 24 GiB</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Result</h2>
+    <div class="verdict" id="verdict">
+      <strong id="verdict-head"></strong>
+      <span id="verdict-detail"></span>
+    </div>
+
+    <h3>Memory budget</h3>
+    <div class="bar" id="bar">
+      <span class="seg-weights"   id="seg-weights"></span>
+      <span class="seg-kv"        id="seg-kv"></span>
+      <span class="seg-overhead"  id="seg-overhead"></span>
+      <span class="seg-workspace" id="seg-workspace"></span>
+      <span class="seg-spacer"    id="seg-spacer"></span>
+      <span class="seg-reserve"   id="seg-reserve"></span>
+    </div>
+    <div class="bar-scale"><span>0</span><span>12 GiB</span><span id="scale-max">24 GiB</span></div>
+
+    <div class="legend" id="legend"></div>
+
+    <dl class="readouts">
+      <div class="readout">
+        <dt>Largest context that fits</dt>
+        <dd id="out-maxctx">&mdash;<span class="sub" id="out-maxctx-sub"></span></dd>
+      </div>
+      <div class="readout">
+        <dt>Decode at this depth</dt>
+        <dd id="out-speed">&mdash;<span class="sub" id="out-speed-sub"></span></dd>
+      </div>
+      <div class="readout">
+        <dt>Perplexity cost</dt>
+        <dd id="out-ppl">&mdash;<span class="sub" id="out-ppl-sub"></span></dd>
+      </div>
+    </dl>
+  </div>
+</div>
+
+<section>
+  <h2>KV formats, measured</h2>
+  <div class="tablewrap">
+    <table id="kv-table">
+      <thead>
+        <tr>
+          <th>Format</th><th>Bytes / token</th><th>Largest context</th>
+          <th>Perplexity</th><th>vs bf16</th><th>Decode @ 32k</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+      <caption id="kv-caption"></caption>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>Decode speed against cache depth</h2>
+  <div class="tablewrap">
+    <table id="depth-table">
+      <thead><tr id="depth-head"></tr></thead>
+      <tbody></tbody>
+      <caption>
+        Decode tokens/second, no speculation. Attention re-reads the whole cache every step, so a
+        format's cost only appears at depth &mdash; measuring at a shallow cache would show almost
+        no difference between any of these. Each figure is the mean of three timed repetitions
+        after one warm-up.
+      </caption>
+    </table>
+  </div>
+</section>
+
+<section>
+  <h2>What speculation costs and buys</h2>
+  <div class="tablewrap">
+    <table id="spec-table">
+      <thead>
+        <tr><th>Model</th><th>Mode</th><th>Weights</th><th>Decode</th><th>Acceptance</th></tr>
+      </thead>
+      <tbody></tbody>
+      <caption>
+        Measured at an 8,192-token context with INT8 KV. Speculation is only worth its weight when
+        the draft is accepted often: on the 35B, MTP3 with the draft head accepts 59.4% and pays
+        back handsomely, while DFlash2 on the 27B accepts 10.8% and is a net loss against no
+        speculation at all.
+      </caption>
+    </table>
+  </div>
+</section>
+
+<section class="prose">
+  <h2>How these numbers were taken</h2>
+  <p>
+    All measurements are from one RTX 3090 (24 GiB, sm_86, CUDA 12.8) on this fork, with
+    <code>ninfer_bench</code> and <code>ninfer-perplexity</code>.
+  </p>
+  <ul>
+    <li>
+      <strong>Memory</strong> is read from the engine's own capacity report at load, not inferred.
+      Per-token cache cost is <code>kv_payload_bytes / max_context</code>, linear with no intercept
+      &mdash; but the cache itself is reserved in whole 64-token physical pages
+      (<code>src/core/paged_kv_cache.h</code>), so this page rounds a requested context up to its
+      page boundary before pricing the cache, and rounds a reported maximum context <em>down</em>
+      to one so it is never a page-partial figure the engine would round past. Two more things
+      about the capacity report are easy to get wrong, so both were checked
+      at four context lengths rather than assumed: the engine's <code>sequence</code> capacity
+      <em>contains</em> the KV payload rather than sitting beside it, so adding the two columns
+      double-counts the cache; and the remainder above the cache is
+      <span class="inline-code" id="overhead-note"></span>, a <em>fixed</em> block rather than a
+      per-token cost. Measuring it at a single context length would have made it look like roughly
+      4 KB per token on the 27B, which understates memory at short contexts and overstates it badly
+      at long ones. It is identical across all seven formats.
+    </li>
+    <li>
+      <strong>Perplexity</strong> is <code>ninfer-perplexity</code> on the fixed
+      <code>ninfer-ppl-1m-v1</code> corpus with <code>--quick</code>, context/stride 4096/2048,
+      261,167 scored tokens &mdash; the same corpus and window for all seven formats, so the
+      differences are comparable to each other. Absolute values are not comparable to perplexity
+      numbers from other tools. All seven are on <strong>Qwen3.8-27B</strong> (the rk4v4 figure is ratio-derived from a later session, not read directly): the ranking
+      is a property of how each format quantizes, so it carries across models, but the absolute
+      figures are the 27B's and are shown as such when another model is selected.
+    </li>
+    <li>
+      <strong>Decode speed</strong> is a <code>-pg P,128</code> run: prefill <em>P</em> tokens, then
+      time 128 decode steps on top of that cache. Prefill and decode are timed separately, so these
+      are decode-only rates at a genuine cache depth.
+    </li>
+  </ul>
+  <p>
+    <strong>The model is checked against the engine, not just against itself.</strong> Asking for a
+    262,144-token INT8 context on the 27B is refused with
+    <code>minimum Engine runtime reservation requires 9197389568 bytes in addition to 1073741824
+    bytes of automatic headroom</code>. Adding this page's own terms &mdash;
+    262,144&nbsp;&times;&nbsp;33,792 for the cache, 166,438,656 fixed, 16,384 for the per-token
+    remainder, 159,981,568 of workspace and 12,582,912 of graph allowance &mdash; gives
+    9,197,389,568. An exact match, so the arithmetic here is the arithmetic the engine actually
+    applies.
+  </p>
+  <p>
+    One difference worth knowing: <code>--kv-capacity auto</code> holds back a further 1 GiB of
+    sizing headroom on top of everything above. The largest context this page reports is what
+    physically fits; the largest the engine will <em>auto-size</em> to is whatever fits with that
+    extra gibibyte also spoken for. Ask for a context explicitly and you get the former.
+  </p>
+
+  <h3>What this does not model</h3>
+  <p>
+    Single-lane serving only. Concurrency changes the picture: <code>--kv-capacity</code> is a
+    shared pool while <code>--max-context</code> is a per-request cap, so a second lane does not
+    cost twice the memory unless you also want twice the per-request context. Vision in overlay
+    residency costs no resident capacity. Prefill throughput, time-to-first-token and multi-GPU
+    expert offload are all out of scope here &mdash; see <code>docs/performance.md</code>.
+  </p>
+  <p>
+    <strong>Speculative modes are now modelled per mode, and cross-checked against the engine.</strong>
+    Every term — resident weights, CUDA graph allowance, the fixed and per-token parts of the
+    non-KV sequence block, and the extra cache each backend reserves — is measured separately for
+    each speculation option by <code>scripts/sweeps/speculative-memory-terms.ps1</code>. Two
+    configurations are pinned against the engine's own refusal arithmetic: MTP3 with the draft head
+    on the 27B at a 262,144-token context agrees to 0.044%, and DFlash-3 on the 35B agrees
+    <em>exactly</em>. Before this, the page reused the 12 MiB no-speculation graph allowance and
+    added no extra cache for any mode, which understated that DFlash-3 case by 1,289 MiB.
+  </p>
+  <p>
+    The two backends behave differently and the page reflects that. MTP buffers extra draft tokens
+    in the KV format, so its cost is a multiplier — +6.30% per token on the 27B, +10.08% on the
+    35B — identical across storage formats. DFlash v1 instead reserves a fixed 4,096 bytes per
+    token regardless of format, which as a ratio would read as +38.8% on <code>int8</code> and
+    +71.1% on <code>nvfp4</code>. DFlash2 costs nothing per token and pays entirely in a graph
+    allowance that is itself context-dependent: 288 MiB up to 8,192 tokens and 384 MiB beyond,
+    against 12 MiB with speculation off.
+  </p>
+  <p>
+    <strong>Weight profile.</strong> Every model here is measured against the one
+    groupwise-int-quantized weight artifact its download script fetches. The runtime also accepts
+    other weight profiles for the same model family with different resident sizes (see
+    <code>src/runtime/engine/context_cost_defaults.cpp</code>); these figures do not apply to a
+    differently-quantized weight artifact.
+  </p>
+  <p>
+    Estimates between measured depths are interpolated, and anything past the deepest measured
+    point is extrapolated and marked as such. Both are done in seconds-per-token rather than
+    tokens-per-second, because step time is what grows linearly with cache depth; extrapolating the
+    rate directly would have it fall through zero a few hundred thousand tokens out. Treat an
+    extrapolated figure as the shape of the curve, not a promise.
+  </p>
+</section>
+
+<footer>
+  Generated from measurements in this repository. Regenerate the constants in this file's
+  <code>DATA</code> block if you rerun the sweeps.
+</footer>
+</div>
+
+<script>
+"use strict";
+
+/* Every number below is measured; see the method notes in the page body. Bytes are bytes. */
+const DATA = {
+  cardMiB: 24576,
+
+  models: {
+    "27b": {
+      /* Measured against the official groupwise-int artifact fetched by download-model qwen38-27b
+         (weights_id "groupwise-int"). The runtime also recognizes other weight profiles (see
+         src/runtime/engine/context_cost_defaults.cpp), with different resident weightsBytes;
+         these figures do not apply to a differently-quantized weight artifact of this model. */
+      label: "Qwen3.8-27B (dense, groupwise-int weights)",
+      weightsBytes: 17093490688,
+      workspaceBytes: 159981568,
+      nativeMaxContext: 262144,
+      /* Non-KV sequence state, = sequence capacity - KV payload. Measured at four context lengths:
+         it is a fixed block plus 1/16 byte per token, not a per-token cost. Solved exactly from
+         8k/16k/32k/64k, which reproduce all four measurements to the byte. */
+      /* KV payload bytes per token, = kv_payload_bytes / max_context. */
+      kv: { bf16: 65536, int8: 33792, fp8: 33024, rk8v4: 26112, rk4v4: 17920, k8v4: 25728, nvfp4: 18432 },
+      /* decode tok/s, no speculation, at these cache depths */
+      depths: [4096, 16384, 32768],
+      /* Mean of two independent runs each, September 2026. Two runs because this card is
+         power-capped at 315 W of a 350 W default and the SM clock drifts 1,665-1,755 MHz with
+         temperature: single 27B runs vary by up to 5%, far more than the within-run stddev
+         suggests. */
+      speed: {
+        bf16:  [36.58, 34.34, 31.93],
+        int8:  [35.31, 34.34, 33.63],
+        fp8:   [35.05, 33.09, 30.34],
+        rk8v4: [35.65, 34.73, 33.17],
+        /* rk4v4 was measured on a later build (2026-09-23), interleaved with rk8v4 twice: within
+           +-1% of rk8v4 at every depth against the card's thermal drift, so it carries rk8v4's row
+           rather than numbers from a build these columns do not describe. */
+        rk4v4: [35.65, 34.73, 33.17],
+        k8v4:  [34.22, 31.83, 28.90],
+        nvfp4: [35.37, 32.78, 29.86]
+      },
+      spec: {
+        none:          { label: "None",                weightsGiB: 15.92, decode: 34.41, accept: null, graphBytes: 12582912, seqFixedBytes: 166438656, seqPerToken: 0.0625, kvRatio: 1, kvExtraPerToken: 0 },
+        mtp3:          { label: "MTP, 3 draft tokens", weightsGiB: 16.34, decode: 39.90, accept: null, graphBytes: 90177536, seqFixedBytes: 175693056, seqPerToken: 0.125, kvRatio: 1.062988281, kvExtraPerToken: 0 },
+        "mtp3+head":   { label: "MTP3 + draft head",   weightsGiB: 16.67, decode: 42.33, accept: 0.302, graphBytes: 90177536, seqFixedBytes: 175693056, seqPerToken: 0.125, kvRatio: 1.062988281, kvExtraPerToken: 0 },
+        "dflash2-7":   { label: "DFlash2, 7 tokens",   weightsGiB: 17.99, decode: 27.57, accept: 0.108, graphBytes: [[8192, 301989888], [Infinity, 402653184]], seqFixedBytes: 279090432, seqPerToken: 0.0625, kvRatio: 1, kvExtraPerToken: 0 },
+        "dflash2-7+head": { label: "DFlash2-7 + draft head", weightsGiB: 18.33, decode: 28.33, accept: null, graphBytes: [[8192, 301989888], [Infinity, 402653184]], seqFixedBytes: 279090432, seqPerToken: 0.0625, kvRatio: 1, kvExtraPerToken: 0 }
+      }
+    },
+    "35b": {
+      /* Measured against the pinned 560f227e groupwise-int artifact fetched by
+         download-model.{sh,bat} qwen36-35b-a3b; see the note on the 27B entry above. */
+      label: "Qwen3.6-35B-A3B (MoE, groupwise-int weights)",
+      weightsBytes: 21038469632,
+      workspaceBytes: 109453312,
+      nativeMaxContext: 262144,
+      kv: { bf16: 20480, int8: 10560, fp8: 10320, rk8v4: 8160, rk4v4: 5600, k8v4: 8040, nvfp4: 5760 },
+      depths: [4096, 16384, 32768],
+      /* Mean of two independent runs each, September 2026; see the note on the 27B rows. On this
+         model rk8v4 is the fastest format at every depth measured, ahead of int8. */
+      speed: {
+        bf16:  [166.16, 156.00, 142.99],
+        int8:  [171.76, 165.02, 154.88],
+        fp8:   [166.01, 148.82, 132.00],
+        rk8v4: [175.15, 168.50, 158.47],
+        /* rk4v4: rk8v4's row scaled by their interleaved ratio on the 2026-09-23 build; see the
+           27B note. */
+        rk4v4: [174.76, 168.30, 157.70],
+        k8v4:  [165.66, 143.58, 122.78],
+        nvfp4: [169.04, 151.81, 131.75]
+      },
+      spec: {
+        none:          { label: "None",                weightsGiB: 19.59, decode: 178.00, accept: null, graphBytes: 12582912, seqFixedBytes: 70579968, seqPerToken: 0.0625, kvRatio: 1, kvExtraPerToken: 0 },
+        mtp3:          { label: "MTP, 3 draft tokens", weightsGiB: 20.43, decode: 214.37, accept: null, graphBytes: 90177536, seqFixedBytes: 76086528, seqPerToken: 0.125, kvRatio: 1.10078125, kvExtraPerToken: 0 },
+        "mtp3+head":   { label: "MTP3 + draft head",   weightsGiB: 20.56, decode: 256.03, accept: 0.594, graphBytes: 90177536, seqFixedBytes: 76086528, seqPerToken: 0.125, kvRatio: 1.10078125, kvExtraPerToken: 0 },
+        "dflash-3":    { label: "DFlash, 3 tokens",    weightsGiB: 19.98, decode: 173.73, accept: null, graphBytes: 167772160, seqFixedBytes: 193136896, seqPerToken: 0.125, kvRatio: 1, kvExtraPerToken: 4096 },
+        "dflash-3+head": { label: "DFlash-3 + draft head", weightsGiB: 20.11, decode: 196.65, accept: 0.379, graphBytes: 167772160, seqFixedBytes: 193136896, seqPerToken: 0.125, kvRatio: 1, kvExtraPerToken: 4096 }
+      }
+    }
+  },
+
+  /* Perplexity is model-independent in the sense that it was measured once, on the 27B, over the
+     same corpus and window for all seven formats. */
+  /* Re-measured September 2026. The fp8, k8v4 and nvfp4 figures published before that were
+     scored through a data race in the quantized attention kernels that corrupted every prefill
+     output column but the last; all three now reproduce bit-identically run to run. nvfp4 moved
+     -0.154% and fp8 -0.057%, against a 0.019% drift on the three formats the fix did not touch.
+     One consequence for anyone reading the table: fp8 now has *better* perplexity than rk8v4. */
+  perplexity: {
+    bf16:  4.342517,
+    int8:  4.342425,
+    fp8:   4.344724,
+    rk8v4: 4.346413,
+    /* Measured 4.352432 on 2026-09-23 in a session where int8 measured 4.343155; stated here
+       against this table's int8 anchor (+0.2136%) so the column stays one comparison. */
+    rk4v4: 4.351701,
+    k8v4:  4.347258,
+    nvfp4: 4.352201
+  },
+  kvLabels: {
+    bf16:  "bf16 — full precision reference",
+    int8:  "int8 — rotated INT8, group-64",
+    fp8:   "fp8 — row-scaled E4M3",
+    rk8v4: "rk8v4 — RotorQuant, INT8 keys + 4-bit values",
+    rk4v4: "rk4v4 — Lloyd-Max 4-bit keys + 4-bit values",
+    k8v4:  "k8v4 — INT8 keys + 4-bit values",
+    nvfp4: "nvfp4 — NVFP4 keys and values"
+  },
+  kvNotes: {
+    bf16:  "The reference. Twice the cache of int8 for a perplexity difference too small to " +
+           "measure, and slower at depth. Useful for comparison, rarely the right choice.",
+    int8:  "The quality default: +0.0009% perplexity is effectively free, and it holds its decode " +
+           "rate at depth better than anything except rk8v4.",
+    fp8:   "No longer dominated on all three axes: it now has *better* perplexity than rk8v4, by " +
+           "0.039%. That edge costs 26% more KV memory per token and 8.5% of decode speed at 32K " +
+           "depth -- a genuine trade, and a bad one for almost everyone, but a trade rather than " +
+           "a strict loss.",
+    rk8v4: "The best all-round choice. 23% smaller than int8, the flattest decode curve of any " +
+           "format measured, and +0.08% perplexity.",
+    rk4v4: "The context choice. 31% smaller than rk8v4 and within 3% of nvfp4, with better " +
+           "perplexity than nvfp4 (+0.21% against int8) and rk8v4's decode and prefill speed. " +
+           "Measured on a newer build than the other rows, so its speed and perplexity here are " +
+           "that session's ratios to rk8v4 and int8 applied to their rows, not a direct reading.",
+    k8v4:  "Within 1.5% of rk8v4's size but the worst decode falloff measured (-25% by 32k) and " +
+           "slightly worse quality. Prefer rk8v4.",
+    nvfp4: "Maximum context: 45% smaller than int8. You pay about 15% of decode speed at a 32k " +
+           "cache and +0.36% perplexity for it."
+  }
+};
+
+const GIB = 1024 * 1024 * 1024;
+const MIB = 1024 * 1024;
+const KV_ORDER = ["bf16", "int8", "fp8", "rk8v4", "rk4v4", "k8v4", "nvfp4"];
+/* The paged KV allocator reserves whole 64-token pages (src/core/paged_kv_cache.h,
+   kPagedKVPageSize), rounding a requested capacity up to the next page boundary
+   (layouts_impl.h's page_count). Charging KV bytes as pure ctx * bytes-per-token, as this page did
+   before, understates the actual reservation by up to one page's worth. */
+const PAGE_TOKENS = 64;
+const pageRoundUp = (tokens) => Math.ceil(tokens / PAGE_TOKENS) * PAGE_TOKENS;
+
+const $ = (id) => document.getElementById(id);
+const fmtGiB = (b) => (b / GIB).toFixed(2) + " GiB";
+const fmtInt = (n) => Math.round(n).toLocaleString("en-US");
+
+function modelOf() { return DATA.models[$("model").value]; }
+
+/* Per-token resident cost: the cache itself plus the non-KV sequence state that scales with it. */
+/* Per-token resident cost: the cache itself plus the non-KV sequence state that scales with it.
+   Both move with the speculation mode, and the two speculative backends move them differently --
+   which is why TODO.md section 2b's "one constant multiplier" only ever fit MTP.
+     MTP buffers extra draft tokens *in the KV format*, so its cost is multiplicative and identical
+   across formats: +6.2988% per token on the 27B, +10.078% on the 35B (both confirmed against a
+   second format, nvfp4, to within page rounding).
+     DFlash v1 instead reserves a fixed scratch region per token, measured at exactly 4,096 bytes
+   and independent of the format. Modelling that as a ratio is what made it look format-dependent:
+   4,096 bytes is +38.8% on int8's 10,560 but +71.1% on nvfp4's 5,760.
+     DFlash2 on the 27B costs nothing per token at all and pays entirely in its graph allowance. */
+function perToken(model, kv, specKey) {
+  const k = model.kv[kv];
+  if (k === null) return null;
+  const spec = model.spec[specKey === undefined ? "none" : specKey];
+  return k * spec.kvRatio + spec.kvExtraPerToken + spec.seqPerToken;
+}
+
+
+/* The CUDA graph allowance is per speculative backend, and for DFlash2 it is per context as well.
+   Measured with scripts/sweeps/speculative-memory-terms.ps1 at 8,192/16,384/32,768: DFlash2 asks
+   288 MiB at 8,192 and 384 MiB at both deeper points, so it is modelled as a step. Only three
+   contexts were measured, so treat a value between them as the higher of the two. */
+function graphBytes(spec, ctx) {
+  const g = spec.graphBytes;
+  if (typeof g === "number") return g;
+  for (const [limit, bytes] of g) if (ctx <= limit) return bytes;
+  return g[g.length - 1][1];
+}
+
+/* Everything resident that does not scale with context, for one speculation mode.
+   Every term here is measured per mode rather than borrowed from the no-speculation case, which
+   is what this page got wrong until 2026-09-09: it reused the 12 MiB graph allowance for all of
+   them and added no extra KV, understating MTP3 on the 27B by 149 MiB and the DFlash2 graph
+   allowance alone by 372 MiB. */
+function fixedBytes(model, specKey, ctx) {
+  const spec = model.spec[specKey];
+  const specExtra = (spec.weightsGiB - model.spec.none.weightsGiB) * GIB;
+  return model.weightsBytes + specExtra + model.workspaceBytes +
+         graphBytes(spec, ctx === undefined ? model.nativeMaxContext : ctx) +
+         spec.seqFixedBytes;
+}
+
+
+function usableBytes() {
+  return (DATA.cardMiB - Number($("reserve").value)) * MIB;
+}
+
+/* Interpolates in seconds-per-token, not tokens-per-second. Attention reads the whole cache each
+   step, so step time is roughly (fixed work + something proportional to depth) and its reciprocal
+   is what bends. Working in the linear quantity keeps extrapolation physically sane: a straight
+   line through the rate would cross zero and then go negative a few hundred thousand tokens out,
+   whereas a straight line through the step time only ever approaches zero rate asymptotically. */
+function decodeAtDepth(model, kv, ctx) {
+  const series = model.speed[kv];
+  if (!series) return null;
+  const d = model.depths;
+  const cost = series.map((r) => 1 / r);
+  const at = (c) => (c <= 0 ? null : 1 / c);
+
+  if (ctx <= d[0]) {
+    /* No measurement exists below the shallowest depth. Holding the shallowest rate is a
+       lower-bound estimate, not interpolation: decode is typically faster at shallower depth, so
+       this reads conservatively slow rather than wrong in the optimistic direction. */
+    return { value: series[0], exact: ctx === d[0], extrapolated: false, floored: ctx !== d[0] };
+  }
+  for (let i = 1; i < d.length; i++) {
+    if (ctx <= d[i]) {
+      const t = (ctx - d[i - 1]) / (d[i] - d[i - 1]);
+      return { value: at(cost[i - 1] + t * (cost[i] - cost[i - 1])),
+               exact: ctx === d[i], extrapolated: false };
+    }
+  }
+  const n = d.length - 1;
+  const slope = (cost[n] - cost[n - 1]) / (d[n] - d[n - 1]);
+  return { value: at(cost[n] + slope * (ctx - d[n])), exact: false, extrapolated: true };
+}
+
+function render() {
+  const model = modelOf();
+  const kv = $("kv").value;
+  const specKey = $("spec").value;
+  const ctx = Math.max(256, Number($("ctx").value) || 0);
+
+  const pt = perToken(model, kv, specKey);
+  const fixed = fixedBytes(model, specKey, ctx);
+  const usable = usableBytes();
+
+  const haveKv = pt !== null;
+  /* KV is reserved by the physical page the requested context rounds up to, not by the exact
+     token count -- see the PAGE_TOKENS note above. */
+  const specMode = model.spec[specKey];
+  const kvBytes = haveKv
+    ? (model.kv[kv] * specMode.kvRatio + specMode.kvExtraPerToken) * pageRoundUp(ctx) : 0;
+  const ovhBytes = haveKv ? specMode.seqFixedBytes + specMode.seqPerToken * ctx : 0;
+  const specExtra = (specMode.weightsGiB - model.spec.none.weightsGiB) * GIB;
+  const weightsBytes = model.weightsBytes + specExtra;
+  const wsBytes = model.workspaceBytes + graphBytes(specMode, ctx);
+  const total = weightsBytes + kvBytes + ovhBytes + wsBytes;
+
+  /* Bar is drawn against the full card so the OS reserve is visible as unclaimed space. */
+  const card = DATA.cardMiB * MIB;
+  const pctOf = (b) => Math.max(0, Math.min(100, (b / card) * 100));
+  const reserveBytes = Number($("reserve").value) * MIB;
+  const freeBytes = Math.max(0, usable - total);
+  $("seg-weights").style.width   = pctOf(weightsBytes) + "%";
+  $("seg-kv").style.width        = pctOf(kvBytes) + "%";
+  $("seg-overhead").style.width  = pctOf(ovhBytes) + "%";
+  $("seg-workspace").style.width = pctOf(wsBytes) + "%";
+  $("seg-spacer").style.width    = pctOf(freeBytes) + "%";
+  $("seg-reserve").style.width   = pctOf(reserveBytes) + "%";
+
+  const rows = [
+    ["--seg-weights", "Weights" + (specExtra > 0 ? " + speculation heads" : ""), weightsBytes, true],
+    ["--seg-kv", "KV cache (" + kv + ")", kvBytes, true],
+    ["--seg-overhead", "Sequence state (fixed)", ovhBytes, true],
+    ["--seg-workspace", "Workspace + CUDA graphs", wsBytes, true],
+    ["--seg-free", "Free for more context", freeBytes, true],
+    ["--line", "Reserved for the OS", reserveBytes, false]
+  ];
+  $("legend").innerHTML = rows.map(([v, name, b, solid]) =>
+    '<div class="legend-row"><span class="swatch" style="' +
+      (solid ? "background:var(" + v + ")"
+             : "background:repeating-linear-gradient(-45deg,var(--line) 0 3px,transparent 3px 6px)") +
+    '"></span>' +
+    "<span>" + name + '</span><span class="num">' + fmtGiB(b) + '</span>' +
+    '<span class="pct">' + ((b / card) * 100).toFixed(0) + "%</span></div>").join("");
+
+  /* Verdict */
+  const verdict = $("verdict");
+  const headroom = usable - total;
+  verdict.classList.remove("is-ok", "is-warn", "is-over");
+  if (!haveKv) {
+    verdict.classList.add("is-warn");
+    $("verdict-head").textContent = "Not measured";
+    $("verdict-detail").textContent =
+      "This model/format pair has no measured figures in this file yet.";
+  } else if (headroom < 0) {
+    verdict.classList.add("is-over");
+    $("verdict-head").textContent = "Does not fit";
+    $("verdict-detail").textContent =
+      "Over budget by " + fmtGiB(-headroom) + ". " + fmtGiB(total) + " needed, " +
+      fmtGiB(usable) + " available.";
+  } else if (headroom < 0.5 * GIB) {
+    verdict.classList.add("is-warn");
+    $("verdict-head").textContent = "Tight";
+    $("verdict-detail").textContent =
+      "Fits with " + fmtGiB(headroom) + " to spare — little room for fragmentation.";
+  } else {
+    verdict.classList.add("is-ok");
+    $("verdict-head").textContent = "Fits";
+    $("verdict-detail").textContent =
+      fmtGiB(total) + " of " + fmtGiB(usable) + ", leaving " + fmtGiB(headroom) + ".";
+  }
+
+  /* Largest context that fits, at a page boundary. Within one physical page p (tokens
+     64(p-1)+1..64p) the KV reservation is fixed at kv-per-token * 64p, so the hardest token count
+     to fit in that page is its last one, c=64p, costing 64p*pt total (kv and per-token overhead
+     both scale with c there). The largest fully-fitting page is p = floor(room / (64*pt)); the
+     max context is that page's own boundary, which is therefore exact and always achievable --
+     never a page-partial value the engine would round up past what was checked.
+
+     `fixed` was measured at the *displayed* ctx, but graphBytes() is a step function of context
+     (DFlash2 asks for more at deeper contexts -- see graphBytes' comment), so a solved maxCtx that
+     crosses a step the displayed ctx didn't reach would be solved against the wrong (smaller)
+     graph allowance and come back too large. Re-solve against fixedBytes at the candidate maxCtx
+     instead, and repeat until it stops moving; graphBytes only steps up with depth and a bigger
+     graph allowance only ever shrinks maxCtx, so this converges in at most as many iterations as
+     there are steps in graphBytes' table (in practice 1-2), and the loop is still capped so a
+     surprising future step table cannot hang the page. */
+  if (haveKv) {
+    let solveFixed = fixed;
+    let maxCtx = 0;
+    for (let i = 0; i < 8; i++) {
+      const room = usable - solveFixed;
+      const candidate = Math.max(0, PAGE_TOKENS * Math.floor(room / (PAGE_TOKENS * pt)));
+      const candidateFixed = fixedBytes(model, specKey, candidate);
+      if (candidate === maxCtx && candidateFixed === solveFixed) { maxCtx = candidate; break; }
+      maxCtx = candidate;
+      solveFixed = candidateFixed;
+    }
+    const capped = Math.min(maxCtx, model.nativeMaxContext);
+    $("out-maxctx").firstChild.nodeValue = fmtInt(capped);
+    $("out-maxctx-sub").textContent = maxCtx > model.nativeMaxContext
+      ? "capped at the model's " + fmtInt(model.nativeMaxContext) + " limit"
+      : "tokens at " + fmtInt(Math.round(pt)) + " B/token";
+  } else {
+    $("out-maxctx").firstChild.nodeValue = "—";
+    $("out-maxctx-sub").textContent = "";
+  }
+
+  /* Decode */
+  const dec = decodeAtDepth(model, kv, ctx);
+  const spec = model.spec[specKey];
+  if (dec) {
+    /* Speculation ratios are measured with INT8 KV; applying that ratio to another format assumes
+       the ratio carries, which is why it is labelled as scaled rather than measured. */
+    const ratio = spec.decode / model.spec.none.decode;
+    const value = dec.value * ratio;
+    $("out-speed").firstChild.nodeValue = value.toFixed(1);
+    const bits = ["tok/s"];
+    if (dec.extrapolated) bits.push("extrapolated past " + fmtInt(model.depths[model.depths.length - 1]));
+    else if (dec.floored) bits.push("lower bound — held at the " + fmtInt(model.depths[0]) + "-token measurement");
+    else if (!dec.exact) bits.push("interpolated");
+    else bits.push("measured");
+    if (specKey !== "none") bits.push("speculation scaled from INT8");
+    $("out-speed-sub").textContent = bits.join(" · ");
+  } else {
+    $("out-speed").firstChild.nodeValue = "—";
+    $("out-speed-sub").textContent = "no measured series for " + kv;
+  }
+
+  /* Perplexity */
+  const ppl = DATA.perplexity[kv];
+  const base = DATA.perplexity.bf16;
+  const delta = ((ppl - base) / base) * 100;
+  $("out-ppl").firstChild.nodeValue = delta === 0 ? "baseline" : "+" + delta.toFixed(4) + "%";
+  /* Perplexity was measured once, on the 27B, across all seven formats. Say so rather than let the
+     figure read as a property of whichever model is selected. */
+  $("out-ppl-sub").textContent = ppl.toFixed(6) + " vs bf16 " + base.toFixed(6) +
+    ($("model").value === "27b" ? "" : " · measured on the 27B");
+
+  /* Per mode: MTP and DFlash both raise the fixed block and double the per-token term, so
+     showing the no-speculation numbers here would contradict the memory bar above. */
+  $("overhead-note").textContent =
+    (specMode.seqFixedBytes / MIB).toFixed(1) + " MiB fixed + " +
+    (specMode.seqPerToken === 0.0625 ? "1/16" : "1/8") + " B per token";
+  $("kv-hint").textContent = DATA.kvNotes[kv];
+  $("spec-hint").textContent = (spec.accept !== null
+    ? "Measured draft acceptance " + (spec.accept * 100).toFixed(1) + "% on this model. "
+    : "Weights " + spec.weightsGiB.toFixed(2) + " GiB at an 8k context. ") +
+    (specKey !== "none"
+      ? "Startup memory above already includes this mode's own extra resident weights, CUDA " +
+        "graph allowance and any extra KV pages -- each measured against the engine's own " +
+        "reported terms rather than borrowed from the no-speculation figure. See TODO.md §1.3."
+      : "");
+  $("ctx-hint").textContent = haveKv
+    ? fmtGiB(kvBytes + ovhBytes) + " of sequence memory at " + fmtInt(ctx) + " tokens."
+    : "";
+
+  buildKvTable();
+  markCurrentRows(kv);
+}
+
+function buildKvTable() {
+  const model = modelOf();
+  const body = $("kv-table").querySelector("tbody");
+  const base = DATA.perplexity.bf16;
+  /* Against the real card and the chosen OS reserve rather than an arbitrary fixed budget: on the
+     35B a 6 GiB budget put every format at the 262,144 cap, so the column distinguished nothing.
+     fixedBytes already accounts for the fixed sequence block, so what is left is the cache. */
+  const specKeyForTable = $("spec").value;
+  const budget = usableBytes() - fixedBytes(model, specKeyForTable, model.nativeMaxContext);
+
+  const deepest = model.depths[model.depths.length - 1];
+  const rows = KV_ORDER.map((kv) => {
+    const b = model.kv[kv];
+    const ppl = DATA.perplexity[kv];
+    const series = model.speed[kv];
+    const deep = series ? series[series.length - 1] : null;
+    if (b === null) return { kv, b, ppl, deep, ctx: null, capped: false };
+    // Page-aligned, same reasoning as render()'s "Largest context that fits": see the PAGE_TOKENS
+    // note near the top of this script.
+    const ptTable = perToken(model, kv, specKeyForTable);
+    const raw = PAGE_TOKENS * Math.floor(budget / (PAGE_TOKENS * ptTable));
+    /* Report what is actually reachable: past the model's own context limit the extra budget
+       buys nothing, and showing the uncapped figure would promise context that cannot be had. */
+    return { kv, b, ppl, deep, ctx: Math.min(raw, model.nativeMaxContext),
+             capped: raw > model.nativeMaxContext };
+  });
+  const bestCtx = Math.max(...rows.map((r) => r.ctx || 0));
+  const bestSpeed = Math.max(...rows.map((r) => r.deep || 0));
+
+  body.innerHTML = rows.map((r) => {
+    const delta = ((r.ppl - base) / base) * 100;
+    return '<tr data-kv="' + r.kv + '">' +
+      "<td>" + r.kv + "</td>" +
+      "<td>" + (r.b === null ? "—" : fmtInt(r.b)) + "</td>" +
+      '<td class="' + (r.ctx === bestCtx ? "best" : "") + '">' +
+        (r.ctx === null ? "—" : fmtInt(r.ctx) + (r.capped ? " (max)" : "")) + "</td>" +
+      "<td>" + r.ppl.toFixed(6) + "</td>" +
+      "<td>" + (delta === 0 ? "—" : "+" + delta.toFixed(4) + "%") + "</td>" +
+      '<td class="' + (r.deep && r.deep === bestSpeed ? "best" : "") + '">' +
+        (r.deep === null ? "—" : r.deep.toFixed(2)) + "</td>" +
+      "</tr>";
+  }).join("");
+
+  $("kv-caption").textContent =
+    "Largest context is what fits on the " + model.label +
+    " at the currently selected OS reserve and speculation mode, after the fixed " +
+    (model.spec[specKeyForTable].seqFixedBytes / MIB).toFixed(1) +
+    " MiB of non-KV sequence state. Decode is at a " + fmtInt(deepest) +
+    "-token cache depth, no speculation. Perplexity was measured on the Qwen3.8-27B.";
+}
+
+function markCurrentRows(kv) {
+  document.querySelectorAll("#kv-table tbody tr").forEach((tr) => {
+    tr.classList.toggle("is-current", tr.dataset.kv === kv);
+  });
+}
+
+function buildDepthTable() {
+  const model = modelOf();
+  $("depth-head").innerHTML = "<th>Format</th>" +
+    model.depths.map((d) => "<th>" + fmtInt(d) + " tokens</th>").join("") +
+    "<th>Change</th>";
+  $("depth-table").querySelector("tbody").innerHTML = KV_ORDER.map((kv) => {
+    const s = model.speed[kv];
+    if (!s) return "<tr><td>" + kv + "</td>" +
+      model.depths.map(() => "<td>—</td>").join("") + "<td>—</td></tr>";
+    const drop = ((s[s.length - 1] - s[0]) / s[0]) * 100;
+    return "<tr><td>" + kv + "</td>" +
+      s.map((v) => "<td>" + v.toFixed(2) + "</td>").join("") +
+      '<td class="' + (drop < -10 ? "bad" : "") + '">' + drop.toFixed(1) + "%</td></tr>";
+  }).join("");
+}
+
+function buildSpecTable() {
+  const body = $("spec-table").querySelector("tbody");
+  const out = [];
+  for (const key of Object.keys(DATA.models)) {
+    const m = DATA.models[key];
+    const baseDecode = m.spec.none.decode;
+    for (const sk of Object.keys(m.spec)) {
+      const s = m.spec[sk];
+      const rel = ((s.decode - baseDecode) / baseDecode) * 100;
+      out.push("<tr><td>" + m.label + "</td><td>" + s.label + "</td>" +
+        "<td>" + s.weightsGiB.toFixed(2) + " GiB</td>" +
+        '<td class="' + (rel < 0 ? "bad" : rel > 20 ? "best" : "") + '">' +
+          s.decode.toFixed(2) + (sk === "none" ? "" : " (" + (rel > 0 ? "+" : "") +
+          rel.toFixed(0) + "%)") + "</td>" +
+        "<td>" + (s.accept === null ? "—" : (s.accept * 100).toFixed(1) + "%") + "</td></tr>");
+    }
+  }
+  body.innerHTML = out.join("");
+}
+
+function buildControls() {
+  $("model").innerHTML = Object.keys(DATA.models)
+    .map((k) => '<option value="' + k + '">' + DATA.models[k].label + "</option>").join("");
+  $("kv").innerHTML = KV_ORDER
+    .map((k) => '<option value="' + k + '">' + DATA.kvLabels[k] + "</option>").join("");
+  $("kv").value = "int8";
+  refreshSpecOptions();
+  $("scale-max").textContent = (DATA.cardMiB / 1024).toFixed(0) + " GiB";
+}
+
+function refreshSpecOptions() {
+  const model = modelOf();
+  const previous = $("spec").value;
+  $("spec").innerHTML = Object.keys(model.spec)
+    .map((k) => '<option value="' + k + '">' + model.spec[k].label + "</option>").join("");
+  $("spec").value = model.spec[previous] ? previous : "none";
+}
+
+function syncCtx(source) {
+  const v = Number(source.value);
+  if (source.id === "ctx-range") $("ctx").value = v;
+  else $("ctx-range").value = Math.min(Number($("ctx-range").max), Math.max(Number($("ctx-range").min), v));
+  render();
+}
+
+buildControls();
+$("ctx").value = 32768;
+$("ctx-range").value = 32768;
+buildDepthTable();
+buildSpecTable();
+render();
+
+$("model").addEventListener("change", () => { refreshSpecOptions(); buildDepthTable(); render(); });
+$("kv").addEventListener("change", render);
+$("spec").addEventListener("change", render);
+$("reserve").addEventListener("change", render);
+$("ctx").addEventListener("input", (e) => syncCtx(e.target));
+$("ctx-range").addEventListener("input", (e) => syncCtx(e.target));
+</script>
