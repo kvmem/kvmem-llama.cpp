@@ -330,6 +330,20 @@ if (KVMEM_BUILD_LLAMA)
         set_tests_properties(kvmem-mtp-kv-test PROPERTIES SKIP_RETURN_CODE 77)
     endif()
 
+    # Run manually with a GGUF path; no model is downloaded by CTest.
+    # Skips (exit 77) unless KVMEM_TEST_MODEL points at a model the adapter accepts.
+    # Guards the recurrent-checkpoint behaviour that keeps prefix reuse working when
+    # a client rewrites the trailing user message every turn (agent-style nudges).
+    if (Python3_Interpreter_FOUND)
+        add_test(NAME kvmem-prefix-reuse-regression
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/prefix-reuse-regression.py
+                    --exe $<TARGET_FILE:llama-kvmem-server>
+                    --model $ENV{KVMEM_TEST_MODEL}
+                    --out ${CMAKE_CURRENT_BINARY_DIR}/prefix-reuse-regression
+                    --gpu $ENV{KVMEM_TEST_GPU})
+        set_tests_properties(kvmem-prefix-reuse-regression PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+    endif()
+
     add_executable(kvmem-gdn-replay-test tests/gdn-replay-test.cpp)
     target_link_libraries(kvmem-gdn-replay-test PRIVATE ggml)
     add_test(NAME kvmem-gdn-replay-test COMMAND kvmem-gdn-replay-test)
