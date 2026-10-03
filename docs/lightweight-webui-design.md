@@ -156,7 +156,7 @@
 ## 源码依据
 
 - `tools/llama-kvmem-server.cpp`：当前路由、请求解析、互斥锁、SSE、断线检查与生成计时。
-- `tools/kvmem-multimodal-server.h`：前缀/检查点复用、缓存未命中重建与回滚。
+- `tools/llama-kvmem-driver.cpp`：前缀/检查点复用、缓存未命中重建与回滚。
 - `llama.cpp/tools/ui/src/lib/services/props.service.ts`、`models.service.ts`：页面初始化信息。
 - `llama.cpp/tools/ui/src/lib/services/chat.service.ts`：参数映射、SSE、控制/续流等上游依赖。
 - `llama.cpp/tools/ui/src/lib/constants/reasoning-effort.constants.ts`：上游 effort 到 token 预算的映射。

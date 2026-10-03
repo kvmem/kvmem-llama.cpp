@@ -119,6 +119,8 @@ std::vector<uint32_t> KvMemRuntime::preview_reselect(const std::vector<uint32_t>
 }
 
 KvMemPlan KvMemRuntime::prepare_selection(const std::vector<uint32_t> & selected, bool force_raw_refresh) {
+    if (pending_) throw std::logic_error("cannot replace a pending residency plan");
+    native_plan_.reset();
     last_plan_ = store_.set_selection(selected, force_raw_refresh);
     pending_ = true;
     start_prefetch();
@@ -127,6 +129,7 @@ KvMemPlan KvMemRuntime::prepare_selection(const std::vector<uint32_t> & selected
 
 bool KvMemRuntime::commit_resident_selection(const std::vector<uint32_t> & selected) {
     if (pending_ || !store_.commit_resident_selection(selected)) return false;
+    native_plan_.reset();
     last_plan_ = {};
     for (uint32_t id : selected) last_plan_.total_window_tokens += store_.blocks()[id].n_tokens;
     return true;
@@ -134,11 +137,34 @@ bool KvMemRuntime::commit_resident_selection(const std::vector<uint32_t> & selec
 
 KvMemPlan KvMemRuntime::prepare_prefill_pressure(
         const std::vector<uint32_t> &mandatory) {
-    last_plan_ = store_.set_selection(
-        store_.pick_prefill_pressure_blocks(mandatory));
+    return prepare_selection(store_.pick_prefill_pressure_blocks(mandatory));
+}
+
+NativeResidencyPlan KvMemRuntime::prepare_native_selection(const std::vector<uint32_t> & selected) {
+    if (pending_) throw std::logic_error("cannot replace a pending residency plan");
+    auto plan = store_.plan_native_selection(selected);
+    // Allocate the return copy before installing pending state.
+    native_plan_ = plan;
+    last_plan_ = {};
+    try {
+        start_prefetch();
+    } catch (...) {
+        const auto error = std::current_exception();
+        try { wait_prefetch(); } catch (...) {}
+        prefetch_buf_.clear();
+        native_plan_.reset();
+        std::rethrow_exception(error);
+    }
     pending_ = true;
-    start_prefetch();
-    return last_plan_;
+    return plan;
+}
+
+bool KvMemRuntime::maybe_offload_native_during_prefill(uint32_t incoming_tokens,
+        uint32_t resident_tokens, uint32_t pool_tokens,
+        const std::vector<uint32_t> & mandatory) {
+    if (!store_.prefill_needs_offload(resident_tokens, incoming_tokens, pool_tokens)) return false;
+    prepare_native_selection(store_.pick_prefill_pressure_blocks(mandatory));
+    return true;
 }
 
 bool KvMemRuntime::maybe_offload_during_prefill(
@@ -159,7 +185,7 @@ void KvMemRuntime::start_prefetch() {
     if (!nvme_tier_ || !nvme_tier_->enabled() || slot_bytes_ == 0) {
         return;
     }
-    for (uint32_t id : last_plan_.stage_in) {
+    for (uint32_t id : stage_in_blocks()) {
         if (id >= store_.block_count()) {
             continue;
         }
@@ -228,7 +254,7 @@ void KvMemRuntime::spill_outgoing() {
     }
     wait_prefetch();
     pending_gpu_frees_.clear();
-    for (uint32_t id : last_plan_.stage_out) {
+    for (uint32_t id : stage_out_blocks()) {
         stage_out(id);
     }
 }
@@ -241,9 +267,11 @@ void KvMemRuntime::admit_incoming() {
         backend_->free_gpu_slot(slot);
     }
     pending_gpu_frees_.clear();
-    for (uint32_t id : last_plan_.stage_in) {
+    for (uint32_t id : stage_in_blocks()) {
         stage_in(id);
     }
+    if (native_plan_ && !store_.commit_resident_selection(native_plan_->selected))
+        throw std::runtime_error("native slot admission did not produce the selected residency");
     prefetch_buf_.clear();
     pending_ = false;
 }
@@ -311,23 +339,32 @@ void KvMemRuntime::stage_in(uint32_t block_id) {
         return;
     }
     const int32_t gpu = backend_->alloc_gpu_slot();
+    if (native_plan_ && gpu < 0)
+        throw std::runtime_error("no GPU slot for native admission");
     const uint8_t *src = nullptr;
     bool from_nvme = false;
-    auto pit = prefetch_buf_.find(block_id);
-    if (pit != prefetch_buf_.end() && pit->second) {
-        src = pit->second->data();
-        from_nvme = true;
-    } else if (b.cpu_slot >= 0) {
-        src = cpu_ptr(b.cpu_slot);
-    } else if (nvme_tier_ && nvme_tier_->enabled() &&
-               (b.nvme_slot >= 0 || b.tier == KvTier::SSD) &&
-               slot_bytes_ > 0 && !scratch_.empty()) {
-        nvme_tier_->read_block(block_id, scratch_.data(), slot_bytes_);
-        src = scratch_.data();
-        from_nvme = true;
-    }
-    if (src && gpu >= 0 && slot_bytes_ > 0) {
-        backend_->copy_block_from_host(block_id, gpu, src, slot_bytes_);
+    try {
+        auto pit = prefetch_buf_.find(block_id);
+        if (pit != prefetch_buf_.end() && pit->second) {
+            src = pit->second->data();
+            from_nvme = true;
+        } else if (b.cpu_slot >= 0) {
+            src = cpu_ptr(b.cpu_slot);
+        } else if (nvme_tier_ && nvme_tier_->enabled() &&
+                   (b.nvme_slot >= 0 || b.tier == KvTier::SSD) &&
+                   slot_bytes_ > 0 && !scratch_.empty()) {
+            nvme_tier_->read_block(block_id, scratch_.data(), slot_bytes_);
+            src = scratch_.data();
+            from_nvme = true;
+        }
+        if (src && gpu >= 0 && slot_bytes_ > 0) {
+            backend_->copy_block_from_host(block_id, gpu, src, slot_bytes_);
+        }
+    } catch (...) {
+        // The source copy still owns these bytes. Return only the unused
+        // destination; no block metadata has been changed yet.
+        if (gpu >= 0) backend_->free_gpu_slot(gpu);
+        throw;
     }
     if (cpu_tier_ && b.cpu_slot >= 0) {
         cpu_tier_->release_block(block_id);

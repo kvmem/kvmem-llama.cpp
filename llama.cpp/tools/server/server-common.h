@@ -325,6 +325,9 @@ struct server_chat_params {
 json oaicompat_completion_params_parse(const json & body);
 
 // used by /chat/completions endpoint
+void oaicompat_chat_process_media(json & body, const server_chat_params & opt,
+                                 std::vector<raw_buffer> & out_files);
+
 json oaicompat_chat_params_parse(
     json & body, /* openai api json semantics */
     const server_chat_params & opt,

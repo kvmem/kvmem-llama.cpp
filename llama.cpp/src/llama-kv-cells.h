@@ -18,6 +18,7 @@ struct llama_kv_cell_ext {
     // when tok = LLAMA_TOKEN_NULL when the cell is produced by embedding input (i.e. multimodal)
     // use case: n-gram embeddings hash
     llama_token tok = LLAMA_TOKEN_NULL;
+    llama_pos logical_pos = -1;
 
     // return true if the current 2D spatial position is greater than other
     bool is_2d_gt(llama_pos ox, llama_pos oy) const {

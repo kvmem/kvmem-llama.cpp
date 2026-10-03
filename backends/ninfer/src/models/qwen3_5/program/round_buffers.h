@@ -40,6 +40,7 @@ struct RoundStateSpec {
 struct OrdinaryDecodeIngress {
     std::array<TokenId, kMaximumConcurrency> tokens{};
     std::array<std::int32_t, kMaximumConcurrency> cache_positions{};
+    std::array<std::int32_t, kMaximumConcurrency> logical_frontiers{};
     std::array<std::int32_t, kMaximumConcurrency> rope_positions{};
     std::array<std::int32_t, kMaximumConcurrency> text_kv_table_rows{};
     std::array<std::int32_t, kMaximumConcurrency> state_source_slots{};
@@ -56,6 +57,7 @@ struct OrdinaryDecodeEgress {
 struct MtpDecodeIngress {
     std::array<TokenId, kMaximumConcurrency> anchors{};
     std::array<std::int32_t, kMaximumConcurrency> base_frontiers{};
+    std::array<std::int32_t, kMaximumConcurrency> logical_frontiers{};
     std::array<std::int32_t, kMaximumConcurrency> remaining_budgets{};
     std::array<std::int32_t, kMaximumConcurrency> current_extents{};
     std::array<std::int32_t, kMaximumConcurrency> target_valid_columns{};
@@ -198,6 +200,7 @@ struct OrdinaryDecodeState {
     DeviceSpan egress;
     Tensor tokens;
     Tensor cache_positions;
+    Tensor logical_frontiers;
     Tensor rope_positions;
     Tensor text_kv_table_rows;
     Tensor state_source_slots;
@@ -242,6 +245,7 @@ struct MtpDecodeState {
     DeviceSpan egress;
     Tensor anchors;
     Tensor base_frontiers;
+    Tensor logical_frontiers;
     Tensor remaining_budgets;
     Tensor current_extents;
     Tensor target_valid_columns;

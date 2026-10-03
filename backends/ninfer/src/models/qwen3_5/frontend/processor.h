@@ -112,6 +112,7 @@ struct ProcessedInput {
     std::vector<VisionItem> vision_items;
     // One immutable row-major [raw_patches, 1536] payload per Vision item.
     std::vector<std::shared_ptr<const qwen3_5::PreparedMediaPayload>> media_payloads;
+    std::optional<TokenSpan> memory_query;
     std::optional<RewriteCheckpointSpec> rewrite_checkpoint;
     std::vector<std::uint32_t> rewrite_execution_frontiers;
     std::vector<std::optional<std::uint32_t>> message_boundaries;
@@ -132,6 +133,7 @@ struct EncodedChat {
     };
 
     std::vector<MediaTokenRun> media_token_runs;
+    std::optional<TokenSpan> memory_query;
     std::optional<RewriteCheckpointSpec> rewrite_checkpoint;
     std::vector<std::uint32_t> rewrite_execution_frontiers;
     std::vector<std::optional<std::uint32_t>> message_boundaries;

@@ -255,6 +255,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.device                   = options.device;
     engine_options.max_context              = options.max_context;
     engine_options.kv_capacity              = options.kv_capacity;
+    engine_options.kvmem                    = options.kvmem;
     engine_options.max_concurrency          = options.max_concurrency;
     engine_options.max_pending_requests     = options.max_pending_requests;
     engine_options.pending_timeout_ms       = options.pending_timeout_ms;

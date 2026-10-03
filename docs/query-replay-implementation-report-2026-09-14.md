@@ -2,7 +2,7 @@
 
 KVMem 在检索改变可见历史时，需要恢复 recurrent/MTP 状态并重新处理受影响的输入。当前实现会检查历史视图是否保持有效，在满足条件时省去第二遍计算；同一用户问题下的工具续接还可以复用已捕获的查询特征。
 
-实现位于 [host runtime](../kvmem/src/host/kvmem_runtime.cpp)、[内存适配层](../src/adapter/llama-memory-kvmem.cpp) 和[多模态请求执行器](../tools/kvmem-multimodal-server.h)，继续复用 llama.cpp 的 decode、MTP、聊天模板和 mtmd 能力。
+实现位于 [host runtime](../kvmem/src/host/kvmem_runtime.cpp)、[内存适配层](../src/adapter/llama-memory-kvmem.cpp) 和[多模态请求执行器](../tools/llama-kvmem-driver.cpp)，继续复用 llama.cpp 的 decode、MTP、聊天模板和 mtmd 能力。
 
 ## 已实现的执行路径
 

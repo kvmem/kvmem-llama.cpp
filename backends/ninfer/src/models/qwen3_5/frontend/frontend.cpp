@@ -963,6 +963,9 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
         } catch (const fi::ProcessorError& error) { throw_processor_error(error); }
         result.token_ids.assign(processed.input_ids.begin(), processed.input_ids.end());
         result.starts_in_reasoning = processed.starts_in_reasoning;
+        if (processed.memory_query) {
+            result.memory_query = TokenSpan{processed.memory_query->begin, processed.memory_query->count};
+        }
         result.token_types         = std::move(processed.token_types);
         result.positions           = std::move(processed.positions);
         result.rope_delta          = processed.rope_delta;
@@ -1005,6 +1008,9 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
             throw_context_length_exceeded(impl_->max_context);
         }
         result.token_ids                   = std::move(encoded.input_ids);
+        if (encoded.memory_query) {
+            result.memory_query = TokenSpan{encoded.memory_query->begin, encoded.memory_query->count};
+        }
         result.identity.rewrite_checkpoint = encoded.rewrite_checkpoint;
         result.identity.rewrite_execution_frontiers =
             std::move(encoded.rewrite_execution_frontiers);
@@ -1143,6 +1149,7 @@ PreparedPrompt Frontend::prepare_tokens(std::vector<TokenId> token_ids,
     auto prepared              = std::make_unique<PreparedPromptData>();
     PreparedPromptData& result = *prepared;
     result.token_ids           = std::move(token_ids);
+    result.memory_query        = TokenSpan{0, result.token_ids.size()};
     if (impl_->ngram_sources_enabled) { result.ngram_boundaries = impl_->ngram_boundaries; }
     if (impl_->ngram_archive_enabled) {
         result.ngram_archive_sources.push_back({result.token_ids, NgramSourceKind::Text});

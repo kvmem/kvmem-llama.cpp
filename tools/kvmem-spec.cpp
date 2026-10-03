@@ -16,8 +16,8 @@ struct gdn_replay_transaction {
         if (active) llama_kvmem_gdn_replay_commit(ctx, 0);
     }
     bool commit(uint32_t keep) {
-        const bool ok = llama_kvmem_gdn_replay_commit(ctx, keep);
-        active = false;
+        const bool ok = llama_kvmem_commit_speculative(ctx, keep);
+        if (ok) active = false;
         return ok;
     }
 };
@@ -354,6 +354,7 @@ kvmem_spec_gen_stats kvmem_spec_generate(
             }
         }
         const auto verify_start = ggml_time_us();
+        llama_kvmem_begin_speculative_evaluation();
         const int rc = llama_decode(ctx_tgt, batch_tgt);
         if (rc != 0) {
             fprintf(stderr, "llama_decode(spec verify) failed rc=%d n_draft=%zu\n",
@@ -435,9 +436,12 @@ kvmem_spec_gen_stats kvmem_spec_generate(
                 st.failed = true;
                 break;
             }
+        } else if (!llama_kvmem_commit_speculative(ctx_tgt, (uint32_t) ids.size())) {
+            fprintf(stderr, "speculative prefix commit failed\n");
+            st.failed = true;
+            break;
         }
         committed_rows += ids.size();
-        llama_kvmem_decode_mean_commit((uint32_t) ids.size());
         common_speculative_accept(spec, seq_id, (uint16_t) (ids.size() - 1));
         n_past += (int) ids.size() - 1;
         st.n_drafted += (int) n_draft;

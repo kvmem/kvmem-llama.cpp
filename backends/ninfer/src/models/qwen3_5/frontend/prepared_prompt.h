@@ -153,6 +153,10 @@ struct PreparedPromptData {
     std::vector<NgramSourceView> ngram_archive_sources;
     std::shared_ptr<const NgramSnapshot> ngram_snapshot;
     std::vector<TokenId> token_ids;
+    // Exact token range from frontend provenance. Absent means no trusted query;
+    // retrieval keeps its recency fallback. Raw token input explicitly uses all rows.
+    std::optional<TokenSpan> memory_query;
+
     std::vector<std::uint8_t> token_types;
     std::vector<std::int32_t> positions;
     std::int32_t rope_delta = 0;

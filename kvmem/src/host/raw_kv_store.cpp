@@ -181,6 +181,16 @@ uint64_t RawKvStore::v_gpu_slot_bytes() const {
     return static_cast<uint64_t>(cfg_.block_tokens) * cfg_.v_gpu_row_bytes;
 }
 
+void RawKvStore::reserve_packed(uint32_t block_id, const std::vector<uint32_t> & layers) {
+    ensure_blocks(block_id + 1);
+    for (uint32_t il : layers) {
+        if (il >= cfg_.n_layer) throw std::invalid_argument("invalid packed layer reservation");
+        auto & lb = blocks_[block_id].layers[il];
+        lb.k_gpu.reserve(cfg_.k_gpu_row_bytes * cfg_.block_tokens);
+        lb.v_gpu.reserve(cfg_.v_gpu_row_bytes * cfg_.block_tokens);
+    }
+}
+
 void RawKvStore::ensure_blocks(uint32_t block_count) {
     if (blocks_.size() >= block_count) {
         return;

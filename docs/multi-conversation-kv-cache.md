@@ -49,8 +49,8 @@ checkpoint and truncates the stored tail.
 
 | Formula | Source |
 |---|---|
-| `keep_cap = min({lcp, live_row, eval_end - (spec_ok ? 0 : 1)})` | [`tools/kvmem-multimodal-server.h`](../tools/kvmem-multimodal-server.h), `keep` in `run_prefill_multimodal` |
-| `found, keep` = the largest checkpoint row `<= keep_cap` | [`tools/kvmem-multimodal-server.h`](../tools/kvmem-multimodal-server.h), the `st.mm_checkpoints` scan that follows it |
+| `keep_cap = min({lcp, live_row, eval_end - (spec_ok ? 0 : 1)})` | [`tools/llama-kvmem-driver.cpp`](../tools/llama-kvmem-driver.cpp), `keep` in `run_prefill_multimodal` |
+| `found, keep` = the largest checkpoint row `<= keep_cap` | [`tools/llama-kvmem-driver.cpp`](../tools/llama-kvmem-driver.cpp), the `st.mm_checkpoints` scan that follows it |
 | `continuation = (rows - lcp) <= max(0, last_n_gen) + 64` | [`tools/llama-kvmem-server.cpp`](../tools/llama-kvmem-server.cpp), `suffix_slack` in `run_prefill_retrieval` |
 
 `lcp` is the longest common prefix of the incoming prompt against a stored

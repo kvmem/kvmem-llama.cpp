@@ -144,13 +144,8 @@ def main():
         print(json.dumps(plan, indent=2), flush=True)
         if args.dry_run:
             return 0
-        # Catch Windows-created worktree links before either launcher edits source.
-        check = subprocess.run(['git', '-C', str(root / 'llama.cpp'), 'rev-parse', '--show-toplevel'],
-                               capture_output=True, text=True, env=env)
-        if check.returncode and (root / 'llama.cpp/.git').exists():
-            raise ValueError('llama.cpp Git metadata is not usable in this OS. Initialize the submodule in a native checkout; do not reset or rewrite another worktree.\n' + check.stderr.strip())
         if not (root / 'llama.cpp/CMakeLists.txt').is_file():
-            raise ValueError('llama.cpp sources are missing. Initialize submodules or extract the complete source bundle.')
+            raise ValueError('llama.cpp sources are missing. Use a complete checkout or extract the complete source bundle.')
         return subprocess.run(plan['command'], cwd=root, env=env).returncode
     except (ValueError, OSError) as exc:
         print('error: ' + str(exc), file=sys.stderr)

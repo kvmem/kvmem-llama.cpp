@@ -84,7 +84,7 @@ runtime::PrefillWork scheduled_prefill_work(std::uint32_t begin, std::uint32_t e
 // A root admitted on a disk-restorable prefix recomputes that prefix if the restore fails, so its
 // service budget covers the prompt from the start.
 std::uint32_t service_work_base(const AdmissionCandidateImpl& plan) noexcept {
-    return plan.disk_restore_frontier != 0 ? 0U : plan.reuse_base;
+    return plan.disk_restore_frontier != 0 || plan.memory_restore_frontier != 0 ? 0U : plan.reuse_base;
 }
 
 std::uint64_t projected_service_work(const runtime::RequestPlanSummary& summary,
@@ -123,6 +123,20 @@ std::uint64_t projected_service_work(const runtime::RequestPlanSummary& summary,
     const std::uint64_t decode_units =
         summary.effective_output_tokens == 0 ? 0ULL : summary.effective_output_tokens - 1ULL;
     return prefill_units + decode_units;
+}
+
+std::uint64_t memory_replay_service_work(const runtime::RequestPlanSummary& summary,
+                                         const PreparedPromptData& prompt,
+                                         std::uint32_t window_tokens,
+                                         std::uint32_t chunk) noexcept {
+    if (!window_tokens || summary.prompt_tokens <= window_tokens || !prompt.memory_query ||
+        prompt.memory_query->begin == 0 || prompt.memory_query->count == 0) return 0;
+    auto replay = summary;
+    replay.effective_output_tokens = 0;
+    const auto begin = static_cast<std::uint32_t>(prompt.memory_query->begin);
+    const auto canonical_chunks = 1ULL + (summary.prompt_tokens - 1ULL) / chunk - begin / chunk;
+    return std::max<std::uint64_t>(canonical_chunks, projected_service_work(replay, begin,
+        chunk, 0, {}, prompt.identity.rewrite_execution_frontiers));
 }
 
 } // namespace
@@ -243,6 +257,7 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
 
     auto base                             = std::make_unique<RequestBasePlanImpl>();
     base->context_cache                   = prompt.context_cache;
+    base->publication_order = options.publication_order;
     base->summary.prompt_tokens           = static_cast<std::uint32_t>(prompt.token_ids.size());
     base->summary.requested_output_tokens = options.requested_output_tokens;
     const std::uint32_t capacity_output =
@@ -294,6 +309,33 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
             base->backend_kv_page_entitlement         = kv_pages_for_tokens(
                 std::min(capacity, base->summary.prompt_tokens + backend_window_tokens - 1U));
         }
+    }
+    if (kvmem_window_tokens) {
+        (void)memory_image_pages(prompt);
+        // Active requests must have enough H for their entire legal execution.
+        // Reject a known budget shortfall while the request is still Waiting;
+        // running out during prefill is not an unexpected worker/device failure.
+        const auto frontier = base->summary.prompt_tokens +
+            (base->summary.effective_output_tokens ? base->summary.effective_output_tokens - 1U : 0U);
+        const bool retain_short_prefix = options.allow_prefix_reuse && prompt.identity.reusable &&
+            base->summary.prompt_tokens > 1;
+        if (frontier > kvmem_window_tokens || retain_short_prefix) {
+            const auto host_layout = plan_host_kv_page_layout(text_kv_pages->physical_pool().geometry());
+            const auto pages = kv_pages_for_tokens(frontier > kvmem_window_tokens
+                ? frontier : base->summary.prompt_tokens - 1);
+            const auto page_bytes = host_layout.page_stride + (backend_kv_pages
+                ? plan_host_kv_page_layout(backend_kv_pages->physical_pool().geometry()).page_stride : 0);
+            if (pages > kvmem_options.host_bytes / page_bytes) {
+                throw RequestError(RequestErrorKind::ContextLengthExceeded,
+                    "KVMem host payload budget cannot reserve the requested token history");
+            }
+            base->memory_host_reservation = pages * page_bytes;
+        }
+        base->text_kv_page_entitlement = kv_pages_for_tokens(kvmem_window_tokens);
+        if (backend_kv_pages) base->backend_kv_page_entitlement = kv_pages_for_tokens(kvmem_window_tokens);
+        base->allow_memory_reuse = options.allow_prefix_reuse && prompt.identity.reusable;
+        base->allow_prefix_reuse = false;
+        base->summary.publish_continuation = false;
     }
     detail::PhysicalDeviceResources root_active{
         .active_lanes     = 1,
@@ -487,6 +529,9 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
     plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
     plan->root_rebuild_work           = base.root_rebuild_work;
     plan->root_rebuild_tail_begin     = base.root_rebuild_tail_begin;
+    plan->allow_memory_reuse = base.allow_memory_reuse;
+    plan->memory_host_reservation = base.memory_host_reservation;
+    plan->publication_order = base.publication_order;
 
     if ((source != nullptr && shared_source != nullptr) ||
         ((source == nullptr && shared_source == nullptr) != !checkpoint.has_value())) {
@@ -604,6 +649,18 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
                 disk_restorable_frontier(base, prompt, plan->summary.prompt_tokens)) {
             plan->disk_restore_frontier = *frontier;
             plan->reuse_base            = *frontier;
+        }
+    }
+
+    if (plan->reuse == ReusePath::Root && base.allow_memory_reuse) {
+        // This cold tier is C1-only: inspect_lane proves the sole active lane is
+        // empty. Import never competes with an active request's H reservation.
+        if (!memory_restorable_history(prompt)) load_memory_snapshot(prompt);
+        if (const auto index = memory_restorable_history(prompt)) {
+            const auto& history = *memory_histories[*index];
+            plan->memory_restore_frontier = static_cast<std::uint32_t>(history.prefix_checkpoint->prefix.size());
+            plan->memory_restore_generation = history.stamp.session.id;
+            plan->reuse_base = plan->memory_restore_frontier;
         }
     }
 
@@ -770,6 +827,8 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
         projected_service_work(plan->summary, service_work_base(*plan), prefill_chunk,
                                prefill_splits, plan->capture_groups,
                                prompt.identity.rewrite_execution_frontiers);
+    plan->summary.service_work_quanta +=
+        memory_replay_service_work(plan->summary, prompt, kvmem_window_tokens, prefill_chunk);
     std::uint64_t remaining_vision_items   = 0;
     std::uint64_t remaining_vision_patches = 0;
     if (plan->vision) {
@@ -1325,6 +1384,8 @@ void ProgramImpl::select_shared_captures(AdmissionCandidate& candidate,
         projected_service_work(plan.summary, service_work_base(plan), prefill_chunk,
                                prefill_splits, plan.capture_groups,
                                prompt.identity.rewrite_execution_frontiers);
+    plan.summary.service_work_quanta +=
+        memory_replay_service_work(plan.summary, prompt, kvmem_window_tokens, prefill_chunk);
     std::uint64_t vision_items   = 0;
     std::uint64_t vision_patches = 0;
     if (plan.vision) {

@@ -98,6 +98,8 @@ static_assert(sizeof(half) == sizeof(ggml_fp16_t), "wrong fp16 size");
 
 [[noreturn]]
 void ggml_cuda_error(const char * stmt, const char * func, const char * file, int line, const char * msg) {
+    fprintf(stderr, "GGML_CUDA_ERROR stmt=%s func=%s msg=%s\n", stmt, func, msg ? msg : "");
+    fflush(stderr);
     int id = -1; // in case cudaGetDevice fails
     (void)cudaGetDevice(&id);
 
@@ -2380,6 +2382,7 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_op_gated_linear_attn(ctx, dst);
             break;
         case GGML_OP_GATED_DELTA_NET:
+        case GGML_OP_GATED_DELTA_NET_RECORD:
             ggml_cuda_op_gated_delta_net(ctx, dst);
             break;
         case GGML_OP_DSV4_HC_COMB:
@@ -3176,6 +3179,38 @@ static bool ggml_cuda_match_moe_weighted_reduction(
     return true;
 }
 
+
+static bool ggml_cuda_match_gdn_output(const ggml_cgraph * cgraph, int i) {
+    static const bool enabled = !getenv("KVMEM_GDN_OUT_FUSION") || std::atoi(getenv("KVMEM_GDN_OUT_FUSION"));
+    if (!enabled || !ggml_can_fuse_subgraph(cgraph, i,
+            { GGML_OP_RMS_NORM, GGML_OP_MUL, GGML_OP_UNARY, GGML_OP_MUL }, { i + 3 })) {
+        return false;
+    }
+    const ggml_tensor * norm = cgraph->nodes[i];
+    const ggml_tensor * weighted = cgraph->nodes[i + 1];
+    const ggml_tensor * silu = cgraph->nodes[i + 2];
+    const ggml_tensor * dst = cgraph->nodes[i + 3];
+    if (ggml_get_unary_op(silu) != GGML_UNARY_OP_SILU ||
+            (weighted->src[0] != norm && weighted->src[1] != norm) ||
+            !((dst->src[0] == weighted && dst->src[1] == silu) ||
+              (dst->src[1] == weighted && dst->src[0] == silu))) {
+        return false;
+    }
+    const ggml_tensor * x = norm->src[0];
+    const ggml_tensor * weight = weighted->src[0] == norm ? weighted->src[1] : weighted->src[0];
+    const ggml_tensor * gate = silu->src[0];
+    if (x->ne[0] != 128 || weight->ne[0] != 128 || ggml_nelements(weight) != 128 ||
+            !ggml_is_contiguous_rows(x) || !ggml_is_contiguous(weight) || !ggml_is_contiguous(gate) ||
+            !ggml_are_same_shape(x, gate) || !ggml_are_same_shape(x, dst) || !ggml_is_contiguous(dst)) {
+        return false;
+    }
+    for (const ggml_tensor * t : { x, weight, gate, norm, weighted, silu, dst }) {
+        if (t->type != GGML_TYPE_F32) {
+            return false;
+        }
+    }
+    return true;
+}
 
 static bool ggml_cuda_can_fuse(const struct ggml_cgraph *                cgraph,
                                int                                       node_idx,
@@ -4148,6 +4183,19 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
         return 2;
     }
 
+    if (ggml_cuda_match_gdn_output(cgraph, i)) {
+        const int output_idx = i + 3;
+        if (ggml_cuda_check_fusion_memory_ranges(cgraph, i, 4, &output_idx, 1)) {
+            static const bool trace = getenv("KVMEM_GDN_OUT_FUSION_TRACE") && std::atoi(getenv("KVMEM_GDN_OUT_FUSION_TRACE"));
+            if (trace) {
+                GGML_LOG_INFO("KVMEM_GDN_OUT_FUSION name=%s rows=%lld tokens=%lld seqs=%lld\n",
+                    cgraph->nodes[i + 3]->name, (long long) node->ne[1], (long long) node->ne[2], (long long) node->ne[3]);
+            }
+            ggml_cuda_op_rms_norm_silu_gate(*cuda_ctx, node, cgraph->nodes[i + 1], cgraph->nodes[i + 2], cgraph->nodes[i + 3]);
+            return 3;
+        }
+    }
+
     if (ggml_cuda_can_fuse(cgraph, i, { GGML_OP_RMS_NORM, GGML_OP_MUL }, {})) {
         ggml_cuda_op_rms_norm_fused(*cuda_ctx, node, cgraph->nodes[i + 1]);
         return 1;
@@ -4352,6 +4400,22 @@ static void ggml_cuda_graph_evaluate_and_capture(ggml_backend_cuda_context * cud
                 GGML_UNUSED(integrated);
 #endif  // NDEBUG
 
+                static const bool node_trace = [] {
+                    const char * env = getenv("GGML_CUDA_NODE_TRACE");
+                    return env && env[0] == '1' && env[1] == '\0';
+                }();
+                if (node_trace) {
+                    const cudaError_t before = cudaPeekAtLastError();
+                    const ggml_tensor * s0 = node->src[0];
+                    const ggml_tensor * s1 = node->src[1];
+                    fprintf(stderr,
+                            "GGML_CUDA_NODE op=%s name=%s before=%s ne=%lld,%lld,%lld,%lld src0=%lld,%lld src1=%lld,%lld\n",
+                            ggml_op_name(node->op), node->name, cudaGetErrorString(before),
+                            (long long) node->ne[0], (long long) node->ne[1], (long long) node->ne[2], (long long) node->ne[3],
+                            s0 ? (long long) s0->ne[0] : -1, s0 ? (long long) s0->ne[1] : -1,
+                            s1 ? (long long) s1->ne[0] : -1, s1 ? (long long) s1->ne[1] : -1);
+                    fflush(stderr);
+                }
                 bool ok = ggml_cuda_compute_forward(*cuda_ctx, node);
                 if (!ok) {
                     GGML_LOG_ERROR("%s: op not supported %s (%s)\n", __func__, node->name, ggml_op_name(node->op));
@@ -4418,6 +4482,42 @@ static bool ggml_cuda_graph_set_enabled(ggml_backend_cuda_context * cuda_ctx, co
 }
 #endif // USE_CUDA_GRAPH
 
+static void ggml_cuda_graph_account(bool direct, bool capture, bool launch, bool reset, bool incompatible) {
+    static std::atomic<uint64_t> n_direct{0};
+    static std::atomic<uint64_t> n_capture{0};
+    static std::atomic<uint64_t> n_launch{0};
+    static std::atomic<uint64_t> n_reset{0};
+    static std::atomic<uint64_t> n_incompatible{0};
+    static std::atomic<uint64_t> n_calls{0};
+
+    if (direct) {
+        n_direct.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (capture) {
+        n_capture.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (launch) {
+        n_launch.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (reset) {
+        n_reset.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (incompatible) {
+        n_incompatible.fetch_add(1, std::memory_order_relaxed);
+    }
+    const uint64_t calls = n_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    const uint64_t launches = n_launch.load(std::memory_order_relaxed);
+    if ((launch && launches == 1) || calls % 128 == 0) {
+        fprintf(stderr,
+                "GGML_CUDA_GRAPH direct=%llu capture=%llu launch=%llu reset=%llu incompatible=%llu\n",
+                (unsigned long long) n_direct.load(std::memory_order_relaxed),
+                (unsigned long long) n_capture.load(std::memory_order_relaxed),
+                (unsigned long long) launches,
+                (unsigned long long) n_reset.load(std::memory_order_relaxed),
+                (unsigned long long) n_incompatible.load(std::memory_order_relaxed));
+    }
+}
+
 static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, ggml_cgraph * cgraph) {
     ggml_backend_cuda_context * cuda_ctx = (ggml_backend_cuda_context *) backend->context;
 
@@ -4426,6 +4526,11 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
     bool use_cuda_graph             = false;
     bool cuda_graph_update_required = false;
     const void * graph_key = nullptr;
+    bool graph_direct       = true;
+    bool graph_capture      = false;
+    bool graph_launch       = false;
+    bool graph_reset        = false;
+    bool graph_incompatible = false;
 
 #ifdef USE_CUDA_GRAPH
     graph_key = ggml_cuda_graph_get_key(cgraph);
@@ -4445,22 +4550,33 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
                     GGML_LOG_DEBUG("%s: CUDA graph warmup complete\n", __func__);
                     use_cuda_graph = true;
                     cuda_graph_update_required = true;
+                    graph_direct = false;
+                    graph_capture = true;
+                    graph_launch = true;
                 }
                 // else: properties changed or first call - execute directly (use_cuda_graph stays false)
             } else {
                 // Post-warmup: normal CUDA graph operation
                 if (properties_changed) {
                     // Properties changed - reset warmup, execute directly until stable again
+                    graph_reset = true;
                     graph->warmup_complete = false;
                     GGML_LOG_DEBUG("%s: CUDA graph warmup reset\n", __func__);
                 } else {
                     use_cuda_graph = true;
                     cuda_graph_update_required = graph->instance == nullptr;
+                    graph_direct = false;
+                    graph_launch = true;
+                    graph_capture = cuda_graph_update_required;
                 }
             }
+        } else {
+            graph_incompatible = true;
         }
     }
 #endif // USE_CUDA_GRAPH
+
+    ggml_cuda_graph_account(graph_direct, graph_capture, graph_launch, graph_reset, graph_incompatible);
 
     if (use_cuda_graph && cuda_graph_update_required) {
         // Start CUDA graph capture
@@ -4524,6 +4640,13 @@ static void ggml_backend_cuda_graph_optimize(ggml_backend_t backend, ggml_cgraph
         // add alloc deps for performance positive fusions. This may increase the overall compute buffer size.
         // TODO: consolidate fusion paths in graph_optimize and graph_compute
         for (int i = 0; i < cgraph->n_nodes; ++i) {
+            if (ggml_cuda_match_gdn_output(cgraph, i)) {
+                ggml_tensor * dst = cgraph->nodes[i + 3];
+                params->add_alloc_dep(params->user_data, cgraph->nodes[i]->src[0], dst);
+                params->add_alloc_dep(params->user_data, cgraph->nodes[i + 2]->src[0], dst);
+                i += 3;
+                continue;
+            }
             ggml_cuda_moe_weighted_reduction_match match;
             if (ggml_cuda_match_moe_weighted_reduction(cgraph, i, match)) {
                 params->add_alloc_dep(params->user_data, const_cast<ggml_tensor *>(match.experts), match.dst);
@@ -5554,6 +5677,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
         case GGML_OP_RWKV_WKV7:
             return true;
         case GGML_OP_GATED_DELTA_NET:
+        case GGML_OP_GATED_DELTA_NET_RECORD:
             //TODO: enable once MUSA compiler is solved https://github.com/ggml-org/llama.cpp/pull/19504#issuecomment-4018634327
 #ifdef GGML_USE_MUSA
             return false;

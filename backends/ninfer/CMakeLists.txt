@@ -207,6 +207,14 @@ endif()
 include(cmake/Dependencies.cmake)
 include(cmake/NinferTargets.cmake)
 
+# The portable core is versioned in this same repository.
+get_filename_component(_kvmem_core "${CMAKE_CURRENT_SOURCE_DIR}/../../kvmem" ABSOLUTE)
+set(NINFER_KVMEM_SOURCE_DIR "${_kvmem_core}" CACHE PATH "Portable KVMem core directory")
+if(NOT EXISTS "${NINFER_KVMEM_SOURCE_DIR}/include/kvmem/memory_contract.hpp")
+  message(FATAL_ERROR "Set NINFER_KVMEM_SOURCE_DIR to the portable KVMem core")
+endif()
+add_subdirectory("${NINFER_KVMEM_SOURCE_DIR}" "kvmem-core" EXCLUDE_FROM_ALL)
+
 # --- Subdirectories ----------------------------------------------------------
 add_subdirectory(src)
 if(NINFER_BUILD_APPS)

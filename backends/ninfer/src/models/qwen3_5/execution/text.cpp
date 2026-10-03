@@ -929,7 +929,7 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
     Tensor rope_for_op = active_sequence_batch_ != 0 ? rope_positions.view({T}) : rope_positions;
     text_qk_norm_rope(rope_for_op, *config_.rope_parameters, *config_.attention,
                       config_.rms_norm_eps, p.query_norm, p.key_norm, q, k, qn, kn, rope_yarn_,
-                      s);
+                      s, statistics_, fidx);
 
     Tensor a = results.attention.view({dimension(config_.attention->head_dim),
                                        dimension(config_.attention->num_attention_heads), T});
@@ -1419,7 +1419,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
     } else if (text_kv_base_ == 0) {
         rope_delta_ = 0;
     }
-    ops::set_i32_scalar(io_.rope_delta, rope_delta_, s);
+    ops::set_i32_scalar(io_.rope_delta, rope_delta_ + static_cast<std::int32_t>(cache_position_shift_), s);
 
     // Prefix-append prefill continues an existing cache: positions are absolute (start at the
     // resident length) and KV/GDN state is not reset. For a reset prefill base == 0.
@@ -1475,7 +1475,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 }
             }
 
-            const std::int32_t rope_axes = multimodal != nullptr ? 3 : (rope_delta_ != 0 ? 1 : 0);
+            const std::int32_t rope_axes = multimodal != nullptr ? 3 : ((rope_delta_ != 0 || cache_position_shift_ != 0) ? 1 : 0);
             const bool overlay_staging   = !vision_chunk.host_embeddings.empty();
             const auto roots             = workspace::text_prefill_roots(
                 work_, config_, len, rope_axes,
@@ -1484,7 +1484,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             copy_i32(ids.data() + t0, ids_device, s);
 
             Tensor positions = roots.positions;
-            ops::fill_i32_positions(positions, base_i + t0, s);
+            ops::fill_i32_positions(positions, base_i + t0 - static_cast<int>(cache_position_shift_), s);
 
             Tensor rope_positions = positions;
             std::vector<std::int32_t> rope_positions_host;
@@ -1499,13 +1499,16 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                                 rope_positions_host.data() + static_cast<std::size_t>(axis) * len);
                 }
                 copy_i32(rope_positions_host.data(), rope_positions, s);
+            } else if (cache_position_shift_ != 0) {
+                rope_positions = roots.rope_positions;
+                ops::fill_i32_positions(rope_positions, base_i + t0 + rope_delta_, s);
             } else if (rope_delta_ != 0) {
                 rope_positions = roots.rope_positions;
                 ops::offset_i32_positions(positions, io_.rope_delta, rope_positions, s);
             }
             ScopedPositions scoped_cache(active_cache_positions_, positions);
             ScopedPositions scoped_rope(active_rope_positions_, rope_positions);
-            const auto visible = static_cast<std::uint32_t>(base_i + t0 + len);
+            const auto visible = static_cast<std::uint32_t>(base_i + t0 + len) - cache_position_shift_;
             const ops::CausalAttentionExecutionEnvelope chunk_envelope{
                 .min_visible_keys   = visible,
                 .max_visible_keys   = visible,
@@ -1545,6 +1548,12 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 ops::scatter(embeddings, indices_device, x, s);
             }
             if constexpr (Tap::enabled) { tap.begin(x); }
+            if (statistics_ != nullptr) {
+                // Logical token indexing is independent of all three MRoPE axes
+                // and of the compact KV address used by attention.
+                auto origin = statistics_->prefill_origin;
+                ops::set_i32_scalar(origin, base_i + t0, s);
+            }
             run_layers(x, Phase::Prefill, tap);
             if constexpr (requires { tap.capture_positions(positions, s); }) {
                 tap.capture_positions(positions, s);
@@ -1646,13 +1655,13 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                                       &logits, &draft0);
 
                     Tensor ar_position = io_.mtp->position.slice(0, 0, 1);
-                    ops::set_i32_scalar(ar_position, base_i + T, s);
+                    ops::set_i32_scalar(ar_position, base_i + T - static_cast<int>(cache_position_shift_), s);
                     for (int i = 1; i < static_cast<int>(mtp_proposal_extent_); ++i) {
                         Tensor prev_token = io_.mtp->draft_tokens.slice(0, i - 1, 1);
                         Tensor next_token = io_.mtp->draft_tokens.slice(0, i, 1);
                         Tensor next_hidden =
                             work_.alloc(DType::BF16, {dimension(config_.hidden_size), 1});
-                        const auto ar_visible = static_cast<std::uint32_t>(base_i + T + i);
+                        const auto ar_visible = static_cast<std::uint32_t>(base_i + T + i) - cache_position_shift_;
                         const ops::CausalAttentionExecutionEnvelope ar_envelope{ar_visible,
                                                                                 ar_visible};
                         mtp_forward_ar_step(prev_token, io_.mtp->ar_hidden, ar_position,

@@ -12,6 +12,7 @@
 #include "ggml-opt.h"
 
 #include <array>
+#include <cstdint>
 #include <map>
 #include <vector>
 
@@ -256,6 +257,8 @@ public:
 
 private:
     llm_graph_result * get_gf_res_prev();
+    llm_graph_result * get_gf_res_decode(uint32_t n_tokens);
+    void reset_cached_graphs();
 
     llm_graph_params graph_params(
                         llm_graph_result * res,
@@ -373,6 +376,13 @@ private:
     llm_graph_result_ptr gf_res_reserve;
 
     llm_graph_result * gf_res_prev_active = nullptr;
+
+    // One cached graph per decode width. MTP verify is usually n_draft+1 tokens
+    // and a rejected step is 1 token; sharing a single slot makes those widths
+    // rebuild each other, so the CUDA graph never finishes warmup.
+    static constexpr uint32_t n_decode_graph_slots = 8;
+    std::array<llm_graph_result_ptr, n_decode_graph_slots + 1> gf_res_decode;
+    std::array<uint64_t, n_decode_graph_slots + 1> decode_graph_stamp = {};
 
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;

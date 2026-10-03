@@ -69,6 +69,7 @@ struct common_speculative_draft_params {
 
     // the generated draft from the last _draft() call
     llama_tokens * result;
+    llama_pos n_past_logical = -1; // optional cache row cursor for multimodal input
 };
 
 common_speculative_draft_params & common_speculative_get_draft_params(common_speculative * spec, llama_seq_id seq_id);

@@ -398,24 +398,13 @@ prompt eval time =     650.16 ms /    46 tokens (   14.13 ms per token,    70.75
 ```
 
 进度对象挂在 `ServerState` 上（该 server 只有一个 slot），预填时由
-`kvmem-multimodal-server.h` 的分块循环驱动，解码时由 token 回调驱动。
+`llama-kvmem-driver.cpp` 的分块循环驱动，解码时由 token 回调驱动。
 
 ---
 
 ## 5. 以后想更新上游代码
 
-当前 master 的 KVMem 补丁是**针对 llama.cpp `v0.5.0` (`7fe450e19`) 的累积 diff**，所以：
-
-- **只想重建**：什么都不用做，直接 §1。
-- **想换 llama.cpp 版本**：不能直接 `git pull`。需要先 rebase 补丁，用上游的
-  `scripts/rebase-llama.sh`，然后重跑 `scripts/apply-patches.sh`。
-- **想确认补丁还在**：
-
-  ```bat
-  cd llama.cpp
-  git apply --reverse --check ..\patches\llama-kvmem-current.patch && echo PATCH-APPLIED
-  ```
-  （能反向 apply 成功 = 补丁已应用。`scripts\apply-patches.sh` 是幂等的，重复跑安全。）
+本分支直接跟踪 `llama.cpp/` 和 `backends/ninfer/` 源码，重建不需要补丁重放。更新上游时，在当前开发分支中合并源码变更、解决适配冲突并更新 `backends/versions.json`，然后执行对应后端回归。详见 [单仓库工作流](multi-backend-repository.md)。
 
 ### ⚠️ git 可能报 unsafe repository
 

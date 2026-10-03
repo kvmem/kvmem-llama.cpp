@@ -1109,6 +1109,8 @@ public:
     [[nodiscard]] std::optional<PhysicalUsageSnapshot> shutdown_cleanup() noexcept;
 
     [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
+    // False while active request reservations occupy an auxiliary physical tier.
+    [[nodiscard]] bool temporary_request_feasible(const RequestBasePlan& base) const noexcept;
 
     // Hybrid prefix cache mode (ContextCacheMode::Hybrid). Admission runs as the same context
     // transaction the Engine drives for Legacy materialization: quote, reserve, then

@@ -183,6 +183,19 @@ public:
         object.role          = StateImageRole::ActiveMutable;
     }
 
+    // Program is replacing this exclusive active image from its own validated Host
+    // checkpoint. Invalidate prior content identity before issuing the destructive copy.
+    // On transfer failure the Program must discard the active sequence.
+    void begin_active_overwrite(StateImageHandle handle) {
+        Object& object = require(handle);
+        if (object.role != StateImageRole::ActiveMutable || !object.device_slot ||
+            object.host_slot || object.checkpoint_references != 0 || object.source_pins != 0 ||
+            object.destination_pinned || has_pending_replica(object)) {
+            throw std::logic_error("StateImage active overwrite is not exclusive");
+        }
+        object.content_epoch = next_epoch();
+    }
+
     void publish_copied_checkpoint(StateImageHandle handle) {
         Object& object       = require_copied_destination(handle);
         object.content_epoch = next_epoch();

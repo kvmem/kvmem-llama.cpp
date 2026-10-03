@@ -5,6 +5,7 @@
 #include "llama-memory.h"
 
 #include <map>
+#include <array>
 #include <set>
 #include <vector>
 
@@ -24,7 +25,8 @@ public:
                      uint32_t   mem_size,
                      uint32_t   n_seq_max,
                      uint32_t   n_rs_seq,
-        const layer_filter_cb & filter);
+        const layer_filter_cb & filter,
+                         bool   replay = false);
 
     ~llama_memory_recurrent() = default;
 
@@ -73,6 +75,14 @@ public:
     // number of recurrent-state snapshots per seq for rollback; tensors are widened to (1 + n_rs_seq) groups
     uint32_t n_rs_seq = 0;
 
+    enum replay_kind { REPLAY_K, REPLAY_V, REPLAY_G, REPLAY_B, REPLAY_CONV, REPLAY_COUNT };
+    uint32_t replay_capacity = 0;
+    bool replay_recording = false;
+    bool replay_poisoned = false;
+    std::vector<std::array<ggml_tensor *, REPLAY_COUNT>> replay_l;
+    bool replay_begin(llama_pos start, uint32_t width);
+    void replay_finish(uint32_t n_keep);
+
     // per-seq rollback index
     std::vector<uint32_t> rs_idx;
 
@@ -107,6 +117,11 @@ public:
     };
 
     std::vector<mem_cell> cells;
+
+    std::vector<mem_cell> replay_cells;
+    uint32_t replay_head = 0, replay_used = 0, replay_n = 0, replay_width = 0;
+    int32_t replay_rs_z = -1;
+    llama_pos replay_start = -1;
 
     // per layer
     std::vector<ggml_tensor *> r_l;
@@ -170,6 +185,9 @@ public:
     uint32_t get_head() const;
     int32_t  get_rs_z() const;
     uint32_t get_size() const;
+    bool has_replay() const;
+    bool is_recording() const;
+    ggml_tensor * get_replay(int32_t il, llama_memory_recurrent::replay_kind kind) const;
 
     ggml_tensor * get_r_l(int32_t il) const;
     ggml_tensor * get_s_l(int32_t il) const;

@@ -239,6 +239,56 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
 } // namespace
 
 EngineOptions normalize_engine_options(EngineOptions options) {
+    if (!options.kvmem.selected_tokens &&
+        (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers ||
+         !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes)) {
+        throw std::invalid_argument("KVMem auxiliary budgets require selected_tokens");
+    }
+    if (options.kvmem.selected_tokens != 0) {
+        if (options.kvmem.disk_path.empty() != (options.kvmem.disk_bytes == 0) ||
+            (!options.kvmem.disk_path.empty() &&
+             (options.max_concurrency != 1 || options.enable_vision || options.device_profile != "off"))) {
+            throw std::invalid_argument("KVMem cold snapshots require a path, nonzero disk quota, one text lane and --device-profile off");
+        }
+        const auto window = options.kvmem.device_tokens();
+        const bool ordinary = options.speculative.backend == SpeculativeBackend::None &&
+            options.speculative.draft_tokens == 0;
+        const bool fixed_mtp = options.speculative.backend == SpeculativeBackend::Mtp &&
+            (options.speculative.draft_tokens >= 1 && options.speculative.draft_tokens <= 4) &&
+            options.speculative.mtp_policy == MtpDraftPolicy::Fixed;
+        const bool memory_ngram_supported = options.speculative.ngram_draft_tokens == 0 ||
+            (fixed_mtp && options.max_concurrency == 1 && !options.enable_vision &&
+             options.speculative.ngram_draft_tokens <= 63 &&
+             options.speculative.ngram_min_match >= 4 && options.speculative.ngram_min_match <= 64 &&
+             std::max(options.speculative.draft_tokens, options.speculative.ngram_draft_tokens) +
+                 options.speculative.draft_tokens <= options.kvmem.reserve_tokens);
+        const bool memory_spec_supported = (ordinary || fixed_mtp) && memory_ngram_supported &&
+            options.speculative.lookup_ngram == 0 && options.speculative.mtp_attention_window == 0;
+
+        if (options.purpose != EnginePurpose::Generation || options.max_concurrency == 0 || options.max_concurrency > 4 ||
+            options.devices.size() > 1 || options.concurrent_prefill ||
+            (options.enable_vision && (options.max_concurrency != 1 ||
+                options.vision_residency != VisionResidency::Resident)) ||
+            !memory_spec_supported ||
+            options.cuda_memory_policy != CudaMemoryPolicy::DriverDefault ||
+            options.kv_capacity.mode != KvCapacityMode::Explicit ||
+            options.kv_capacity.explicit_tokens != window * options.max_concurrency || window % 64 != 0 || window < 256 ||
+            window > options.max_context || options.kvmem.selected_tokens < 128 ||
+            options.kvmem.selected_tokens % 64 != 0 || options.kvmem.reserve_tokens < 64 ||
+            options.kvmem.reserve_tokens % 64 != 0 || !options.kvmem.host_bytes ||
+            options.kvmem.retained_sessions == 0 || options.kvmem.retained_sessions > 16 ||
+            options.prefill_chunk == 0 || options.prefill_chunk % 64 != 0 ||
+            options.prefill_chunk > options.kvmem.reserve_tokens ||
+            options.context_cache.enabled || options.fast_prefill_kernel ||
+            (options.kv_cache != KvCacheStorage::BFloat16 && options.kv_cache != KvCacheStorage::Int8Group64 &&
+             options.kv_cache != KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) ||
+            (options.kv_cache == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 &&
+             (options.max_concurrency != 1 || options.enable_vision))) {
+            throw std::invalid_argument("KVMem requires explicit B+R page-aligned "
+                "capacity per lane, nonzero global H, aligned prefill <= R, BF16/INT8 or single-lane text RK8V4, 1..4 text lanes or one resident-vision lane, ordinary/MTP1..4, "
+                "and disabled prefix cache");
+        }
+    }
     switch (options.purpose) {
     case EnginePurpose::Generation:
         break;

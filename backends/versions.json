@@ -1,0 +1,17 @@
+{
+  "layout": "vendored-sources",
+  "llamacpp": {
+    "path": "llama.cpp",
+    "upstream": "https://github.com/ggml-org/llama.cpp.git",
+    "base_commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+    "license_file": "llama.cpp/LICENSE",
+    "local_changes": "KVMem hooks, KV payload transfers, recurrent state and speculative execution integration; tracked in this repository"
+  },
+  "ninfer": {
+    "path": "backends/ninfer",
+    "upstream": "https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco.git",
+    "base_commit": "6e9189c1089f6968e29fe2e1c51b4596e2346eed",
+    "license_file": "backends/ninfer/LICENSE",
+    "local_changes": "KVMem memory backend, MTP/RK8V4/ngram, history and cold snapshots; tracked in this repository"
+  }
+}

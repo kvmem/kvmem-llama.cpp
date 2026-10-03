@@ -28,3 +28,11 @@ CLAUDE.md
 /build-hip*/
 /dist/
 /artifacts/
+
+# Unified backend builds and local model/session artifacts
+/build-*/
+*.ninfer
+*.safetensors
+*.nkm
+/dsh-*/
+/results/

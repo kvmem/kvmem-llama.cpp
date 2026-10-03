@@ -44,6 +44,12 @@ struct PersistentLayout {
     std::optional<DFlashPersistentLayout> dflash;
     qwen3_5::RoundStateLayout round;
     TensorLayout prefill_hidden;
+    std::optional<TensorLayout> memory_key_sums;
+    std::optional<TensorLayout> memory_candidate_keys;
+    std::optional<TensorLayout> memory_candidate_origin;
+    std::optional<TensorLayout> memory_prefill_origin;
+    std::optional<TensorLayout> memory_query_sums;
+    std::optional<TensorLayout> memory_ranges;
     std::optional<TensorLayout> score_hidden;
     std::optional<TensorLayout> token_counts;
     std::optional<TensorLayout> sampling_config;
@@ -96,6 +102,8 @@ struct WorkspacePlan {
 struct SequencePlanningInputs {
     const execution::Parameters* parameters = nullptr;
     std::uint32_t capacity                  = 0;
+    std::uint32_t kvmem_window_tokens = 0;
+    KvmemOptions kvmem;
     std::uint32_t max_concurrency           = 1;
     std::uint32_t prefill_chunk             = 0;
     bool fast_prefill_kernel                = false;
@@ -126,6 +134,8 @@ namespace ninfer::models::qwen3_5::detail {
 struct SequencePlanImpl {
     const execution::Parameters* parameters = nullptr;
     std::uint32_t capacity                  = 0;
+    std::uint32_t kvmem_window_tokens = 0;
+    KvmemOptions kvmem;
     std::uint32_t kv_capacity               = 0;
     std::uint32_t main_page_groups          = 0;
     std::uint32_t max_concurrency           = 1;

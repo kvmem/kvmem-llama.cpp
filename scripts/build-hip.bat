@@ -27,34 +27,10 @@ setlocal EnableDelayedExpansion
 set "ROOT=%~dp0.."
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 
-REM --- apply the maintained llama.cpp integration patch ----------------------
-REM The submodule stores the clean upstream pin; KVMem's llama.cpp hooks live in
-REM patches\llama-kvmem-current.patch. Keep this idempotent so a fresh clone and
-REM an already-patched developer tree follow the same build path.
-set "LLAMA_DIR=%ROOT%\llama.cpp"
-set "LLAMA_PATCH=%ROOT%\patches\llama-kvmem-current.patch"
-if not exist "%LLAMA_DIR%\CMakeLists.txt" (
-    echo [error] llama.cpp submodule is missing. Run git submodule update --init.
+REM The llama.cpp integration is versioned directly in this repository.
+if not exist "%ROOT%\llama.cpp\src\llama-kvmem-factory.h" (
+    echo [error] Missing vendored llama.cpp integration sources. Use a complete checkout.
     exit /b 1
-)
-git -C "%LLAMA_DIR%" apply --ignore-space-change --reverse --check "%LLAMA_PATCH%" >nul 2>&1
-if errorlevel 1 (
-    git -C "%LLAMA_DIR%" apply --ignore-space-change --check "%LLAMA_PATCH%"
-    if errorlevel 1 (
-        echo [error] The maintained llama.cpp patch does not apply cleanly.
-        exit /b 1
-    )
-    git -C "%LLAMA_DIR%" apply --ignore-space-change "%LLAMA_PATCH%"
-    if errorlevel 1 exit /b 1
-)
-
-set "RDNA2_PATCH=%ROOT%\patches\0005-hip-rdna2-quantized-kv-fa-vec.patch"
-git -C "%LLAMA_DIR%" apply --ignore-space-change --reverse --check "%RDNA2_PATCH%" >nul 2>&1
-if errorlevel 1 (
-    git -C "%LLAMA_DIR%" apply --ignore-space-change --check "%RDNA2_PATCH%"
-    if errorlevel 1 exit /b 1
-    git -C "%LLAMA_DIR%" apply --ignore-space-change "%RDNA2_PATCH%"
-    if errorlevel 1 exit /b 1
 )
 
 if "%JOBS%"=="" set "JOBS=12"

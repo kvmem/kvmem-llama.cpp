@@ -5,6 +5,7 @@
 #include "llama-kvmem-hooks.h"
 
 #include "kvmem/kvmem_runtime.hpp"
+#include "kvmem/kv_content.hpp"
 #include "kvmem/raw_kv_store.hpp"
 #include "kvmem/rope.hpp"
 
@@ -116,6 +117,9 @@ public:
     bool commit_resident(bool canonical = true);
     bool get_query(llama_kvmem_query_state & state);
     bool set_query(const llama_kvmem_query_state & state);
+    bool get_tail_mean(uint32_t row, llama_kvmem_tail_mean_state & state);
+    bool tail_mean_valid(uint32_t row, const llama_kvmem_tail_mean_state & state) const;
+    bool set_tail_mean(uint32_t row, const llama_kvmem_tail_mean_state & state);
     void freeze_query(bool frozen) { query_frozen_ = frozen; }
     // The follower also invalidates a pending proof when old draft KV changes.
     void note_attention_change() { ++attention_epoch_; }
@@ -125,15 +129,15 @@ public:
     void set_replay(bool replay);
     bool replay() const { return replay_; }
     bool want_prefill_capture() const {
-        return prefill_capture_ && !retrieval_pinned_ && !replay_;
+        return prefill_capture_ && !retrieval_pinned_ && !replay_ && !speculative_evaluation_;
     }
     // Recapture Q for retrieval even while replaying a cached query span.
     bool want_q_capture() const {
-        return method_ == 1 && !retrieval_pinned_ && !query_frozen_ &&
+        return method_ == 1 && !retrieval_pinned_ && !query_frozen_ && !speculative_evaluation_ &&
             (explicit_spans_ ? !turn_spans_.query.empty() : query_begin_ >= 0);
     }
     bool want_decode_mean() const {
-        return retrieval_pinned_ && method_ == 1 && !replay_;
+        return (retrieval_pinned_ || speculative_evaluation_) && method_ == 1 && !replay_;
     }
     void end_prefill_capture() { prefill_capture_ = false; }
     // Next request continues this sequence: flush decode mean, unpin
@@ -157,6 +161,8 @@ public:
     }
     llama_pos recr_pos_max() const;
     void decode_mean_commit(uint32_t n_keep);
+    void begin_speculative_evaluation();
+    bool commit_speculative(llama_context * ctx, uint32_t n_keep);
     void decode_mean_discard();
     void decode_mean_flush();
     void set_recurrent(llama_memory_recurrent * recr);
@@ -232,8 +238,18 @@ private:
     };
 
     uint32_t resident_tokens() const;
+    enum class NativePurpose { Retrieval, Pressure, Detach, Attach };
+    struct NativeBackend;
+    struct NativeTransfer;
+    bool native_contract_supported() const;
+    void run_native_transaction(const std::vector<uint32_t> & selected, NativePurpose purpose);
+    void apply_native_selection(const llama_kvmem_selection & selection);
+    void restore_attached(const kvmem::NativeResidencyPlan & plan);
+    bool packed_complete(uint32_t id, uint32_t tokens) const;
+    bool native_cells_complete(const kvmem::BlockDescriptor & block) const;
+    void harvest_pending_impl(struct ggml_backend_sched * sched);
     bool prepare_working_set(uint32_t n_new_tokens);
-    void apply_plan_to_kv(const kvmem::KvMemPlan & plan);
+    void apply_plan_to_kv(const kvmem::NativeResidencyPlan & plan);
     // Place GPU-resident blocks into slots 0..N-1 in orig_pos order.
     // Resident KV is copied slot-to-slot; cold blocks memcpy packed GPU K/V.
     bool layout_gpu_slots_by_orig_pos();
@@ -253,7 +269,7 @@ private:
     // hands, where an escape would corrupt store identity. `what` names the
     // path in the log and nothing else.
     void conv_reset_to_empty(const char * what) noexcept;
-    void trace_plan(const char * tag, const kvmem::KvMemPlan & plan) const;
+    void trace_plan(const char * tag, const kvmem::NativeResidencyPlan & plan) const;
     void write_block_to_gpu(uint32_t block_id);
     void harvest_gpu_v(uint32_t block_id);
     void harvest_gpu_v_commit();
@@ -401,6 +417,17 @@ private:
     kvmem::RawKvStoreConfig raw_cfg_{};
     std::unique_ptr<kvmem::KvMemRuntime> runtime_;
     std::unique_ptr<kvmem::RawKvStore> raw_;
+    std::unique_ptr<kvmem::KvContent> content_;
+    std::vector<std::pair<uint32_t, uint32_t>> evaluation_queue_;
+    size_t evaluation_cursor_ = 0;
+    std::optional<std::pair<uint32_t, uint32_t>> speculative_span_;
+    bool speculative_evaluation_ = false;
+    std::optional<kvmem::MemoryStamp> speculative_stamp_;
+    bool native_transfer_pending_ = false;
+    uint8_t * native_layout_scratch_ = nullptr; // borrowed from the prepared transfer
+    uint8_t * native_mtp_scratch_ = nullptr;
+    // Private test seam: no environment/config option can install this probe.
+    void (*native_probe_)(llama_memory_kvmem &, kvmem::MemoryPhase) = nullptr;
     std::vector<int32_t> free_slots_;
     struct RowPosition {
         std::array<llama_pos, 4> pos{};
@@ -420,12 +447,8 @@ private:
     ggml_type type_v_ = GGML_TYPE_F16;
     bool v_trans_ = false;
     bool replay_ = false;
-    // Set when a full seq_rm zeroes the block table while leaving the host
-    // mirror behind, so raw_ still holds blocks the table no longer owns and
-    // truncate_cached's own guard can no longer reach them. Nothing on the
-    // default path reads this; a store swap refuses to carry such a store and
-    // clears it instead of restaging another turn's packed K. reset_policy()
-    // puts the two back in lockstep at zero and clears it.
+    // Failed store repair marker. Such a bundle cannot be carried into another
+    // conversation; reset_policy restores both the logical and packed stores.
     bool host_mirror_stale_ = false;
     bool retrieval_pinned_ = false;
     bool keep_selected_ = false;

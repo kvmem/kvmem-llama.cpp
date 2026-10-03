@@ -559,6 +559,9 @@ std::optional<PhysicalUsageSnapshot> Program::shutdown_cleanup() noexcept {
 bool Program::isolated_request_feasible(const RequestBasePlan& base) const noexcept {
     return impl_->isolated_request_feasible(base);
 }
+bool Program::temporary_request_feasible(const RequestBasePlan& base) const noexcept {
+    return impl_->temporary_request_feasible(base);
+}
 
 bool Program::hybrid_prefix_cache() const noexcept { return impl_->hybrid_prefix_cache(); }
 

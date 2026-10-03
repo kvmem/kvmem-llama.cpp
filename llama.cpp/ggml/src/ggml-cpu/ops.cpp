@@ -10934,15 +10934,15 @@ static void ggml_compute_forward_gated_delta_net_one_chunk(
 
     // K (snapshot slot count) is an op param; state holds s0 only [S_v, S_v, H, n_seqs].
     const int64_t K = ggml_get_op_params_i32(dst, 0);
-    GGML_ASSERT(K >= 1);
+    GGML_ASSERT(K >= 0);
     // per-seq stride in floats (seq s starts at state + s * seq_stride)
     const int64_t state_seq_stride = src_state->nb[3] / sizeof(float);
 
-    const int64_t per_thread = S_v + (K > 1 ? S_v * S_v : 0);
+    const int64_t per_thread = S_v + (K != 1 ? S_v * S_v : 0);
     const int ith = params->ith;
 
     float * delta       = (float *)params->wdata + ith * per_thread + CACHE_LINE_SIZE_F32;
-    float * state_work  = K > 1 ? (delta + S_v) : nullptr;
+    float * state_work  = K != 1 ? (delta + S_v) : nullptr;
 
     // output layout: [attn_scores | new_states]
     // attn_scores: S_v * H * n_tokens * n_seqs    floats
@@ -10976,7 +10976,7 @@ static void ggml_compute_forward_gated_delta_net_one_chunk(
 
         // For K=1, write directly to the single output slot to avoid an extra memcpy at the end.
         // For K>1, work in scratch and copy out per-token when the slot is in range.
-        float * s_out = (K > 1)
+        float * s_out = (K != 1)
             ? state_work
             : state_out_base + (iv3 * H + iv1) * S_v * S_v;
 

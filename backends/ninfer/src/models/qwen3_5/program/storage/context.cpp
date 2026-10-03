@@ -6,6 +6,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <span>
@@ -246,6 +248,7 @@ void ProgramImpl::retire_continuation_slot(std::uint32_t index) noexcept {
     sequence.prefix_identity.clear();
     sequence.prefix_digests.clear();
     sequence.rope_delta              = 0;
+    sequence.window = {};
     sequence.text_kv_valid           = 0;
     sequence.mtp_kv_valid            = 0;
     sequence.dflash_context_frontier = 0;
@@ -1507,7 +1510,7 @@ void ProgramImpl::unbind_sequence_kv(SequenceState& sequence) noexcept {
 
 void ProgramImpl::ensure_sequence_kv_lease(SequenceState& sequence, std::uint32_t main_tokens,
                                            std::uint32_t backend_tokens) {
-    if (!context_cache.kv_lease_growth) { return; }
+    if (kvmem_window_tokens || !context_cache.kv_lease_growth) { return; }
     // Only a decode step may extend the lease: materialization during admission has to leave the
     // sequence holding exactly the entitlement its plan declared.
     RequestControl& request = requests[sequence.lane];
@@ -1678,9 +1681,9 @@ void ProgramImpl::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32
         throw std::logic_error("backend KV materialization requested without an allocation");
     }
     ensure_sequence_kv_lease(sequence, main_tokens, backend_tokens);
-    text_kv_addresses->ensure_mapped_to_tokens(sequence.kv->text, main_tokens, compute_streams);
+    text_kv_addresses->ensure_mapped_to_tokens(sequence.kv->text, compact_position(sequence, main_tokens), compute_streams);
     if (backend_tokens != 0) {
-        backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, backend_tokens,
+        backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, compact_position(sequence, backend_tokens),
                                                       compute_streams);
     }
 }
@@ -1691,9 +1694,9 @@ void ProgramImpl::commit_sequence_kv(SequenceState& sequence, std::uint32_t main
         (backend_tokens != 0 && !sequence.kv->backend)) {
         throw std::logic_error("KV commit request is outside the sequence bundle");
     }
-    text_kv_addresses->commit_frontier(sequence.kv->text, main_tokens);
+    text_kv_addresses->commit_frontier(sequence.kv->text, compact_position(sequence, main_tokens));
     if (sequence.kv->backend) {
-        backend_kv_addresses->commit_frontier(*sequence.kv->backend, backend_tokens);
+        backend_kv_addresses->commit_frontier(*sequence.kv->backend, compact_position(sequence, backend_tokens));
     }
     if (hybrid_) { hybrid_publish_blocks(sequence); }
 }
@@ -1706,9 +1709,9 @@ void ProgramImpl::trim_sequence_kv(SequenceState& sequence, std::uint32_t main_t
     if (backend_tokens != 0 && !sequence.kv->backend) {
         throw std::logic_error("backend KV trim requested without an allocation");
     }
-    text_kv_addresses->destructive_truncate(sequence.kv->text, main_tokens);
+    text_kv_addresses->destructive_truncate(sequence.kv->text, compact_position(sequence, main_tokens));
     if (sequence.kv->backend) {
-        backend_kv_addresses->destructive_truncate(*sequence.kv->backend, backend_tokens);
+        backend_kv_addresses->destructive_truncate(*sequence.kv->backend, compact_position(sequence, backend_tokens));
     }
 }
 
@@ -1805,6 +1808,7 @@ void ProgramImpl::ordered_reset(SequenceState& sequence) {
     set_device_i32(io.rope_pos, 0);
     set_device_i32(io.rope_delta, 0);
     if (io.mtp) { set_device_i32(io.mtp->position, 0); }
+    sequence.window = {};
     sequence.text_kv_valid           = 0;
     sequence.mtp_kv_valid            = 0;
     sequence.dflash_context_frontier = 0;

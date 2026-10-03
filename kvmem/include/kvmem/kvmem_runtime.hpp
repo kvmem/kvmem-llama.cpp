@@ -2,7 +2,8 @@
 
 // Host-side KVMem runtime: block table + CPU/NVMe tiers + reselect cadence.
 // finish_reselect always runs stage_out before stage_in. GPU copies go through
-// KvMemBackend (no-op in P0).
+// the legacy KvMemBackend (optional for parked metadata-only runtimes).
+// New backend integration uses MemorySession's versioned transfer lifecycle.
 
 #include "kvmem/kvmem_backend.hpp"
 #include "kvmem/kvmem_store.hpp"
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -39,6 +41,7 @@ public:
     KvMemStore &store() { return store_; }
     const KvMemStore &store() const { return store_; }
     const KvMemPlan &last_plan() const { return last_plan_; }
+    const NativeResidencyPlan & last_native_plan() const { return native_plan_.value(); }
     // True while a prepared plan has not been applied yet (prepare_selection /
     // prepare_prefill_pressure set it, admit_incoming clears it).
     bool pending() const { return pending_; }
@@ -48,6 +51,8 @@ public:
         size_t bytes = sizeof(*this) + store_.allocated_bytes() + cpu_arena_.capacity() + scratch_.capacity();
         bytes += last_plan_.stage_in.capacity()*sizeof(uint32_t) +
             last_plan_.stage_out.capacity()*sizeof(uint32_t) + last_plan_.remaps.capacity()*sizeof(KvMemRemap);
+        if (native_plan_) bytes += (native_plan_->selected.capacity() +
+            native_plan_->stage_in.capacity() + native_plan_->stage_out.capacity()) * sizeof(uint32_t);
         bytes += pending_gpu_frees_.capacity()*sizeof(int32_t) + prefetch_futs_.capacity()*sizeof(std::future<void>);
         for (const auto & entry : prefetch_buf_) if (entry.second) bytes += entry.second->capacity();
         return bytes;
@@ -73,6 +78,12 @@ public:
                                bool force_raw_refresh = false);
     std::vector<uint32_t> preview_reselect(const std::vector<uint32_t> & mandatory = {}) const;
     KvMemPlan prepare_selection(const std::vector<uint32_t> & selected, bool force_raw_refresh = false);
+    // Native bridge: selection remains unchanged until admit_incoming succeeds.
+    // The adapter still owns packed KV completion and attention publication.
+    NativeResidencyPlan prepare_native_selection(const std::vector<uint32_t> & selected);
+    bool maybe_offload_native_during_prefill(uint32_t incoming_tokens,
+        uint32_t resident_tokens, uint32_t pool_tokens,
+        const std::vector<uint32_t> & mandatory = {});
     bool commit_resident_selection(const std::vector<uint32_t> & selected);
     KvMemPlan prepare_prefill_pressure(
         const std::vector<uint32_t> &mandatory = {});
@@ -100,6 +111,12 @@ public:
     }
 
 private:
+    const std::vector<uint32_t> & stage_in_blocks() const {
+        return native_plan_ ? native_plan_->stage_in : last_plan_.stage_in;
+    }
+    const std::vector<uint32_t> & stage_out_blocks() const {
+        return native_plan_ ? native_plan_->stage_out : last_plan_.stage_out;
+    }
     void stage_out(uint32_t block_id);
     void stage_in(uint32_t block_id);
     void start_prefetch();
@@ -116,6 +133,7 @@ private:
     std::unique_ptr<PinnedKvTier> cpu_tier_;
     std::unique_ptr<NvmeKvTier> nvme_tier_;
     KvMemPlan last_plan_;
+    std::optional<NativeResidencyPlan> native_plan_;
     bool pending_ = false;
     bool trace_ = false;
     uint64_t slot_bytes_ = 0;

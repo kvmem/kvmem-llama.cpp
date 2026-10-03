@@ -1,4 +1,5 @@
 #include "kvmem/kvmem_store.hpp"
+#include "kvmem/memory_contract.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -454,10 +455,14 @@ std::vector<uint32_t> KvMemStore::pick_prefill_ungrouped(
         }
     }
     for (size_t i = mandatory_blocks.size(); i > 0 && kept_count < budget; --i) {
-        const uint32_t before = kept_count;
         keep(mandatory_blocks[i - 1]);
-        if (kept_count > before) {
-            ++mand_kept;
+    }
+    // Diagnostic membership includes mandatory blocks already kept as sink.
+    // Selection and its priority order above are unchanged.
+    {
+        std::vector<uint8_t> counted(n, 0);
+        for (uint32_t id : mandatory_blocks) {
+            if (id < n && kept[id] && !counted[id]) { counted[id] = 1; ++mand_kept; }
         }
     }
     if (mand_kept < mand_unique) {
@@ -518,10 +523,14 @@ std::vector<uint32_t> KvMemStore::pick_topk_ungrouped(
         }
     }
     for (size_t i = mandatory_blocks.size(); i > 0 && kept_count < budget; --i) {
-        const uint32_t before = kept_count;
         keep(mandatory_blocks[i - 1]);
-        if (kept_count > before) {
-            ++mand_kept;
+    }
+    // Diagnostic membership includes mandatory blocks already kept as sink.
+    // Selection and its priority order above are unchanged.
+    {
+        std::vector<uint8_t> counted(n, 0);
+        for (uint32_t id : mandatory_blocks) {
+            if (id < n && kept[id] && !counted[id]) { counted[id] = 1; ++mand_kept; }
         }
     }
     if (mand_kept < mand_unique) {
@@ -665,10 +674,14 @@ std::vector<uint32_t> KvMemStore::pick_semantic_groups(
         }
     }
     for (size_t i = mandatory_blocks.size(); i > 0 && kept_count < budget; --i) {
-        const uint32_t before = kept_count;
         keep(mandatory_blocks[i - 1]);
-        if (kept_count > before) {
-            ++mand_kept;
+    }
+    // Diagnostic membership includes mandatory blocks already kept as sink.
+    // Selection and its priority order above are unchanged.
+    {
+        std::vector<uint8_t> counted(n, 0);
+        for (uint32_t id : mandatory_blocks) {
+            if (id < n && kept[id] && !counted[id]) { counted[id] = 1; ++mand_kept; }
         }
     }
     if (mand_kept < mand_unique) {
@@ -878,6 +891,32 @@ KvMemPlan KvMemStore::set_selection(std::vector<uint32_t> selected_ids,
         window_pos += b.n_tokens;
     }
     plan.total_window_tokens = window_pos;
+    return plan;
+}
+
+NativeResidencyPlan KvMemStore::plan_native_selection(std::vector<uint32_t> selected_ids) const {
+    std::sort(selected_ids.begin(), selected_ids.end());
+    for (auto id : selected_ids) {
+        if (id >= block_count() || !blocks_[id].n_tokens)
+            throw MemoryError(MemoryErrorCode::InvalidPlan, "unknown/empty block in native selection");
+    }
+    std::vector<uint64_t> resident;
+    for (const auto & b : blocks_) {
+        if (b.in_flight || (b.gpu_slot >= 0 && b.tier != KvTier::GPU))
+            throw MemoryError(MemoryErrorCode::Pending, "native residency is not stable");
+        if (b.gpu_slot >= 0 && b.n_tokens) resident.push_back(b.block_id);
+    }
+    const auto delta = plan_residency(resident,
+        std::vector<uint64_t>(selected_ids.begin(), selected_ids.end()), !cfg_.optimize_stage_in);
+    NativeResidencyPlan plan;
+    plan.selected = std::move(selected_ids);
+    plan.stage_out.assign(delta.evict.begin(), delta.evict.end());
+    plan.stage_in.assign(delta.restore.begin(), delta.restore.end());
+    plan.gpu_reused_blocks = static_cast<uint32_t>(delta.retain.size());
+    for (auto id : plan.selected) {
+        plan.total_window_tokens += blocks_[id].n_tokens;
+        plan.selection_overlap_blocks += blocks_[id].in_working_set;
+    }
     return plan;
 }
 

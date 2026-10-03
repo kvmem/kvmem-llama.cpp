@@ -3,7 +3,7 @@ name: Server and UI compatibility
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [master, feat/multi-backend-framework]
   workflow_dispatch:
 
 permissions:
@@ -23,12 +23,9 @@ jobs:
         nvme: ['OFF', 'ON']
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: bash scripts/apply-patches.sh
       - run: python3 tests/test_launcher_key_file.py
       - run: python3 scripts/test_start_server.py
       - run: python3 scripts/test_build_rocm.py
@@ -48,12 +45,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: bash scripts/apply-patches.sh
       - run: python scripts/test_build_rocm.py
       - name: Configure host and model-free server tests
         run: >-
@@ -91,9 +85,6 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates build-essential cmake ninja-build libssl-dev python3 time ccache zstd
       - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - run: bash scripts/apply-patches.sh
       - name: Identify the compiler toolchain
         id: toolchain
         run: |
@@ -162,8 +153,6 @@ jobs:
         mode: [lightweight, full]
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

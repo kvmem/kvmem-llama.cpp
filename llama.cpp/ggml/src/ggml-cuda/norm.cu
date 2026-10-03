@@ -1,4 +1,5 @@
 #include "norm.cuh"
+#include "unary.cuh"
 #include <cstdint>
 
 template <int block_size>
@@ -151,6 +152,26 @@ static __global__ void rms_norm_f32(const float * x,
         } else {
             dst[col] = scale * x[col];
         }
+    }
+}
+
+static __global__ void rms_norm_silu_gate_f32(
+        const float * x, const float * weight, const float * gate, float * dst,
+        const int64_t stride_row, const int64_t stride_channel, const int64_t stride_sample, const float eps) {
+    ggml_cuda_pdl_lc();
+    const int64_t row = ((int64_t(blockIdx.z) * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x) * 128;
+    x += blockIdx.z * stride_sample + blockIdx.y * stride_channel + blockIdx.x * stride_row;
+    gate += row;
+    dst += row;
+    const int col = threadIdx.x;
+    ggml_cuda_pdl_sync();
+    float sum = col < 128 ? x[col] * x[col] : 0.0f;
+    extern __shared__ float shared[];
+    sum = block_reduce<block_reduce_method::SUM, 128>(sum, shared);
+    const float scale = rsqrtf(sum / 128 + eps);
+    if (col < 128) {
+        const float normalized = scale * x[col] * weight[col];
+        dst[col] = ggml_cuda_op_silu_single(gate[col]) * normalized;
     }
 }
 
@@ -557,6 +578,21 @@ void ggml_cuda_op_rms_norm_fused(ggml_backend_cuda_context & ctx, ggml_tensor * 
                           /*add_s00*/ 0, 0, 0,
                           0, 0, 0, 0,
                           eps, stream);
+}
+
+void ggml_cuda_op_rms_norm_silu_gate(ggml_backend_cuda_context & ctx, ggml_tensor * rms_norm,
+                                    ggml_tensor * weighted, ggml_tensor * silu, ggml_tensor * dst) {
+    const ggml_tensor * x = rms_norm->src[0];
+    const ggml_tensor * weight = weighted->src[0] == rms_norm ? weighted->src[1] : weighted->src[0];
+    const ggml_tensor * gate = silu->src[0];
+    const float eps = ggml_get_op_params_f32(rms_norm, 0);
+    const ggml_cuda_kernel_launch_params launch_params{
+        dim3(x->ne[1], x->ne[2], x->ne[3]), dim3(128), 32 * sizeof(float), ctx.stream()};
+    ggml_cuda_kernel_launch(rms_norm_silu_gate_f32, launch_params,
+        static_cast<const float *>(x->data), static_cast<const float *>(weight->data),
+        static_cast<const float *>(gate->data), static_cast<float *>(dst->data),
+        int64_t(x->nb[1] / sizeof(float)), int64_t(x->nb[2] / sizeof(float)),
+        int64_t(x->nb[3] / sizeof(float)), eps);
 }
 
 void ggml_cuda_op_rms_norm_fused_add(ggml_backend_cuda_context & ctx,

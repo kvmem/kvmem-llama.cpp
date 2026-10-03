@@ -30,6 +30,7 @@ public:
     [[nodiscard]] bool prefix_equals(const ResidentPrefixIdentity& other, std::size_t count) const;
 
 private:
+    friend struct KvmemSnapshotCodec;
     std::vector<std::uint8_t> token_types_;
     std::array<std::vector<std::int32_t>, 3> positions_;
     std::vector<VisionItem> vision_items_;

@@ -1,3 +1,7 @@
+# Historical patch archive
+
+The multi-backend branch tracks the patched backend sources directly. These files describe older release layouts; do not apply them to the vendored trees. Update sources and backends/versions.json together when importing upstream changes.
+
 # llama.cpp patch replay
 
 `llama-kvmem-current.patch` is the cumulative diff against the pinned

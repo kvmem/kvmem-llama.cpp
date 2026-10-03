@@ -3,6 +3,7 @@
 #include "models/qwen3_5/execution/parameters.h"
 #include "models/qwen3_5/execution/rotation.h"
 #include "ninfer/ops/rope.h"
+#include "models/qwen3_5/execution/memory_statistics.h"
 
 namespace ninfer::models::qwen3_5::execution {
 
@@ -26,6 +27,7 @@ void text_qk_norm_rope(const Tensor& positions, const RopeConfig& rope,
                        const AttentionConfig& attention, float rms_norm_eps,
                        const Tensor& q_norm_weight, const Tensor& k_norm_weight,
                        const Tensor& query, const Tensor& key, Tensor& normalized_query,
-                       Tensor& normalized_key, const ops::RopeYarn& yarn, cudaStream_t stream);
+                       Tensor& normalized_key, const ops::RopeYarn& yarn, cudaStream_t stream,
+                       const MemoryStatistics* statistics = nullptr, std::int32_t layer = 0);
 
 } // namespace ninfer::models::qwen3_5::execution

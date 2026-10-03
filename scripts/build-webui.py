@@ -53,14 +53,14 @@ def main():
     # 中文：--full-ui 构建完整上游 UI（含 PWA/manifest）；默认仅构建轻量级入口页面
     args = ap.parse_args()
     work = prepare_workspace(args.build_dir, ROOT, args.full_ui)
-    submodule_test = subprocess.run(['git', 'rev-parse', '--verify', 'HEAD:llama.cpp'], cwd=ROOT, capture_output=True)
-    if (ROOT / '.git').exists() and submodule_test.returncode == 0:
-        pin = subprocess.check_output(['git', 'rev-parse', 'HEAD:llama.cpp'], cwd=ROOT, text=True).strip()
-        data = subprocess.check_output(['git', 'archive', pin, 'tools/ui'], cwd=ROOT / 'llama.cpp')
+    source_test = subprocess.run(['git', 'rev-parse', '--verify', 'HEAD:llama.cpp/tools/ui'], cwd=ROOT, capture_output=True)
+    if (ROOT / '.git').exists() and source_test.returncode == 0:
+        pin = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+        data = subprocess.check_output(['git', 'archive', pin, 'llama.cpp/tools/ui'], cwd=ROOT)
         with tarfile.open(fileobj=io.BytesIO(data)) as archive:
             for member in archive.getmembers():
                 if member.isfile():
-                    name = Path(member.name).relative_to('tools/ui')
+                    name = Path(member.name).relative_to('llama.cpp/tools/ui')
                     dest = work / name
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_bytes(archive.extractfile(member).read())

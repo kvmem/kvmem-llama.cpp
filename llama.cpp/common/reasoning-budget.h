@@ -43,6 +43,9 @@ struct llama_sampler * common_reasoning_budget_init(
 
 common_reasoning_budget_state common_reasoning_budget_get_state(const struct llama_sampler * smpl);
 
+// Read prompt tokens without consuming the forced output sequence.
+void common_reasoning_budget_accept_prefill(struct llama_sampler * smpl, llama_token token);
+
 // The end sequence that transitioned the sampler to DONE, or nullptr if none
 // was recorded. Cleared when a new start sequence re-arms the sampler.
 const llama_tokens * common_reasoning_budget_get_end_match(const struct llama_sampler * smpl);

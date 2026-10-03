@@ -1,4 +1,9 @@
-# KVMem + llama.cpp
+# KVMem: llama.cpp and ninfer backends
+
+> Development branch: the multi-backend framework now vendors llama.cpp and ninfer in one repository. See [repository layout and builds](docs/multi-backend-repository.md) and [backend capabilities](docs/multi-backend.md). P6-P10 final qualification is still in progress.
+
+
+This development checkout adds a Windows single-GPU ninfer text backend with native KVMem history storage, retrieval and multi-turn checkpoints. See [multi-backend startup and build instructions](docs/multi-backend.md). Existing llama.cpp entry points remain available; the prebuilt releases below describe the earlier llama.cpp product.
 
 **Prebuilt downloads:** [Windows x64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Linux / WSL2 x86_64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Windows / Linux ROCm (beta 2)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2)
 
@@ -62,7 +67,7 @@ For example, add `--kvmem-conversations 3 --kvmem-session-ram-gb 12 --kvmem-sess
 
 `kvmem/` holds the host store and retrieval logic; `src/adapter/` connects it through llama.cpp’s memory interface. Attention kernels and original positions stay unchanged. Reselection transfers only blocks that changed.
 
-Do **not** commit a dirty `llama.cpp` working tree. The submodule pointer is the pin; `scripts/apply-patches.sh` replays `patches/`.
+`llama.cpp/` and `backends/ninfer/` are ordinary versioned source directories. Commit backend edits together with the matching core and adapter changes; there is no submodule or patch replay step.
 
 ## Tested platform
 
@@ -97,6 +102,10 @@ The recipes and conversion commands below document the historical tested setup.
 
 ## Clone, patch, build
 
+The isolated multi-backend refactor adds a C++17 [native memory contract](docs/memory-backend-contract.md),
+including transfer lifecycle and payload tests. Production adapter migration is a later step;
+the existing server entry point remains the llama.cpp adapter.
+
 Building uses a C++17 compiler, CMake and **CUDA Toolkit 13.2 Update 2 (nvcc 13.2.86) or newer**. The Linux startup scripts use Python 3.10+ and `ss` (iproute2).
 
 **CUDA compiler version matters for correctness.** The validated baseline is nvcc **13.2.86** on Linux/WSL2 and native Windows. A Windows build made with nvcc 13.2.51 produced garbage output from Qwen3.8-27B IQ3_S even with KVMem and MTP disabled; rebuilding unchanged source with 13.2.86 restored correct output. A successful build, health check or small Q8 model test does not validate IQ3 inference. Newer toolchains still need correctness testing before release.
@@ -106,15 +115,13 @@ Check `nvcc --version` for the compiler selected by CMake; `release 13.2` alone 
 The [native Windows CUDA build](scripts/windows/README.md) disables the legacy raw-block NVMe tier and includes PowerShell launchers; the session snapshot cache described above is independent of that build option. The performance results below remain Linux/WSL2 measurements.
 
 ```bash
-git clone --recurse-submodules https://github.com/kvmem/kvmem-llama.cpp.git
+git clone --branch feat/multi-backend-framework https://github.com/kvmem/kvmem-llama.cpp.git
 cd kvmem-llama.cpp
 git checkout master
-git submodule update --init
-scripts/apply-patches.sh
 scripts/build-cuda.sh
 ```
 
-The current `master` source pins ggml-org/llama.cpp at release `v0.5.0` (`7fe450e19`). `scripts/apply-patches.sh` applies `patches/llama-kvmem-current.patch` and the separate RDNA2 patch. Running it twice is safe. Do **not** apply numbered `0001`–`0004` together with the cumulative patch. The published `v0.17.0` and `v0.16.0-rc3` tags retain their original `b81c99b` pin; use `master` to build this revision. See [patches/README.md](patches/README.md).
+This branch includes the integrated backend sources. Upstream baseline revisions and licenses are recorded in [backends/versions.json](backends/versions.json). Historical release tags keep their original layouts; do not replay their patches onto this branch.
 
 `scripts/build-cuda.sh` sets `GGML_CUDA_FA_QUANTS=all` (needed for `--kv-dtype q5_0` on hybrid models). Binaries: `build/bin/llama-kvmem-server`.
 
@@ -567,10 +574,11 @@ generation space is allocated separately with `--kvmem-gen-reserve`.
 kvmem/            Host KVMem library (no llama.cpp includes)
 src/adapter/      llama_memory_i wrapper
 tools/            llama-kvmem-cli, llama-kvmem-server, vision helpers
-scripts/          apply-patches, CUDA build, GPU bind, start helpers
+scripts/          backend builds, GPU bind, start helpers
 patches/          Diffs against the llama.cpp pin
 docs/             Architecture, milestones, multimodal
-llama.cpp/        Submodule (pin only; apply patches after clone)
+llama.cpp/        Vendored llama.cpp with KVMem integration
+backends/ninfer/  Vendored ninfer with KVMem integration
 models/           Local GGUFs (gitignored)
 ```
 

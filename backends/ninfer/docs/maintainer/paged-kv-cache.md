@@ -778,3 +778,108 @@ Exact model state 和 backend mathematics 见
 [Qwen3.5 model](qwen3_5-model.md)与 [DFlash](dflash.md)；persistent KV codec 和 causal consumer
 numerical contract 由上表中的 growing-cache Ops 定义。路径用于定位当前实现，不把文件或类名本身提升为
 外部接口。
+
+
+## KVMem integration working set
+
+The optional `EngineOptions::kvmem` integration separates the logical context ceiling from
+native physical capacity. `selected_tokens` (B) and `reserve_tokens` (R) are independent
+64-token multiples; explicit Main capacity is C*(B+R), where C is the configured concurrency.
+Each request owns at most B+R tokens. A prefill chunk must fit R. `host_bytes`
+(H) bounds retained native packed records, including code and scale planes. State images,
+workspace and optional diagnostic readback buffers are accounted separately from H.
+Admission rejects a request whose maximum legal history can exceed H before publishing
+it Active. The same FIFO resource manager temporarily blocks admission when existing active
+reservations leave insufficient H; terminal retirement releases that reservation. Inactive
+histories are evicted before admitting a request, never at the expense of another active request.
+An explicit budget limit does not take the worker offline.
+
+Program remains the sole device allocator and reservation owner. At a safe execution
+boundary `WindowMemoryBackend` exposes the logical catalog to the portable KVMem
+`MemorySession`; preparation reserves host destinations, spill completes before pages are
+recycled, and publication advances the compact view only after restore completes. A failure
+after destructive page reuse invalidates that attempted sequence. Original RoPE positions
+are never derived from the compact table or rewritten during transfer.
+
+The initial bridge reconstructs the compact native address space and stages retained pages
+as well as evicted pages. Its preparation therefore accounts for those additional host
+records in H; current completed records are reused. `verify_transfers` additionally checks
+native payload and recurrent-state bytes and is disabled for ordinary product execution.
+
+Durable KVMem records use ordinary pageable RAM. Program owns one reusable pinned transfer
+buffer, bounded by B+R native page payload bytes, rather than registering every history page
+with CUDA. Spill synchronizes into that buffer before copying bytes to the archive; restore
+copies archive bytes into the same buffer before native H2D transfer. This avoids pinned
+allocation count/volume growing with logical history. The checkpoint state image and optional
+diagnostic readbacks remain separately bounded pinned allocations. This archive is separate
+from the native prefix cache's HostKVArena described above.
+
+The integration has single-device ordinary and fixed MTP1..4 text paths (MTP2/4 are parameter-enabled, pending real-model qualification), BF16 or INT8,
+and a single-active-text-request RK8V4 path (native rotated K8/V4 planes and scales),
+with the native prefix catalog disabled. Multi-request qualification covers startup concurrency
+2 and 4 separately; unqualified combinations are not release capability claims. Post-RMS/pre-RoPE
+block sums feed the portable mean-K selector. The
+frontend supplies an exact last-user token span. When the input exceeds B+R, Program captures
+its complete native StateImage immediately before that query, probes Q once, restores the
+checkpoint and selected original-position KV, then replays the query before emitting the first
+token. Internal replay has its own scheduler service budget and does not duplicate prompt progress.
+
+An input that fits B+R instead captures a reusable prefix immediately before its final input token
+when history reuse is enabled. This capture does not trigger Q probing or replay. Keeping one
+suffix token lets ordinary sampling and the MTP boundary bridge run normally on a repeated input.
+Its native KV payload is included in admission's Host reservation even without device page pressure.
+A short-prefix checkpoint past the incoming last-user boundary cannot seed a long-input query
+probe; that transition recomputes the prompt rather than skipping the query used for selection.
+
+The bounded Host directory (`retained_sessions`, default 4, maximum 16) can restore a checkpoint
+only when its session key, exact token prefix, backend/layout identity and execution stamp match.
+It restores the captured KV view and
+uses original-position chunk boundaries. A mismatching edited history discards that cache
+and prefills from the beginning. Named histories use Engine publication order, including a
+high-water mark for active updates, so an older late finish cannot replace a newer update.
+A request with `update_session_index=false` does not consume or replace its named retained source.
+Cancellation may retain the earlier trusted checkpoint,
+never the partially generated endpoint. Optional cold snapshots extend named text histories
+across process restarts; they do not enable cross-backend state transport. The generic
+MemoryBackend descriptor does not advertise a portable checkpoint codec.
+
+MTP native records contain both Main and MTP packed planes. They transfer only when their
+committed frontiers agree. Verification captures one represented key per candidate column;
+only the final Frontend-accepted prefix is merged into the request's mean-K. Batched rows never
+share a logical frontier. RNG and RoPE use logical positions independently of compact KV addresses.
+Restoring a checkpoint rebuilds the final MTP row with the new suffix token, because exact prefix
+identity alone does not prove the next-token embedding used by that row. The rebuilt row becomes
+durable before a later query rewind can restore the same boundary.
+
+`MemorySummary::kvmem` reports current payload, mean-statistics, checkpoint-image and transfer-staging bytes
+separately. Engine copies these host-only gauges into its ordinary published runtime snapshot,
+so service status polling acquires no execution lock and performs no device queries. History
+transfer counts follow the live/retained histories; they are not process-lifetime counters.
+Directory hit/miss/eviction counts are monotonic. Active Host reservation bytes are reported
+separately from materialized payload bytes. Native page/state accounting remains in the resource manager.
+
+Ngram copy proposals are available with fixed MTP on one active text request. They index
+the committed logical token ledger, never compact slots or rejected drafts. Candidate storage
+covers max(neural, ngram)+1 verification columns, and R must fit
+max(neural, ngram)+neural native append rows. Both neural and copy graph families use
+B+R attention capacity while retaining logical RoPE and RNG positions. Only the final
+Frontend-accepted prefix contributes persistent mean-K statistics. Ngram widths above 15
+also retain the native single-request GDN replay restriction. Images plus ngram and
+concurrent KVMem ngram are rejected pending separate qualification.
+
+Resident vision supports one active request. Complete image pages are mandatory alongside
+the sink and append tail; admission rejects images that cannot fit B. Prefix identity includes
+media content, token types and all MRoPE axes. Query replay rewinds use of the retained encoded
+payload, and MTP boundary rebuilding consumes the same multimodal bridge. Video, overlay/CPU
+vision and concurrent vision are outside the supported KVMem combinations.
+
+Cold snapshots (`disk_path`, `disk_bytes`) require one text lane and `device_profile=off`.
+The single-owner `ninfer-kvmem-v3` directory contains bounded, checksummed records identified
+by exact artifact/session/profile/layout metadata. Payload includes original-position Main/MTP
+page bytes, recurrent StateImage, prefix identity and mean statistics. Atomic replacement
+charges old and temporary files together; failed writes preserve the previous published file.
+Import creates new process-local IDs, page allocations and graph resources. Corruption,
+truncation or incompatibility increments `disk_errors` and permits recomputation. No live
+CUDA pointer or graph handle is serialized. Explicit reuse disable removes the named cache;
+no-update branches preserve it. `disk_hits` and `disk_writes` count successful process-local
+imports and publications. This is cold persistence, not online disk KV paging.

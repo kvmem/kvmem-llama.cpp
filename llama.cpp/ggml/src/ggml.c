@@ -1099,9 +1099,10 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "OPT_STEP_SGD",
 
     "GLU",
+    "GATED_DELTA_NET_RECORD",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1214,9 +1215,10 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "sgd(x)",
 
     "glu(x)",
+    "gated_delta_net_record(q, k, v, g, beta, s)",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6400,14 +6402,14 @@ struct ggml_tensor * ggml_gated_delta_net(
     GGML_ASSERT(state->ne[1] == S_v);
     GGML_ASSERT(state->ne[2] == H);
     GGML_ASSERT(state->ne[3] == n_seqs);
-    GGML_ASSERT(K >= 1);
+    GGML_ASSERT(K >= 0 && K <= INT32_MAX);
     const int64_t state_rows = K * S_v * n_seqs;
     const int64_t ne[4] = { S_v * H, n_tokens * n_seqs + state_rows, 1, 1 };
     struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
 
     ggml_set_op_params_i32(result, 0, (int32_t) K);
 
-    result->op     = GGML_OP_GATED_DELTA_NET;
+    result->op     = K == 0 ? GGML_OP_GATED_DELTA_NET_RECORD : GGML_OP_GATED_DELTA_NET;
     result->src[0] = q;
     result->src[1] = k;
     result->src[2] = v;

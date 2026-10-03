@@ -21,6 +21,7 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
 endif()
 
 include(basic_sources.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/token_sums/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/attn_input_proj/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/candidate_selector/sources.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/context_kv_materialize/sources.cmake")

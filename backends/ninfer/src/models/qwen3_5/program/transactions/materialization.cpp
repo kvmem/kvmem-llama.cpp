@@ -343,6 +343,8 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
             .base                  = request_plan.reuse == ReusePath::Root ? 0U : request_plan.reuse_base,
             .cursor                = request_plan.reuse == ReusePath::Root ? 0U : request_plan.reuse_base,
             .disk_restore_frontier = request_plan.disk_restore_frontier,
+            .memory_restore_frontier = request_plan.memory_restore_frontier,
+            .memory_restore_generation = request_plan.memory_restore_generation,
             .prompt_tokens      = prompt_tokens,
             .initial_mtp_extent = initial_mtp_extent,
             .elapsed_seconds    = 0.0,

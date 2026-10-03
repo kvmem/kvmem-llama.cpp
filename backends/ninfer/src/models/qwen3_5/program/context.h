@@ -45,6 +45,7 @@ struct ExecutionCore {
     ops::RopeYarn rope_yarn;
     bool fast_prefill_kernel = false;
     std::uint32_t mtp_attention_window = 0;
+    const MemoryStatistics* memory_statistics = nullptr;
 };
 
 struct PrefillContext {
@@ -66,6 +67,7 @@ struct PrefillContext {
     // Per-model-layer events of a Host restore still landing: the chunk's first pass over the
     // layer stack waits for each layer's copies.
     std::span<const cudaEvent_t> layer_ready;
+    std::uint32_t cache_position_shift = 0;
 };
 
 struct OrdinaryBatchContext {

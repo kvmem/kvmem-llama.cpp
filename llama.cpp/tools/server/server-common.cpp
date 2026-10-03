@@ -1147,62 +1147,8 @@ static void handle_media(
     }
 }
 
-// used by /chat/completions endpoint
-json oaicompat_chat_params_parse(
-    json & body, /* openai api json semantics */
-    const server_chat_params & opt,
-    std::vector<raw_buffer> & out_files)
-{
-    json llama_params;
-
-    auto tools = json_value(body, "tools", json());
-    auto has_tools = tools.is_array() && !tools.empty();
-    auto stream = json_value(body, "stream", false);
-    auto tool_choice = json_value(body, "tool_choice", std::string("auto"));
-
-    if (!opt.use_jinja) {
-        if (has_tools) {
-            throw std::runtime_error("tools param requires --jinja flag");
-        }
-        if (tool_choice != "auto") {
-            throw std::runtime_error("tool_choice param requires --jinja flag");
-        }
-    }
-
-    // Handle "stop" field
-    if (body.contains("stop") && body.at("stop").is_string()) {
-        llama_params["stop"] = json::array({body.at("stop").get<std::string>()});
-    } else {
-        llama_params["stop"] = json_value(body, "stop", json::array());
-    }
-
-    auto json_schema = json_value(body, "json_schema", json());
-    auto grammar = json_value(body, "grammar", std::string());
-    if (!json_schema.is_null() && !grammar.empty()) {
-        throw std::runtime_error("Cannot use both json_schema and grammar");
-    }
-
-    // Handle "response_format" field
-    if (body.contains("response_format")) {
-        json response_format      = json_value(body, "response_format", json::object());
-        std::string response_type = json_value(response_format, "type", std::string());
-        if (response_type == "json_object") {
-            if (response_format.contains("schema") || json_schema.empty()) {
-                json_schema = json_value(response_format, "schema", json::object());
-            }
-        } else if (response_type == "json_schema") {
-            auto schema_wrapper = json_value(response_format, "json_schema", json::object());
-            json_schema = json_value(schema_wrapper, "schema", json::object());
-        } else if (!response_type.empty() && response_type != "text") {
-            throw std::invalid_argument("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
-        }
-    }
-
-    // an absent or empty schema means any object
-    if (json_schema.is_object() && json_schema.empty()) {
-        json_schema["type"] = "object";
-    }
-
+void oaicompat_chat_process_media(json & body, const server_chat_params & opt,
+                                 std::vector<raw_buffer> & out_files) {
     // get input files
     if (!body.contains("messages")) {
         throw std::invalid_argument("'messages' is required");
@@ -1268,7 +1214,6 @@ json oaicompat_chat_params_parse(
                     throw std::runtime_error("video input is not supported - hint: if this is unexpected, you may need to provide the mmproj");
                 }
 
-                // accept the OpenAI-style "video_url" key as an alias of "input_video"
                 json input_video = json_value(p, type, json::object());
                 std::string url  = json_value(input_video, "data",
                                         json_value(input_video, "url", std::string()));
@@ -1284,6 +1229,67 @@ json oaicompat_chat_params_parse(
             }
         }
     }
+
+}
+
+// used by /chat/completions endpoint
+json oaicompat_chat_params_parse(
+    json & body, /* openai api json semantics */
+    const server_chat_params & opt,
+    std::vector<raw_buffer> & out_files)
+{
+    json llama_params;
+
+    auto tools = json_value(body, "tools", json());
+    auto has_tools = tools.is_array() && !tools.empty();
+    auto stream = json_value(body, "stream", false);
+    auto tool_choice = json_value(body, "tool_choice", std::string("auto"));
+
+    if (!opt.use_jinja) {
+        if (has_tools) {
+            throw std::runtime_error("tools param requires --jinja flag");
+        }
+        if (tool_choice != "auto") {
+            throw std::runtime_error("tool_choice param requires --jinja flag");
+        }
+    }
+
+    // Handle "stop" field
+    if (body.contains("stop") && body.at("stop").is_string()) {
+        llama_params["stop"] = json::array({body.at("stop").get<std::string>()});
+    } else {
+        llama_params["stop"] = json_value(body, "stop", json::array());
+    }
+
+    auto json_schema = json_value(body, "json_schema", json());
+    auto grammar = json_value(body, "grammar", std::string());
+    if (!json_schema.is_null() && !grammar.empty()) {
+        throw std::runtime_error("Cannot use both json_schema and grammar");
+    }
+
+    // Handle "response_format" field
+    if (body.contains("response_format")) {
+        json response_format      = json_value(body, "response_format", json::object());
+        std::string response_type = json_value(response_format, "type", std::string());
+        if (response_type == "json_object") {
+            if (response_format.contains("schema") || json_schema.empty()) {
+                json_schema = json_value(response_format, "schema", json::object());
+            }
+        } else if (response_type == "json_schema") {
+            auto schema_wrapper = json_value(response_format, "json_schema", json::object());
+            json_schema = json_value(schema_wrapper, "schema", json::object());
+        } else if (!response_type.empty() && response_type != "text") {
+            throw std::invalid_argument("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
+        }
+    }
+
+    // an absent or empty schema means any object
+    if (json_schema.is_object() && json_schema.empty()) {
+        json_schema["type"] = "object";
+    }
+
+    oaicompat_chat_process_media(body, opt, out_files);
+    json & messages = body.at("messages");
 
     auto caps = common_chat_templates_get_caps(opt.tmpls.get());
 

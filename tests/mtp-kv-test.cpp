@@ -24,6 +24,19 @@ struct test_spec_session : kvmem_spec_session {
 };
 
 struct kvmem_transfer_test_access {
+    static inline kvmem::MemoryPhase fail_at = kvmem::MemoryPhase::Idle;
+    static void probe(llama_memory_kvmem & mem, kvmem::MemoryPhase phase) {
+        if (phase != kvmem::MemoryPhase::Prepared && mem.attention_view(false).valid)
+            throw std::logic_error("half-completed native view escaped");
+        if (phase == fail_at) throw std::runtime_error("injected native transfer failure");
+    }
+    static void inject(llama_memory_kvmem & mem, kvmem::MemoryPhase phase) {
+        fail_at = phase;
+        mem.native_probe_ = probe;
+    }
+    static kvmem::MemoryStamp stamp(const llama_memory_kvmem & mem) { return mem.content_->stamp(); }
+    static uint64_t evaluated(const llama_memory_kvmem & mem) { return mem.content_->evaluated(); }
+    static uint32_t mean_tokens(const llama_memory_kvmem & mem) { return mem.decode_mean_stats_.n_tok; }
     static bool complete(const llama_memory_kvmem & mem, uint32_t id, const llama_kv_cache * cache) {
         return mem.gpu_kv_complete(id, cache);
     }
@@ -31,6 +44,13 @@ struct kvmem_transfer_test_access {
     static void flush(llama_memory_kvmem & mem) { mem.harvest_gpu_v_commit(); }
     static void restore(llama_memory_kvmem & mem, uint32_t id) { mem.write_block_to_gpu(id); }
     static bool layout(llama_memory_kvmem & mem) { return mem.layout_gpu_slots_by_orig_pos(); }
+    static void complete_manual_writes(llama_memory_kvmem & mem) {
+        // This test writes synchronous sentinel bytes instead of running a graph.
+        // Cell metadata alone must not make its earlier reservation complete.
+        if (mem.content_->stamp().frontier != 0) throw std::runtime_error("reservation already committed");
+        mem.content_->complete(0, mem.store_n_tokens());
+        mem.evaluation_cursor_ = mem.evaluation_queue_.size();
+    }
 };
 
 static void require(bool ok, const char * message) {
@@ -133,16 +153,30 @@ static void check_transfers(llama_memory_kvmem_mtp & mtp, ggml_type type_k, ggml
     };
 #ifdef KVMEM_TEST_CUDA
     // A failed optional scratch allocation must leave KV and CUDA state intact.
-    size_t free_bytes = 0, total_bytes = 0;
-    require(cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess, "CUDA memory query failed");
-    const size_t stride = block * (ggml_row_size(type_k, tensors[0]->ne[0]) +
-                                   ggml_row_size(type_v, tensors[1]->ne[0]));
-    std::vector<llama_memory_kvmem_mtp::LayoutMove> oversized(total_bytes / stride + 1, moves[0]);
-    require(cudaGetLastError() == cudaSuccess, "CUDA error before layout OOM test");
-    require(!mtp.layout_d2d(oversized.data(), oversized.size()), "oversized layout allocation succeeded");
-    require(cudaGetLastError() == cudaSuccess, "layout OOM leaked into the next CUDA operation");
-    for (int i = 0; i < 2; ++i) {
-        compare(tensors[i], expected[i]);
+    bool test_physical_limit = true;
+#ifdef _WIN32
+    int device = 0, tcc = 0;
+    require(cudaGetDevice(&device) == cudaSuccess &&
+            cudaDeviceGetAttribute(&tcc, cudaDevAttrTccDriver, device) == cudaSuccess,
+            "CUDA driver mode query failed");
+    // WDDM can accept a cudaMalloc larger than physical VRAM. Such a call
+    // would execute the test moves instead of exercising allocation failure.
+    test_physical_limit = tcc != 0;
+#endif
+    if (test_physical_limit) {
+        size_t free_bytes = 0, total_bytes = 0;
+        require(cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess, "CUDA memory query failed");
+        const size_t stride = block * (ggml_row_size(type_k, tensors[0]->ne[0]) +
+                                       ggml_row_size(type_v, tensors[1]->ne[0]));
+        std::vector<llama_memory_kvmem_mtp::LayoutMove> oversized(total_bytes / stride + 1, moves[0]);
+        require(cudaGetLastError() == cudaSuccess, "CUDA error before layout OOM test");
+        require(!mtp.layout_d2d(oversized.data(), oversized.size()), "oversized layout allocation succeeded");
+        require(cudaGetLastError() == cudaSuccess, "layout OOM leaked into the next CUDA operation");
+        for (int i = 0; i < 2; ++i) {
+            compare(tensors[i], expected[i]);
+        }
+    } else {
+        std::printf("SKIP physical-VRAM OOM injection on WDDM (not a reliable allocation limit)\n");
     }
 #endif
     for (int i = 0; i < 2; ++i) {
@@ -190,6 +224,8 @@ static void check_target_transfers(llama_memory_kvmem & mem, ggml_type type_k, g
         original.push_back(pattern(ggml_nbytes(tensor), 123 + tensors.size()));
         ggml_backend_tensor_set(tensor, original.back().data(), 0, original.back().size());
     }
+    require(!mem.attention_view(false).valid, "reserved but unwritten rows were published");
+    kvmem_transfer_test_access::complete_manual_writes(mem);
     for (uint32_t id = 0; id < 3; ++id) kvmem_transfer_test_access::save(mem, id);
     kvmem_transfer_test_access::flush(mem);
     for (size_t i = 0; i < tensors.size(); ++i) {
@@ -308,6 +344,8 @@ static void check_replay_logits(llama_model * model, ggml_type type, int mtp_sta
     auto cp = llama_context_default_params();
     cp.n_ctx = 2048;
     cp.n_batch = cp.n_ubatch = 128;
+    if (type == GGML_TYPE_Q8_0 && mtp_state == 0 && type_v == GGML_TYPE_COUNT)
+        cp.n_ubatch = 32; // one reservation, multiple graph completions
     cp.n_seq_max = 1;
     cp.n_rs_seq = 2;
     cp.type_k = type;
@@ -336,6 +374,37 @@ static void check_replay_logits(llama_model * model, ggml_type type, int mtp_sta
         llama_synchronize(ctx.get());
     };
     decode(0, query);
+    // Real adapter faults, using a completed model graph and actual device KV.
+    // The first two fail before destructive admission; the latter two require
+    // an invalid session and fresh prefill, never a metadata-only rollback.
+    if (type == GGML_TYPE_Q8_0 && mtp_state == 0 && type_v == GGML_TYPE_COUNT) {
+        auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get()));
+        auto * mem = hybrid ? hybrid->attn_kvmem() : dynamic_cast<llama_memory_kvmem *>(llama_get_memory(ctx.get()));
+        require(mem != nullptr, "missing native adapter for fault test");
+        for (auto phase : {kvmem::MemoryPhase::Prepared, kvmem::MemoryPhase::Spilling,
+                           kvmem::MemoryPhase::Restoring, kvmem::MemoryPhase::Ready}) {
+            auto choice = llama_kvmem_preview_retrieval();
+            choice.blocks = {choice.blocks.front(), choice.blocks.back()};
+            const auto old = kvmem_transfer_test_access::stamp(*mem);
+            kvmem_transfer_test_access::inject(*mem, phase);
+            bool failed = false;
+            try { llama_kvmem_apply_selection(choice); } catch (const std::runtime_error &) { failed = true; }
+            kvmem_transfer_test_access::inject(*mem, kvmem::MemoryPhase::Idle);
+            require(failed, "native transfer fault was not propagated");
+            const auto after = kvmem_transfer_test_access::stamp(*mem);
+            if (phase == kvmem::MemoryPhase::Prepared || phase == kvmem::MemoryPhase::Spilling) {
+                require(after == old && mem->attention_view(false).valid, "pre-admission failure lost old view");
+            } else {
+                require(!after.valid && !mem->attention_view(false).valid && mem->store_n_tokens() == 0,
+                        "destructive failure did not invalidate and drain the session");
+                llama_memory_clear(llama_get_memory(ctx.get()), true);
+                llama_kvmem_set_request_span(query, end, -1);
+                llama_kvmem_set_turn_spans({{{query, end}}, {{query, end}}, query});
+                decode(0, query);
+            }
+        }
+        std::puts("PASS native adapter faults: prepare/spill preserve, restore/publish invalidate, fresh prefill recovers");
+    }
     const auto flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
     std::vector<uint8_t> checkpoint(llama_state_seq_get_size_ext(ctx.get(), 0, flags));
     require(llama_state_seq_get_data_ext(ctx.get(), checkpoint.data(), checkpoint.size(), 0, flags) == checkpoint.size(),
@@ -354,6 +423,22 @@ static void check_replay_logits(llama_model * model, ggml_type type, int mtp_sta
     llama_kvmem_query_state q;
     require(llama_kvmem_get_query(q) && *std::max_element(q.count.begin(), q.count.end()) == 24,
             "query capture count differs from explicit span");
+    llama_kvmem_tail_mean_state tail;
+    require(llama_kvmem_get_tail_mean(end, tail) && llama_kvmem_tail_mean_valid(end, tail),
+            "accepted mean-K checkpoint missing");
+    auto foreign_query = q;
+    kvmem::KvContent foreign(32);
+    foreign.reserve(end); foreign.complete(0, end);
+    foreign_query.prefix = foreign.prefix(end);
+    require(!llama_kvmem_set_query(foreign_query), "cross-session Q imported");
+    auto foreign_tail = tail;
+    foreign_tail.prefix = foreign_query.prefix;
+    require(!llama_kvmem_tail_mean_valid(end, foreign_tail) && !llama_kvmem_set_tail_mean(end, foreign_tail),
+            "cross-session mean-K checkpoint imported");
+    require(!llama_kvmem_tail_mean_valid(end + 1, tail), "wrong checkpoint frontier accepted");
+    auto wrong_span = q;
+    ++wrong_span.ranges.front().begin;
+    require(!llama_kvmem_set_query(wrong_span), "Q from a different query range imported");
     auto missing_required = selection;
     missing_required.blocks.pop_back();
     require(!llama_kvmem_selection_fits(missing_required, end, 0), "trimmed mandatory tail accepted for continuation");
@@ -376,6 +461,14 @@ static void check_replay_logits(llama_model * model, ggml_type type, int mtp_sta
         decode(query, end);
         llama_kvmem_set_replay(false);
         repeated.push_back(logits());
+        llama_kvmem_query_state replay_query;
+        require(llama_kvmem_get_query(replay_query), "query capture missing after replay");
+        require(replay_query.count == q.count && replay_query.sum == q.sum,
+                "replay changed first-pass query statistics");
+        require(llama_kvmem_tail_mean_valid(end, tail), "execution replay revoked logical prefix");
+        std::printf("QUERY_REPLAY repeat=%d rows=%u original_rows=%u\n", repeat + 1,
+                *std::max_element(replay_query.count.begin(), replay_query.count.end()),
+                *std::max_element(q.count.begin(), q.count.end()));
         selection = llama_kvmem_preview_retrieval();
     }
     auto compare_logits = [&](const std::vector<float> & a, const std::vector<float> & b, const char * label) {
@@ -413,6 +506,59 @@ static void check_replay_logits(llama_model * model, ggml_type type, int mtp_sta
     same_sparse.blocks = sparse_after.blocks;
     require(llama_kvmem_commit_unchanged(sparse_before, same_sparse), "unchanged sparse attention view rejected");
     require(sparse_after.blocks.size() < (uint32_t) (end / 32), "test did not create sparse history");
+    if (type == GGML_TYPE_Q8_0 && mtp_state == 0 && type_v == GGML_TYPE_COUNT) {
+        auto * hybrid = dynamic_cast<llama_memory_kvmem_hybrid *>(llama_get_memory(ctx.get()));
+        auto * mem = hybrid ? hybrid->attn_kvmem() : dynamic_cast<llama_memory_kvmem *>(llama_get_memory(ctx.get()));
+        require(mem != nullptr, "missing native adapter for acceptance test");
+        llama_kvmem_pin_working_set();
+        int next = new_end;
+        const int widths[] = {2, 2, 2, 1};
+        const int keeps[] = {0, 1, 2, 0};
+        for (int step = 0; step < 4; ++step) {
+            const int width = widths[step], keep = keeps[step];
+            std::vector<llama_token> proposed(width, tokens.back());
+            std::vector<llama_pos> positions(width);
+            for (int i = 0; i < width; ++i) positions[i] = next + i;
+            auto batch = llama_batch_get_one(proposed.data(), width);
+            batch.pos = batch.logical_pos = positions.data();
+            const auto means_before = kvmem_transfer_test_access::mean_tokens(*mem);
+            llama_kvmem_begin_speculative_evaluation();
+            require(llama_decode(ctx.get(), batch) == 0, "acceptance fixture evaluation failed");
+            llama_synchronize(ctx.get());
+            require(kvmem_transfer_test_access::stamp(*mem).frontier == (uint64_t) next &&
+                    kvmem_transfer_test_access::evaluated(*mem) == (uint64_t) (next + width) &&
+                    !mem->attention_view(false).valid, "unaccepted target KV was published");
+            require(kvmem_transfer_test_access::mean_tokens(*mem) == means_before,
+                    "unaccepted draft changed mean-K");
+            require(!llama_kvmem_commit_speculative(ctx.get(), width + 1), "oversized prefix committed");
+            require(llama_kvmem_commit_speculative(ctx.get(), keep), "accepted prefix commit failed");
+            require(!llama_kvmem_commit_speculative(ctx.get(), keep), "duplicate prefix committed");
+            require(kvmem_transfer_test_access::mean_tokens(*mem) == means_before + keep,
+                    "mean-K count differs from accepted prefix");
+            require(kvmem_transfer_test_access::stamp(*mem).frontier == (uint64_t) (next + keep),
+                    "accepted KV frontier differs");
+            if (keep != width) require(llama_kvmem_remove_logical(ctx.get(), next + keep, -1), "rejected tail removal failed");
+            llama_kvmem_truncate_cached(next + keep);
+            next += keep;
+            require(mem->attention_view(false).valid && mem->store_n_tokens() == (uint32_t) next &&
+                    kvmem_transfer_test_access::evaluated(*mem) == (uint64_t) next, "rejected KV remained visible");
+        }
+        std::puts("PASS native target acceptance: zero/partial/full prefix, width-one rejection, no speculative publication");
+        require(llama_kvmem_tail_mean_valid(end, tail), "append revoked accepted checkpoint");
+        auto * bundle = llama_kvmem_store_bundle_create();
+        require(!llama_kvmem_store_bundle_swap(bundle), "fresh conversation unexpectedly had KV");
+        require(!llama_kvmem_tail_mean_valid(end, tail), "foreign conversation accepted old checkpoint");
+        require(llama_kvmem_store_bundle_swap(bundle), "original conversation restore failed");
+        require(llama_kvmem_tail_mean_valid(end, tail), "conversation transfer lost prefix identity");
+        require(!llama_kvmem_store_bundle_swap(bundle), "empty conversation acquired old KV");
+        llama_kvmem_store_bundle_reset(bundle);
+        require(!llama_kvmem_store_bundle_swap(bundle), "reset conversation restored stale KV");
+        require(kvmem_transfer_test_access::stamp(*mem).frontier == 0 &&
+                !llama_kvmem_tail_mean_valid(end, tail) && !llama_kvmem_set_query(q),
+                "bundle reset retained content or statistics identity");
+        llama_kvmem_store_bundle_free(bundle);
+        std::puts("PASS statistics identity: foreign/range rejection, replay/append preservation, conversation reset revocation");
+    }
     std::printf("PASS K=%s V=%s: unchanged view, explicit Q, stale plan rejection, replay logits\n", ggml_type_name(type), ggml_type_name(cp.type_v));
 }
 
@@ -477,6 +623,7 @@ static gdn_model_result run_gdn_transactions(llama_model * model, ggml_type type
             require(llama_kvmem_gdn_replay_begin(pos, width), "GDN transaction begin failed");
             require(!llama_kvmem_gdn_replay_begin(pos, width), "overlapping GDN transaction accepted");
         }
+        llama_kvmem_begin_speculative_evaluation();
         require(llama_decode(ctx.get(), batch) == 0, "GDN Record model decode failed");
         for (int row = 0; row < width; ++row) {
             const float * logits = llama_get_logits_ith(ctx.get(), row);
@@ -484,14 +631,16 @@ static gdn_model_result run_gdn_transactions(llama_model * model, ggml_type type
             result.logits.insert(result.logits.end(), logits, logits + n_vocab);
         }
         if (replay) {
-            require(llama_kvmem_gdn_replay_commit(ctx.get(), keep), "GDN model Fold failed");
-            require(!llama_kvmem_gdn_replay_commit(ctx.get(), keep), "duplicate GDN commit accepted");
+            require(llama_kvmem_commit_speculative(ctx.get(), keep), "GDN and statistics commit failed");
+            require(!llama_kvmem_commit_speculative(ctx.get(), keep), "duplicate GDN commit accepted");
         } else if (keep == 0) {
             require(llama_state_seq_set_data_ext(ctx.get(), checkpoint.data(), checkpoint.size(), 0, flags) == checkpoint.size(),
                     "GDN zero-accept checkpoint restore failed");
         }
-        if (keep) llama_kvmem_decode_mean_commit(keep);
-        else llama_kvmem_decode_mean_discard();
+        if (!replay) {
+            if (keep) require(llama_kvmem_commit_speculative(ctx.get(), keep), "snapshot prefix commit failed");
+            else llama_kvmem_decode_mean_discard();
+        }
         pos += keep;
         require(llama_kvmem_remove_logical(ctx.get(), pos, -1), "GDN accepted suffix trim failed");
         llama_kvmem_truncate_cached(pos);

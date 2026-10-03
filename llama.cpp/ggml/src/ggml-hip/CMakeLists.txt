@@ -133,6 +133,37 @@ else()
     set_source_files_properties(${GGML_SOURCES_ROCM} PROPERTIES LANGUAGE HIP)
 endif()
 
+# HIP 7.15 can spill hundreds of VGPRs in the RDNA4 Q2_K MMQ kernel.
+# Limit loop unrolling only for built RDNA4 targets and this translation unit.
+option(GGML_HIP_Q2_K_UNROLL_WORKAROUND "Limit Q2_K MMQ loop unrolling with HIP 7.15+" ON)
+if (GGML_HIP_Q2_K_UNROLL_WORKAROUND AND hip_VERSION VERSION_GREATER_EQUAL "7.15")
+    set(KVMEM_Q2_K_RDNA4_FLAGS "")
+    foreach(KVMEM_Q2_K_ARCH IN ITEMS gfx1200 gfx1201)
+        if (KVMEM_Q2_K_ARCH IN_LIST CMAKE_HIP_ARCHITECTURES OR KVMEM_Q2_K_ARCH IN_LIST GPU_TARGETS)
+            string(APPEND KVMEM_Q2_K_RDNA4_FLAGS " -Xarch_${KVMEM_Q2_K_ARCH} -mllvm=--unroll-threshold=50")
+        endif()
+    endforeach()
+    if (KVMEM_Q2_K_RDNA4_FLAGS)
+        string(STRIP "${KVMEM_Q2_K_RDNA4_FLAGS}" KVMEM_Q2_K_RDNA4_FLAGS)
+        set_source_files_properties(
+            "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/template-instances/mmq-instance-q2_k.cu"
+            PROPERTIES COMPILE_FLAGS "${KVMEM_Q2_K_RDNA4_FLAGS}")
+        message(STATUS "HIP ${hip_VERSION}: RDNA4 Q2_K MMQ unroll workaround for ${CMAKE_HIP_ARCHITECTURES}")
+    endif()
+endif()
+
+# Keep the IQ3_XXS register rewrite workaround local to verified Windows gfx1200.
+option(GGML_HIP_IQ3_XXS_REG_WORKAROUND "Avoid IQ3_XXS partial-register rewrite with HIP 7.15+" ON)
+if (WIN32 AND GGML_HIP_IQ3_XXS_REG_WORKAROUND AND hip_VERSION VERSION_GREATER_EQUAL "7.15")
+    if ("gfx1200" IN_LIST CMAKE_HIP_ARCHITECTURES OR "gfx1200" IN_LIST GPU_TARGETS)
+        set_property(SOURCE
+            "${CMAKE_CURRENT_SOURCE_DIR}/../ggml-cuda/template-instances/mmq-instance-iq3_xxs.cu"
+            APPEND_STRING PROPERTY COMPILE_FLAGS
+            " -Xarch_gfx1200 -mllvm=--amdgpu-enable-rewrite-partial-reg-uses=false")
+        message(STATUS "HIP ${hip_VERSION}: Windows gfx1200 IQ3_XXS register rewrite workaround")
+    endif()
+endif()
+
 if (GGML_STATIC)
     message(FATAL_ERROR "Static linking not supported for HIP/ROCm")
 endif()

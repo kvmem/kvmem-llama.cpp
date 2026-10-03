@@ -317,7 +317,7 @@ struct common_sampler * common_sampler_init(
             params.reasoning_budget_tokens < 0 ? INT_MAX : params.reasoning_budget_tokens);
 
         for (const auto & token : prefill_tokens) {
-            llama_sampler_accept(rbudget, token);
+            common_reasoning_budget_accept_prefill(rbudget, token);
             LOG_DBG("%s: reasoning-budget accepted prefill token (%d)\n", __func__, token);
         }
     }

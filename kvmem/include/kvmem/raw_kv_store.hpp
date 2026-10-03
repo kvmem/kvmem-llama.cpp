@@ -49,6 +49,9 @@ public:
     bool nvme_enabled() const;
 
     void ensure_blocks(uint32_t block_count);
+    // Reserve packed destinations without marking any row valid. Caller has
+    // drained capture/I/O writers before preparing a native transfer.
+    void reserve_packed(uint32_t block_id, const std::vector<uint32_t> & layers);
 
     void write_layer_tokens(uint32_t pos0, uint32_t n, uint32_t il,
                             const float * k, const float * v);

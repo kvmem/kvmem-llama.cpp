@@ -15,7 +15,7 @@
 // does, so the references survive an edit to either file:
 //
 //   keep_cap     = min({lcp, live_row, eval_end - (spec_ok ? 0 : 1)})
-//              `keep` in run_prefill_multimodal, kvmem-multimodal-server.h
+//              `keep` in run_prefill_multimodal, llama-kvmem-driver.cpp
 //   found, keep  = the largest checkpoint row <= keep_cap
 //              the st.mm_checkpoints scan that follows it, same function
 //   continuation = (rows - lcp) <= max(0, last_n_gen) + 64
@@ -97,7 +97,7 @@ inline int kvmem_store_keep_cap(const kvmem_store_match & store, int eval_end, b
 
 // Largest checkpoint row at or before keep_cap. False means the hybrid model
 // cannot be carried to the match point, which is a hard constraint and not a
-// policy choice (tools/kvmem-multimodal-server.h:258-262).
+// policy choice (tools/llama-kvmem-driver.cpp (checkpoint selection)).
 inline bool kvmem_store_checkpoint(const kvmem_store_match & store, int keep_cap, int & keep) {
     bool found = false;
     keep = 0;

@@ -282,7 +282,7 @@ if (KVMEM_BUILD_LLAMA)
     target_link_libraries(llama-kvmem-cli PRIVATE llama llama-common)
     target_compile_features(llama-kvmem-cli PRIVATE cxx_std_17)
 
-    add_executable(llama-kvmem-server tools/llama-kvmem-server.cpp tools/kvmem-spec.cpp
+    add_executable(llama-kvmem-server tools/llama-kvmem-server.cpp tools/llama-kvmem-driver.cpp tools/kvmem-spec.cpp
         tools/kvmem-vision.cpp tools/kvmem-responses.cpp tools/kvmem-responses-stream.cpp
         llama.cpp/tools/server/server-common.cpp
         llama.cpp/tools/server/server-chat.cpp)
@@ -312,12 +312,10 @@ if (KVMEM_BUILD_LLAMA)
     endforeach()
 
     # Run manually with an MTP GGUF path; no model is downloaded by CTest.
-    # Windows-only exclusion: this test drives llama_kv_cache / llama_batch_allocr
-    # internals directly. On ELF every symbol of a shared libllama is exported, so
-    # it links; PE only exports the LLAMA_API surface, and exporting all of
-    # libllama's internals just to link one dev test is not a trade worth making.
+    # This test needs internal symbols. Windows static builds expose them;
+    # shared PE builds export only the LLAMA_API surface.
     # The test also skips (exit 77) unless an MTP GGUF is supplied explicitly.
-    if (NOT WIN32)
+    if (NOT WIN32 OR NOT BUILD_SHARED_LIBS)
         add_executable(kvmem-mtp-kv-test tests/mtp-kv-test.cpp tools/kvmem-spec.cpp)
         target_include_directories(kvmem-mtp-kv-test PRIVATE src/adapter tools llama.cpp/src)
         target_link_libraries(kvmem-mtp-kv-test PRIVATE llama llama-common kvmem)

@@ -85,6 +85,16 @@ std::string serve_usage_text(const char* argv0) {
            "  --help, -h                    show this help and exit\n"
            "\n"
            "MODEL & CONTEXT\n"
+           "  --kvmem-budget N              selected history B, tokens aligned to 64\n"
+           "  --kvmem-gen-reserve N         append workspace R, tokens aligned to 64\n"
+           "  --kvmem-host-mib N            Host native KV payload budget H, MiB\n"
+           "  --kvmem-sessions N            retained Host histories, 1..16 (default 4)\n"
+           "  --kvmem-disk-path PATH        cold text session snapshots (C1, device-profile off)\n"
+           "  --kvmem-disk-mib N            hard disk quota including temporary replacements\n"
+           "                                KVMem uses B+R device tokens and its own\n"
+           "                                verified history reuse; one lane, text,\n"
+           "                                BF16/INT8, no speculative decoding\n"
+           "  --kvmem-verify-transfers      check restored KV/GDN bytes (diagnostic)\n"
            "  --max-context N               logical context ceiling of each request (default\n"
            "                                8192)\n"
            "  --max-concurrency N           requests decoded together, 1..8 (default 1)\n"
@@ -529,6 +539,30 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--kv-capacity") {
             options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
             kv_capacity_explicit = true;
+        } else if (arg == "--kvmem-budget") {
+            options.kvmem.selected_tokens = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--kvmem-budget"), "kvmem-budget"));
+        } else if (arg == "--kvmem-gen-reserve") {
+            options.kvmem.reserve_tokens = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--kvmem-gen-reserve"), "kvmem-gen-reserve"));
+        } else if (arg == "--kvmem-sessions") {
+            options.kvmem.retained_sessions = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--kvmem-sessions"), "kvmem-sessions"));
+        } else if (arg == "--kvmem-disk-path") {
+            options.kvmem.disk_path = require_value("--kvmem-disk-path");
+        } else if (arg == "--kvmem-disk-mib") {
+            const auto mib = parse_u64(require_value("--kvmem-disk-mib"), "kvmem-disk-mib");
+            if (mib > std::numeric_limits<std::uint64_t>::max() / (1ULL << 20))
+                throw std::invalid_argument("--kvmem-disk-mib is out of range");
+            options.kvmem.disk_bytes = mib << 20;
+        } else if (arg == "--kvmem-host-mib") {
+            const auto mib = parse_u64(require_value("--kvmem-host-mib"), "kvmem-host-mib");
+            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--kvmem-host-mib is out of range");
+            }
+            options.kvmem.host_bytes = static_cast<std::size_t>(mib * (1ULL << 20));
+        } else if (arg == "--kvmem-verify-transfers") {
+            options.kvmem.verify_transfers = true;
         } else if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
             // --vram-headroom-mib is the Wallawalla47 fork's name for the same headroom.
             const std::uint64_t mib = parse_u64(require_value(arg.c_str()), arg.c_str() + 2);
@@ -1201,6 +1235,62 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");
         }
+    }
+    if (options.kvmem.selected_tokens) {
+        if (options.kvmem.disk_path.empty() != (options.kvmem.disk_bytes == 0) ||
+            (!options.kvmem.disk_path.empty() &&
+             (options.max_concurrency != 1 || options.enable_vision || options.device_profile != "off"))) {
+            throw std::invalid_argument("KVMem cold snapshots require a path, nonzero disk quota, one text lane and --device-profile off");
+        }
+        const auto window = options.kvmem.device_tokens();
+        const bool ordinary = options.speculative.backend == SpeculativeBackend::None &&
+            options.speculative.draft_tokens == 0;
+        const bool fixed_mtp = options.speculative.backend == SpeculativeBackend::Mtp &&
+            (options.speculative.draft_tokens >= 1 && options.speculative.draft_tokens <= 4) &&
+            options.speculative.mtp_policy == MtpDraftPolicy::Fixed;
+        const bool memory_ngram_supported = options.speculative.ngram_draft_tokens == 0 ||
+            (fixed_mtp && options.max_concurrency == 1 && !options.enable_vision &&
+             options.speculative.ngram_draft_tokens <= 63 &&
+             options.speculative.ngram_min_match >= 4 && options.speculative.ngram_min_match <= 64 &&
+             std::max(options.speculative.draft_tokens, options.speculative.ngram_draft_tokens) +
+                 options.speculative.draft_tokens <= options.kvmem.reserve_tokens);
+        const bool memory_spec_supported = (ordinary || fixed_mtp) && memory_ngram_supported &&
+            options.speculative.lookup_ngram == 0 && options.speculative.mtp_attention_window == 0;
+
+        if (legacy_cache_flag || hybrid_option_flag || original_cache_selected ||
+            options.context_cache.mode != ContextCacheMode::Legacy ||
+            options.devices.size() > 1 || options.max_concurrency == 0 || options.max_concurrency > 4 ||
+            (options.enable_vision && (options.max_concurrency != 1 ||
+                options.vision_residency != VisionResidency::Resident)) ||
+            !memory_spec_supported || options.concurrent_prefill ||
+            options.fast_prefill_kernel || options.cuda_memory_policy != CudaMemoryPolicy::DriverDefault ||
+            (options.kv_cache != KvCacheStorage::BFloat16 && options.kv_cache != KvCacheStorage::Int8Group64 &&
+             options.kv_cache != KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) ||
+            (options.kv_cache == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 &&
+             (options.max_concurrency != 1 || options.enable_vision))) {
+            throw std::invalid_argument("KVMem requires ordinary or fixed MTP1..4 single-GPU generation, BF16/INT8 or single-lane text RK8V4, images on one resident-vision lane, "
+                "and exclusive ownership of history caching");
+        }
+        if (options.kvmem.selected_tokens < 128 || options.kvmem.selected_tokens % 64 ||
+            options.kvmem.reserve_tokens < 64 || options.kvmem.reserve_tokens % 64 ||
+            window < 256 || window > options.max_context || !options.kvmem.host_bytes ||
+            options.kvmem.retained_sessions == 0 || options.kvmem.retained_sessions > 16 ||
+            options.prefill_chunk > options.kvmem.reserve_tokens ||
+            (kv_capacity_explicit && (options.kv_capacity.mode != KvCapacityMode::Explicit ||
+                                     options.kv_capacity.explicit_tokens != window * options.max_concurrency))) {
+            throw std::invalid_argument("KVMem requires aligned B/R, nonzero H, prefill <= R, "
+                                        "and device capacity B+R <= max-context");
+        }
+        if (window * options.max_concurrency > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("KVMem global device capacity exceeds uint32");
+        }
+        options.kv_capacity = KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(window * options.max_concurrency));
+        // --no-prefix-reuse still controls request reuse. Only the native catalog
+        // is disabled here; KVMem owns the current session's trusted checkpoint.
+        options.context_cache.enabled = false;
+    } else if (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers ||
+         !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes) {
+        throw std::invalid_argument("KVMem auxiliary options require --kvmem-budget");
     }
     return options;
 }

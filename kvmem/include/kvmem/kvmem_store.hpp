@@ -7,15 +7,15 @@
 // physical KV page). Each selection round an external algorithm (v1: built-in
 // cumulative-attention top-k) picks a set of block IDs within the model's
 // context budget (e.g. 128k). Only selected blocks are used for attention;
-// they are remapped into a contiguous in-window position range via re-RoPE
-// (see rope_block_remap_kernel) so RoPE stays in-distribution.
+// the adapter builds its execution view from those IDs. Current native-payload
+// execution keeps original RoPE positions; compact addresses do not rewrite K.
 //
 // This module is PURE HOST LOGIC: block metadata, selection, the diff that
 // drives stage-in / stage-out, and the position remap plan. It owns no GPU
-// memory and calls no kernels — the executor consumes its output (a per-block
-// remap plan + the set of blocks to stage) to assemble the live page-index
-// list. Keeping it host-only makes the selection/diff math unit-testable
-// without a GPU (see tests/kv_block_store_test.cpp).
+// memory and calls no kernels. The legacy set_selection path still computes
+// re-RoPE bookkeeping for its existing callers/tests; it is not a native transfer
+// contract. MemorySession uses pick_topk_blocks without mutating that bookkeeping.
+// See memory_contract.hpp and tests/kvmem_store_test.cpp.
 //
 // Scope note: blocks/selection/tiering/remap apply ONLY to standard attention
 // layers (1/4 of layers in Qwen3.6). DeltaNet recurrent layers store O(1)
@@ -49,16 +49,10 @@ struct KvMemBlock {
     bool     dirty_gpu = false;     // GPU copy newer than backing copy
     bool     in_flight = false;     // async copy/verification owns this block
 
-    // The window position this block's K is CURRENTLY baked to, in place, in
-    // the GPU cache (no-copy design: the stored cache IS the repository). After
-    // prefill a block is baked at its true sequential position == orig_pos_start.
-    // Each assembly remaps IN PLACE from baked_pos to the new window slot via a
-    // de-rotate(baked_pos)+re-rotate(new) pass (rope_block_remap_paged), reusing
-    // the same __sincosf. With fp16 KV, however, every non-noop remap rounds the
-    // result again; a long multi-turn trace can therefore accumulate error. The
-    // counters drive the raw-K refresh policy in immutable-source mode: small
-    // moves are applied in-place, while a block is rebuilt from the CPU raw-K
-    // mirror after too many rotations or too much cumulative displacement.
+    // Legacy re-RoPE bookkeeping, updated by set_selection. These fields are
+    // NOT authoritative GPU K positions in the current packed-copy adapter.
+    // Its original token positions live in orig_pos_start / engine row metadata.
+    // New native-payload plans use ViewBlock::compact_start for addressing only.
     int64_t  baked_pos = -1;        // -1 until first registered (then orig_pos_start)
     uint32_t remap_count = 0;       // number of non-noop in-place re-RoPE moves
     uint64_t remap_abs_delta = 0;   // sum(abs(to_base-from_base)) since raw rebuild
@@ -72,11 +66,10 @@ struct KvMemBlock {
     uint32_t orig_pos_end() const { return orig_pos_start + n_tokens; }
 };
 
-// One block's remap instruction for the executor: the block's K is currently
-// baked in place at from_base; re-bake it to to_base (its new window slot).
-// Fed to rope_block_remap_paged per attention layer during assembly. `skip` is
-// set only when a valid working K remains resident and from_base == to_base.
-// A cold immutable block must be rebuilt from raw K even at the same position.
+// Legacy re-RoPE plan metadata. Existing selection tests exercise from_base /
+// to_base / raw_refresh semantics. The llama adapter uses NativeResidencyPlan
+// and copies native packed KV at original RoPE positions.
+// New backends must consume WorkingSetPlan, not reinterpret this structure.
 struct KvMemRemap {
     uint32_t block_id = 0;
     uint32_t n_tokens = 0;
@@ -110,9 +103,8 @@ struct KvMemPlan {
     // physical transfer when their GPU pages are still resident.
     std::vector<uint32_t> stage_in;
     std::vector<uint32_t> stage_out;  // resident blocks no longer selected
-    // Full remap plan for the new working set, in window order. The executor
-    // assembles the kernel page-index list from these blocks in this order and
-    // sets the query position to total_window_tokens.
+    // Legacy window-order bookkeeping. total_window_tokens is a count, not the
+    // original query RoPE position. Native execution uses its engine row metadata.
     std::vector<KvMemRemap> remaps;
     uint32_t total_window_tokens = 0;  // sum of n_tokens over selected blocks
     // Natural overlap is reported even in the reuse-off ablation, where the
@@ -121,6 +113,19 @@ struct KvMemPlan {
     uint32_t gpu_reused_blocks = 0;
     uint32_t retained_position_stable = 0;
     uint32_t retained_position_moved = 0;
+};
+
+// Transitional plan for llama's existing slot/tier executor. Planning is pure;
+// membership is committed after admission. No re-RoPE bookkeeping is read or
+// written. Unlike WorkingSetPlan this can include not-yet-evaluated prefill rows
+// and does not certify completed payloads or a published attention view.
+struct NativeResidencyPlan {
+    std::vector<uint32_t> selected;
+    std::vector<uint32_t> stage_in;
+    std::vector<uint32_t> stage_out;
+    uint32_t total_window_tokens = 0;
+    uint32_t selection_overlap_blocks = 0;
+    uint32_t gpu_reused_blocks = 0;
 };
 
 // Which signal ranks the middle (non-sink/recent) blocks each reselection.
@@ -268,12 +273,8 @@ struct KvMemStoreConfig {
     bool optimize_stage_in = true;
     bool optimize_pack = true;
 
-    // Drift-bounded K construction. The executor stores unrotated historical K
-    // in a CPU mirror and keeps only one active K copy on GPU. Resident window
-    // moves use an in-place delta rotation; cold blocks and blocks crossing a
-    // refresh threshold are rebuilt from raw K in one H2D + scatter/RoPE
-    // pass. Native serving uses a conservative count limit of 8 for both FP16
-    // and FP8; controlled experiments may override it.
+    // Legacy set_selection re-RoPE experiment controls. NativeResidencyPlan
+    // and WorkingSetPlan ignore these: packed KV keeps original RoPE positions.
     bool immutable_source_k = false;
     // Engine-level MTP prefix/speculation is enabled for this executor. Kept
     // explicit so non-MTP KVMem runs do not allocate/tier an unused MTP cache
@@ -464,6 +465,8 @@ public:
     // first ... recent last). Blocks are packed contiguously from window pos 0.
     KvMemPlan set_selection(std::vector<uint32_t> selected_ids,
                            bool force_raw_refresh = false);
+    // Reject stale/duplicate IDs rather than silently shrinking the selection.
+    NativeResidencyPlan plan_native_selection(std::vector<uint32_t> selected_ids) const;
     // Metadata only; every live GPU block must be selected and already valid.
     bool commit_resident_selection(const std::vector<uint32_t> & selected_ids);
 

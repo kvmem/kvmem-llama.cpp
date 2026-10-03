@@ -601,6 +601,8 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        GGML_OP_GATED_DELTA_NET_RECORD,
+
         GGML_OP_COUNT,
     };
 
@@ -2649,6 +2651,7 @@ extern "C" {
     // the output packs the attention scores [S_v, H_v, n_tokens, n_seqs] followed by K state
     // snapshots, most-recent first (slot 0 = final state, slot s = state s tokens back). K == 1
     // keeps only the final state; when n_tokens < K only slots 0..n_tokens-1 are written.
+    // K == 0 uses the RECORD op: attention output only, without a state output or state mutation.
     GGML_API struct ggml_tensor * ggml_gated_delta_net(
             struct ggml_context * ctx,
             struct ggml_tensor  * q,

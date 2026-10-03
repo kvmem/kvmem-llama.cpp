@@ -1,4 +1,5 @@
 #include "gated_delta_net.cuh"
+#include "ggml-cuda.h"
 #include "ggml-cuda/common.cuh"
 
 template <int S_v, bool KDA, bool keep_rs_t>
@@ -43,7 +44,9 @@ gated_delta_net_cuda(const float * q,
     // output state layout (per-slot D * n_seqs) — same per-(seq,head) offset as before.
     const int64_t state_in_offset      = sequence * H * S_v * S_v + h_idx * S_v * S_v;
     const int64_t state_out_offset     = (sequence * H + h_idx) * S_v * S_v;
-    state += state_out_offset;
+    if (K > 0) {
+        state += state_out_offset;
+    }
     curr_state += state_in_offset + col * S_v;
     attn_data += (sequence * n_tokens * H + h_idx) * S_v;
 
@@ -84,23 +87,14 @@ gated_delta_net_cuda(const float * q,
         if constexpr (!KDA) {
             const float g_val = expf(*g_t);
 
-            // kv[col] = (S^T @ k)[col] = sum_i S[i][col] * k[i]
-            float kv_shard = 0.0f;
-#pragma unroll
-            for (int r = 0; r < rows_per_lane; r++) {
-                kv_shard += s_shard[r] * k_reg[r];
-            }
-            float kv_col = warp_reduce_sum<warp_size>(kv_shard);
-
-            // delta[col] = (v[col] - g * kv[col]) * beta
-            float delta_col = (v_t[col] - g_val * kv_col) * beta_val;
+            const float delta_col = gdn_delta_f32<rows_per_lane, warp_size>(s_shard, k_reg, g_val, v_t[col], beta_val);
 
             // fused: S[i][col] = g * S[i][col] + k[i] * delta[col]
             // attn[col] = (S^T @ q)[col] = sum_i S[i][col] * q[i]
             float attn_partial = 0.0f;
 #pragma unroll
             for (int r = 0; r < rows_per_lane; r++) {
-                s_shard[r]  = g_val * s_shard[r] + k_reg[r] * delta_col;
+                s_shard[r]  = gdn_update_f32(s_shard[r], k_reg[r], g_val, delta_col);
                 attn_partial += s_shard[r] * q_reg[r];
             }
 
@@ -284,7 +278,7 @@ static void ggml_cuda_op_gated_delta_net_impl(
 
     // K (snapshot slot count) is an op param; state holds s0 only [S_v, S_v, H, n_seqs].
     const int K = ggml_get_op_params_i32(dst, 0);
-    const bool keep_rs = K > 1;
+    const bool keep_rs = K != 1;
 
     // recurrent state -> gdn_out tail (after attention scores), or the cache when fusing
     float * state_d           = dst_d + S_v * H * n_tokens * n_seqs;
@@ -324,4 +318,73 @@ void ggml_cuda_op_gated_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor *
 void ggml_cuda_op_gated_delta_net_fused_cache(
         ggml_backend_cuda_context & ctx, ggml_tensor * dst, ggml_cuda_gated_delta_net_fused_cache cache) {
     ggml_cuda_op_gated_delta_net_impl(ctx, dst, &cache);
+}
+
+static __global__ void gdn_fold_f32(const ggml_cuda_gdn_replay_layer * layers, int n_keep) {
+    constexpr int width = ggml_cuda_get_physical_warp_size();
+    constexpr int rows = 128 / width;
+    static_assert(width == 32 || width == 64, "unsupported GDN wave size");
+    const auto layer = layers[blockIdx.y];
+    const int head = blockIdx.x;
+    const int lane = threadIdx.x;
+    const int col = blockIdx.z * blockDim.y + threadIdx.y;
+    float * state = layer.state + (head * 128 + col) * 128;
+    float s[rows];
+#pragma unroll
+    for (int r = 0; r < rows; ++r) {
+        s[r] = state[r * width + lane];
+    }
+    for (int t = 0; t < n_keep; ++t) {
+        const float * key = layer.key + (t * 16 + head % 16) * 128;
+        float k[rows];
+#pragma unroll
+        for (int r = 0; r < rows; ++r) {
+            k[r] = key[r * width + lane];
+        }
+        const float decay = expf(layer.gate[t * 48 + head]);
+        const float delta = gdn_delta_f32<rows, width>(s, k, decay,
+                layer.value[(t * 48 + head) * 128 + col], layer.beta[t * 48 + head]);
+#pragma unroll
+        for (int r = 0; r < rows; ++r) {
+            s[r] = gdn_update_f32(s[r], k[r], decay, delta);
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < rows; ++r) {
+        state[r * width + lane] = s[r];
+    }
+}
+
+static __global__ void gdn_conv_fold_f32(const ggml_cuda_gdn_replay_layer * layers, int n_keep) {
+    const int channel = blockIdx.x * blockDim.x + threadIdx.x;
+    if (channel >= 10240) return;
+    const auto layer = layers[blockIdx.y];
+    float history[3];
+#pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        const int source = n_keep + i;
+        history[i] = source < 3 ? layer.conv[channel * 3 + source]
+                                : layer.conv_input[(source - 3) * 10240 + channel];
+    }
+#pragma unroll
+    for (int i = 0; i < 3; ++i) {
+        layer.conv[channel * 3 + i] = history[i];
+    }
+}
+
+bool ggml_backend_cuda_gdn_fold(const ggml_cuda_gdn_replay_layer * layers,
+        int n_layers, int n_keep, int capacity, void * stream_ptr) {
+    if (n_keep == 0) return true;
+    if (!layers || n_layers <= 0 || n_keep < 0 || n_keep > capacity || capacity > 6) return false;
+    const auto stream = static_cast<cudaStream_t>(stream_ptr);
+#if defined(GGML_USE_HIP)
+    const int width = ggml_cuda_info().devices[ggml_cuda_get_device()].warp_size;
+    if (width != 32 && width != 64) return false;
+    gdn_fold_f32<<<dim3(48, n_layers, 32), dim3(width, 4), 0, stream>>>(layers, n_keep);
+#else
+    gdn_fold_f32<<<dim3(48, n_layers, 32), dim3(32, 4), 0, stream>>>(layers, n_keep);
+#endif
+    if (cudaGetLastError() != cudaSuccess) return false;
+    gdn_conv_fold_f32<<<dim3(40, n_layers), 256, 0, stream>>>(layers, n_keep);
+    return cudaGetLastError() == cudaSuccess;
 }

@@ -676,6 +676,22 @@ VisionOverlayWindowStats VisionPrefillSession::overlay_stats() const noexcept {
     return overlay_ != nullptr ? overlay_->stats() : VisionOverlayWindowStats{};
 }
 
+void VisionPrefillSession::rewind_resident(std::uint32_t begin) {
+    if (overlay_ || cpu_ || begin >= prompt_.token_ids.size()) {
+        throw std::logic_error("Vision replay requires a valid resident prefill frontier");
+    }
+    next_use_ = 0;
+    while (next_use_ < plan_.uses.size() && plan_.uses[next_use_].end <= begin) ++next_use_;
+    for (auto use = next_use_; use < plan_.uses.size(); ++use) {
+        if (!prompt_.media_payloads.at(plan_.uses[use].prepared_item_index))
+            throw std::logic_error("Vision query replay lost an unconsumed media payload");
+    }
+    retire_handoff();
+    prepared_end_ = begin;
+    active_use_end_ = 0;
+    encoded_payloads_pending_release_.clear();
+}
+
 void VisionPrefillSession::release_encoded_media_payloads() noexcept {
     for (const std::uint32_t item_index : encoded_payloads_pending_release_) {
         if (item_index >= prompt_.media_payloads.size()) { std::terminate(); }

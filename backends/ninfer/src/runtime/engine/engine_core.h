@@ -88,6 +88,7 @@ public:
                ContextMachineCostModel context_cost)
         : instance_(instance), device_(device), max_context_(options.max_context),
           structured_output_(options.structured_output), max_concurrency_(options.max_concurrency),
+          kvmem_enabled_(options.kvmem.selected_tokens != 0),
           thorough_admission_search_(options.context_cache.thorough_admission_search),
           recover_invariant_failures_(options.recover_invariant_failures),
           kv_lease_growth_(options.context_cache.kv_lease_growth),
@@ -578,6 +579,9 @@ private:
         detail_range.emplace(nvtx::Name::StatsPublication, nvtx::Category::Control);
         RuntimeStats snapshot = cumulative_stats_;
         resources_.populate_runtime_stats(*instance_.program, snapshot);
+        // Sample Program-owned host gauges at the existing execution boundary.
+        // HTTP pollers read only this published snapshot and never query CUDA.
+        if (kvmem_enabled_) snapshot.kvmem = instance_.program->memory_summary().kvmem;
         {
             std::lock_guard lock(queue_mutex_);
             snapshot.waiting_requests = static_cast<std::uint32_t>(pending_.size());
@@ -1580,6 +1584,7 @@ private:
 
     void ensure_base_plan(const std::shared_ptr<Request>& request) {
         if (!request->base_plan) {
+            request->options.execution.publication_order = request->publication_order;
             request->base_plan.emplace(
                 instance_.program->plan_request(request->prompt, request->options.execution));
         }
@@ -2485,6 +2490,7 @@ private:
     const std::uint32_t max_context_;
     const bool structured_output_;
     const std::uint32_t max_concurrency_;
+    const bool kvmem_enabled_;
     const bool thorough_admission_search_;
     const bool recover_invariant_failures_;
     const bool kv_lease_growth_;

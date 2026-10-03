@@ -25,6 +25,8 @@ struct ResolvedExecutionOptions {
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
     std::uint32_t first_token_top_logprobs = 0;
+    // Engine-assigned publication order; never supplied by an external client.
+    std::uint64_t publication_order = 0;
 };
 
 struct ResolvedRequestOptions {

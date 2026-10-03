@@ -348,7 +348,7 @@ static void test_client_id_never_fails_a_request() {
     CHECK(std::string(plan.reason) == "extend");
 }
 
-// Today's checkpoint selection, transcribed from tools/kvmem-multimodal-server.h:246-256
+// Today's checkpoint selection, transcribed from tools/llama-kvmem-driver.cpp (checkpoint selection)
 // at v0.16.0-rc3. Default identity is not proved by this transcription but by
 // construction: conversation_begin_request returns before the policy when
 // --kvmem-conversations is absent, so the single-store server never reaches it.

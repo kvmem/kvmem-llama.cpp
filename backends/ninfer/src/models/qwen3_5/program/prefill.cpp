@@ -47,6 +47,7 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
 void configure_text_card(TextContext& card, const ExecutionCore& execution,
                          const ops::SamplingConfig* sampling, std::int32_t state_source_slot,
                          std::int32_t state_destination_slot, std::uint32_t mtp_proposal_extent) {
+    card.set_memory_statistics(execution.memory_statistics);
     card.set_sampling(sampling);
     card.set_linear_state_slots(state_source_slot, state_destination_slot);
     card.set_gdn_state_action(GdnStateAction::UpdateInPlace, nullptr);
@@ -75,6 +76,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
     card.set_first_token_logits(state.first_token_logits);
+    card.set_cache_position_shift(state.cache_position_shift);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
@@ -103,6 +105,7 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
     card.set_first_token_logits(state.first_token_logits);
+    card.set_cache_position_shift(state.cache_position_shift);
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
@@ -664,7 +667,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
                            prompt_tokens + (initial_mtp_extent == 0 ? 0U : initial_mtp_extent - 1U))
             : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                 : 0U;
-        ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
+        if (!kvmem_window_tokens) {
+            ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
+        }
         request.grammar                  = request_plan.grammar;
         request.first_token_top_logprobs = request_plan.first_token_top_logprobs;
         install_sampling(sequence, request, request_plan.sampling);
@@ -674,6 +679,9 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         request.timings              = {};
         request.pending              = {};
         request.publish_continuation = request_plan.summary.publish_continuation;
+        request.allow_memory_reuse = request_plan.allow_memory_reuse;
+        request.memory_host_reservation = request_plan.memory_host_reservation;
+        request.memory_session_key = staged.prompt.context_cache.session_key;
         sequence.mtp_draft_count     = 0;
         sequence.tail_hidden_valid   = base == prompt_tokens && sequence.tail_hidden_valid;
         sequence.ledger.swap(materialization_ledger_);
@@ -682,6 +690,20 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         sequence.rebuild_work       = request_plan.root_rebuild_work;
         sequence.rebuild_tail_begin = request_plan.root_rebuild_tail_begin;
 
+        if (kvmem_window_tokens) {
+            if (staged.memory_restore_frontier != 0) {
+                if (!restore_memory_history(sequence, staged)) {
+                    // Admission still reports the quoted prefix; recompute it silently
+                    // under the already reserved full-prefill service/resource budget.
+                    staged.hidden_replay_tokens = staged.memory_restore_frontier;
+                }
+            }
+            sequence.window.session_key = staged.prompt.context_cache.session_key;
+            sequence.window.publication_order = request_plan.publication_order;
+            sequence.window.update_session_index = staged.prompt.context_cache.update_session_index;
+            sequence.window.media_pages = memory_image_pages(staged.prompt);
+            reserve_memory_history(sequence, request, staged.prompt);
+        }
         if (staged.disk_restore_frontier != 0) {
             bool restored = false;
             try {
@@ -941,10 +963,12 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     const double tail_seconds = std::chrono::duration<double>(Clock::now() - tail_started).count();
     const std::uint32_t width = verify_drafts + 1U;
     try {
+        read_memory_candidates();
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence = active_sequence(lanes[row]);
             RequestControl& request = requests[lanes[row]];
             if (cancelled[row]) {
+                retain_memory_history(sequence, request);
                 if (!clear_lane_strict(sequence, request)) {
                     throw std::logic_error("cancelled speculative lane is not strictly releasable");
                 }
@@ -953,6 +977,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
 
             const PendingCandidate pending = request.pending;
             const std::uint32_t committed  = accepted_tokens[row];
+            commit_memory_candidates(sequence, pending.base_E, pending.base_E + committed,
+                                     static_cast<std::uint32_t>(row) * width, width);
             settle_state_fork(sequence);
             const TokenId* token_base =
                 speculative_backend == SpeculativeBackend::Mtp
@@ -1027,7 +1053,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
     }
     const runtime::BeginSummary summary{
         .prompt_tokens        = staged.prompt_tokens,
-        .reused_prompt_tokens = staged.disk_restore_frontier != 0 ? staged.disk_restore_frontier
+        .reused_prompt_tokens = staged.memory_restore_frontier != 0 ? staged.memory_restore_frontier
+                              : staged.disk_restore_frontier != 0 ? staged.disk_restore_frontier
                                                                   : staged.base,
         .prefix_reuse_path    = staged.reuse};
     std::uint32_t processed_prompt_tokens = 0;
@@ -1057,6 +1084,22 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         // Prefill attention addresses its KV through the shared step table-row scalars. Another
         // lane's staging or capture can rebind them between this lane's steps, so every step
         // binds its own rows before any Prefill or MTP-bridge work.
+        const auto query = staged.prompt.memory_query.value_or(qwen3_5::TokenSpan{});
+        prepare_memory_statistics(sequence, static_cast<std::uint32_t>(query.begin),
+                                   static_cast<std::uint32_t>(query.begin + query.count));
+        auto step_tokens = kvmem_window_tokens
+            ? prefill_chunk - staged.cursor % prefill_chunk : prefill_chunk;
+        if (kvmem_window_tokens) {
+            const auto lead = staged.prepare_mtp && staged.initial_mtp_extent
+                ? staged.initial_mtp_extent - 1U : 0U;
+            if (staged.prompt_tokens - staged.cursor <= step_tokens) {
+                step_tokens = std::min(step_tokens, kvmem_options.reserve_tokens - lead);
+            }
+            const auto chunk_end = std::min(staged.prompt_tokens, staged.cursor + step_tokens);
+            const auto mapped_end = std::min(capacity, chunk_end +
+                (chunk_end == staged.prompt_tokens ? lead : 0U));
+            prepare_window(sequence, staged.cursor, mapped_end);
+        }
         bind_sequence_kv(sequence);
         StateImageSelectors selectors = state_selectors(sequence);
         // Hybrid prefix cache taps (docs/maintainer/hybrid-prefix-cache-spec.md §7.1): an exact tap
@@ -1103,6 +1146,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             selectors.destination,
             staged.initial_mtp_extent,
             dflash_host_ingress};
+        schedule_state.cache_position_shift = sequence.window.removed_tokens;
+        set_device_i32(io.rope_delta, sequence.rope_delta +
+            checked_i32(sequence.window.removed_tokens, "prefill cache shift"));
+        schedule_state.execution.memory_statistics = memory_statistics ? &*memory_statistics : nullptr;
+
         const auto public_tokens =
             static_cast<std::size_t>(dimension(parameters.model.resources().public_token_count));
         if (request.first_token_top_logprobs != 0) {
@@ -1144,7 +1192,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
 
         if (staged.cursor < staged.prompt_tokens) {
             const std::uint32_t nominal =
-                std::min(prefill_chunk, staged.prompt_tokens - staged.cursor);
+                std::min(step_tokens, staged.prompt_tokens - staged.cursor);
             mark_workspace_usage(staged.prepare_mtp ? workspace_plan.mtp_prefill
                                                     : workspace_plan.text_prefill);
             if (is_masked_draft_backend(speculative_backend)) {
@@ -1170,7 +1218,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                     schedule_state.rewrite_checkpoint_hidden = nullptr;
                 }
 
-                const bool final_candidate = staged.cursor + remaining == staged.prompt_tokens;
+                const bool final_candidate = staged.cursor + remaining == staged.prompt_tokens &&
+                    !memory_query_probe(sequence, staged.prompt_tokens);
                 const std::optional<std::uint32_t> capture_frontier =
                     staged.next_capture < staged.capture_groups.size()
                         ? std::optional<std::uint32_t>(
@@ -1193,6 +1242,12 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 }
                 if (hybrid_split && (!split_frontier || *hybrid_split < *split_frontier)) {
                     split_frontier = *hybrid_split;
+                }
+                const auto memory_frontier = memory_checkpoint_frontier(
+                    sequence, staged.prompt_tokens, request.allow_memory_reuse);
+                if (memory_frontier > staged.cursor &&
+                    (!split_frontier || memory_frontier < *split_frontier)) {
+                    split_frontier = memory_frontier;
                 }
                 execution::PrefillChunkResult result;
                 timing.pause();
@@ -1218,7 +1273,11 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 if (result.processed_tokens == 0 || result.processed_tokens > remaining) {
                     throw std::logic_error("ordinary prefill chunk made invalid progress");
                 }
-                if (staged.vision) { staged.vision->release_encoded_media_payloads(); }
+                if (staged.vision && !memory_query_probe(sequence, staged.prompt_tokens)) {
+                    staged.vision->release_encoded_media_payloads();
+                }
+                commit_memory_statistics(sequence, staged.cursor,
+                                         staged.cursor + result.processed_tokens);
                 staged.cursor += result.processed_tokens;
                 processed_prompt_tokens += result.processed_tokens;
                 remaining -= result.processed_tokens;
@@ -1233,6 +1292,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 // Prompt transitions are canonical immediately. If this was the first write after
                 // an immutable source, close the Fork before potentially freezing a new rewrite.
                 settle_state_fork(sequence);
+                if (memory_frontier && staged.cursor == memory_frontier &&
+                    !sequence.window.prefix_checkpoint) {
+                    capture_memory_prefix(sequence, result.processed_tokens);
+                }
                 if (hybrid_lane != nullptr && !result.finalized) {
                     hybrid_after_prefill_chunk(sequence, staged.cursor, staged.prompt_tokens);
                 }
@@ -1259,6 +1322,17 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             }
 
             if (!finalized) {
+                if (staged.cursor == staged.prompt_tokens &&
+                    memory_query_probe(sequence, staged.prompt_tokens)) {
+                    const auto completed = reported_tokens();
+                    rewind_memory_query(sequence);
+                    staged.cursor = sequence.window.query_begin;
+                    if (staged.vision) staged.vision->rewind_resident(staged.cursor);
+                    staged.hidden_replay_tokens += staged.prompt_tokens - staged.cursor;
+                    staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
+                    return runtime::PrefillStepResult{.summary = summary,
+                        .processed_prompt_tokens = completed, .timing = timing.finish()};
+                }
                 if (staged.cursor == staged.prompt_tokens) {
                     throw std::logic_error("staged prefill reached the prompt without sampling");
                 }

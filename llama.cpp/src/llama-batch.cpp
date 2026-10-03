@@ -758,6 +758,8 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
 
     udata->token     .resize(n_tokens);
     udata->embd      .resize(n_embd_all);
+    udata->embd_nextn.resize(batch.embd_nextn ? (int64_t) n_tokens*n_embd : 0);
+    udata->logical_pos.resize(batch.logical_pos ? n_tokens : 0);
     udata->pos       .resize(n_pos_all);
     udata->n_seq_id  .resize(n_tokens);
     udata->seq_id    .resize(n_tokens);
@@ -776,6 +778,12 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
 
         if (batch.embd) {
             memcpy(udata->embd.data() + i*n_embd, batch.embd + (int64_t) idxs[i]*n_embd, n_embd*sizeof(float));
+        }
+        if (batch.embd_nextn) {
+            memcpy(udata->embd_nextn.data() + i*n_embd, batch.embd_nextn + (int64_t) idxs[i]*n_embd, n_embd*sizeof(float));
+        }
+        if (batch.logical_pos) {
+            udata->logical_pos[i] = batch.logical_pos[idxs[i]];
         }
 
         for (size_t j = 0; j < (size_t)n_pos_per_embd; ++j) {
@@ -833,6 +841,9 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
         /*.output       =*/ udata->output.data(),
         /*.data         =*/ std::move(udata),
     };
+
+    res.logical_pos = batch.logical_pos ? res.data->logical_pos.data() : nullptr;
+    res.embd_nextn = batch.embd_nextn ? res.data->embd_nextn.data() : nullptr;
 
     if (debug > 0) {
         LLAMA_LOG_DEBUG("%s: added ubatch to split:\n", __func__);

@@ -269,6 +269,10 @@ extern "C" {
         int32_t      *  n_seq_id;
         llama_seq_id ** seq_id;
         int8_t       *  logits;   // TODO: rename this to "output"
+
+        // Optional borrowed arrays; llama_batch_free does not free these.
+        llama_pos    *  logical_pos; // unique cache row IDs, independent of M-RoPE
+        float        *  embd_nextn;  // previous target hidden rows for MTP
     } llama_batch;
 
     enum llama_model_kv_override_type {

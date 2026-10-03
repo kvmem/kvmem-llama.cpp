@@ -5,6 +5,7 @@
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rmsnorm_rope.h"
 #include "ninfer/ops/rope.h"
+#include "ninfer/ops/token_sums.h"
 
 #include <stdexcept>
 
@@ -101,17 +102,38 @@ void text_qk_norm_rope(const Tensor& positions, const RopeConfig& rope,
                        const AttentionConfig& attention, float rms_norm_eps,
                        const Tensor& q_norm_weight, const Tensor& k_norm_weight,
                        const Tensor& query, const Tensor& key, Tensor& normalized_query,
-                       Tensor& normalized_key, const ops::RopeYarn& yarn, cudaStream_t stream) {
+                       Tensor& normalized_key, const ops::RopeYarn& yarn, cudaStream_t stream,
+                       const MemoryStatistics* statistics, std::int32_t layer) {
     require_rope_axes(positions, rope);
     // The fused Op rotates unscaled positions at the unscaled frequencies, so YaRN or position
     // interpolation keeps the three separate calls.
-    if (!yarn.active() && fused_text_qk_norm_rope(positions, rope, attention, query.ne[2])) {
+    if (statistics == nullptr && !yarn.active() && fused_text_qk_norm_rope(positions, rope, attention, query.ne[2])) {
         ops::rmsnorm_rope(positions, q_norm_weight, k_norm_weight, query, key, normalized_query,
                           normalized_key, stream);
         return;
     }
     ops::rmsnorm(query, q_norm_weight, rms_norm_eps, true, normalized_query, stream);
     ops::rmsnorm(key, k_norm_weight, rms_norm_eps, true, normalized_key, stream);
+    if (statistics != nullptr) {
+        const auto tokens = query.ne[2];
+        const auto block = static_cast<std::int32_t>(statistics->block_tokens);
+        const auto buckets = (tokens + 2 * block - 2) / block;
+        // Decode columns are independent candidates, potentially belonging to
+        // different requests. Copy their represented keys without interpreting
+        // flattened columns as a consecutive logical token range.
+        Tensor origin = block == 1 ? statistics->candidate_origin
+                                   : statistics->prefill_origin;
+        Tensor k_sum = statistics->key_sums.slice(2, layer, 1)
+                           .slice(1, 0, buckets).view({dimension(attention.key_width()), buckets});
+        Tensor q_sum = statistics->query_sums.slice(2, layer, 1)
+                           .view({dimension(attention.query_width()), 1});
+        ops::token_sums(normalized_key.view({dimension(attention.key_width()), tokens}),
+                        origin, statistics->ranges.slice(0, 0, 2), block, k_sum, stream);
+        if (block != 1) {
+            ops::token_sums(normalized_query.view({dimension(attention.query_width()), tokens}),
+                            origin, statistics->ranges.slice(0, 2, 2), 0, q_sum, stream);
+        }
+    }
     ops::rope(positions, dimension(rope.rotary_dim), rope.rope_theta, yarn, normalized_query,
               normalized_key, stream);
 }

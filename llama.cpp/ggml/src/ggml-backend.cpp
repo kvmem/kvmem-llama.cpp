@@ -838,6 +838,18 @@ struct ggml_backend_sched {
     int debug_realloc;
     int debug_graph_size;
     int debug_prev_graph_size;
+
+    // split_graph rewrites node->src to copies that live in sched->ctx.
+    // Those copies are freed on the next split, so every rewritten edge is
+    // restored before the next split or before the caller destroys the graph.
+    struct ggml_backend_sched_src_restore {
+        struct ggml_tensor * node;
+        int src_index;
+        struct ggml_tensor * src;
+    };
+    struct ggml_backend_sched_src_restore * src_restores;
+    int n_src_restores;
+    int src_restores_capacity;
 };
 
 #define hash_id(tensor) ggml_hash_find_or_insert(&sched->hash_set, tensor)
@@ -1062,8 +1074,37 @@ static void ggml_backend_sched_set_if_supported(ggml_backend_sched_t sched, stru
     }
 }
 
+static void ggml_backend_sched_record_src(ggml_backend_sched_t sched, struct ggml_tensor * node, int src_index, struct ggml_tensor * src) {
+    if (sched->n_src_restores == sched->src_restores_capacity) {
+        const int new_cap = sched->src_restores_capacity > 0 ? sched->src_restores_capacity * 2 : 256;
+        auto * grown = (ggml_backend_sched::ggml_backend_sched_src_restore *) realloc(
+                sched->src_restores, (size_t) new_cap * sizeof(sched->src_restores[0]));
+        GGML_ASSERT(grown != NULL);
+        sched->src_restores = grown;
+        sched->src_restores_capacity = new_cap;
+    }
+    sched->src_restores[sched->n_src_restores].node = node;
+    sched->src_restores[sched->n_src_restores].src_index = src_index;
+    sched->src_restores[sched->n_src_restores].src = src;
+    sched->n_src_restores++;
+}
+
+void ggml_backend_sched_restore_graph_srcs(ggml_backend_sched_t sched) {
+    GGML_ASSERT(sched);
+    // Reverse order so a second rewrite of the same edge restores the original.
+    for (int i = sched->n_src_restores - 1; i >= 0; --i) {
+        const auto & saved = sched->src_restores[i];
+        saved.node->src[saved.src_index] = saved.src;
+    }
+    sched->n_src_restores = 0;
+}
+
 // assigns backends to ops and splits the graph into subgraphs that can be computed on the same backend
 void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph) {
+    // Copies from the previous split live in sched->ctx and are about to be freed.
+    // Put every previously split graph back on the inputs it was built with first.
+    ggml_backend_sched_restore_graph_srcs(sched);
+
     // reset splits
     sched->n_splits = 0;
     sched->n_graph_inputs = 0;
@@ -1081,6 +1122,10 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
     if (sched->ctx == NULL) {
         GGML_ABORT("%s: failed to initialize context\n", __func__);
     }
+
+    // The previous copies were freed with sched->ctx. Drop the table, but keep
+    // backend-id assignments made by the caller before this split.
+    memset(sched->hv_tensor_copies, 0, sched->hash_set.size * sched->n_backends * sched->n_copies * sizeof(struct ggml_tensor *));
 
     graph->uid = ggml_graph_next_uid();
 
@@ -1416,6 +1461,7 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                         }
                         split->inputs[n_inputs] = src;
                     }
+                    ggml_backend_sched_record_src(sched, node, j, src);
                     node->src[j] = tensor_id_copy(src_id, cur_backend_id, sched->cur_copy);
                 }
             }
@@ -1928,6 +1974,7 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
     }
     ggml_gallocr_free(sched->galloc);
     ggml_free(sched->ctx);
+    free(sched->src_restores);
     ggml_hash_set_free(&sched->hash_set);
     for (int i = 0; i < sched->splits_capacity; i++) {
         free(sched->splits[i].inputs);
@@ -1950,6 +1997,9 @@ void ggml_backend_sched_reset(ggml_backend_sched_t sched) {
     GGML_ASSERT(sched);
     // reset state for the next run
     if (!sched->is_reset) {
+        // Graph nodes still exist here. Restore their inputs before the caller
+        // recycles those nodes, and before the next split frees sched->ctx.
+        ggml_backend_sched_restore_graph_srcs(sched);
         ggml_hash_set_reset(&sched->hash_set);
         memset(sched->hv_tensor_backend_ids, -1, sched->hash_set.size * sizeof(sched->hv_tensor_backend_ids[0]));
         memset(sched->hv_tensor_copies,       0, sched->hash_set.size * sched->n_backends * sched->n_copies * sizeof(struct ggml_tensor *));

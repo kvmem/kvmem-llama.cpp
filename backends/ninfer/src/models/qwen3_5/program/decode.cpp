@@ -41,6 +41,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                          {}, state.execution.linear_attention, state.execution.io,
                          state.execution.prefill_hidden, state.execution.prefill_chunk, 0, {},
                          &state.text_cache);
+        card.set_memory_statistics(state.execution.memory_statistics);
         card.set_stage_runtime(state.execution.stages);
         card.set_rope_yarn(state.execution.rope_yarn);
 
@@ -60,7 +61,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                      state.execution.device.stream);
         ops::sample(logits, sampled,
                     dimension(state.execution.parameters.model.resources().public_token_count),
-                    ordinary.sampling, cache_positions, ops::kSamplePurposeDecode,
+                    ordinary.sampling, ordinary.logical_frontiers.slice(0, 0, batch_size), ops::kSamplePurposeDecode,
                     state.execution.work, state.execution.device.stream);
         CUDA_CHECK(cudaMemcpyAsync(&state.host_egress, ordinary.egress.data,
                                    sizeof(qwen3_5::OrdinaryDecodeEgress), cudaMemcpyDeviceToHost,
@@ -422,7 +423,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                 lanes.begin() + static_cast<std::ptrdiff_t>(row)) {
             throw std::invalid_argument("ordinary batch contains an invalid or duplicate lane");
         }
-        const SequenceState& sequence = active_sequence(lane);
+        SequenceState& sequence = active_sequence(lane);
         const RequestControl& request = requests[lane];
         if (request.lifecycle != Lifecycle::Active ||
             budgets[row].generated_tokens_remaining == 0 || !sequence.kv ||
@@ -434,7 +435,10 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             sequence.prefix_digests.size() != sequence.ledger_frontier) {
             throw std::logic_error("ordinary batch row is not decode-ready");
         }
-        maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
+        if (kvmem_window_tokens) {
+            prepare_window(sequence, sequence.execution_frontier, sequence.execution_frontier + 1);
+        }
+        maximum_frontier = std::max(maximum_frontier, compact_position(sequence, sequence.execution_frontier));
     }
 
     const auto start = Clock::now();
@@ -458,7 +462,8 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t frontier       = sequence.execution_frontier;
             ordinary_host_ingress->tokens[row] = sequence.ledger.back();
             ordinary_host_ingress->cache_positions[row] =
-                checked_i32(frontier, "ordinary batch position");
+                checked_i32(compact_position(sequence, frontier), "ordinary batch position");
+            ordinary_host_ingress->logical_frontiers[row] = checked_i32(frontier, "ordinary RNG frontier");
             ordinary_host_ingress->rope_positions[row] =
                 checked_i32(frontier, "ordinary batch RoPE position") + sequence.rope_delta;
             ordinary_host_ingress->text_kv_table_rows[row] =
@@ -484,6 +489,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             *ordinary_host_egress,
             state_images->continuation_hidden_store()};
 
+        schedule_state.execution.memory_statistics = memory_candidate_statistics ? &*memory_candidate_statistics : nullptr;
         mark_workspace_usage(workspace_plan.ordinary_round);
         execution::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                          envelope, executable);
@@ -496,6 +502,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
         }
         timing.end_wait();
 
+        read_memory_candidates();
         const double seconds = std::chrono::duration<double>(Clock::now() - start).count();
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence    = active_sequence(lanes[row]);
@@ -504,6 +511,7 @@ ProgramImpl::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             const std::uint32_t base_S = sequence.ledger_frontier;
             const TokenId token        = ordinary_host_egress->sampled_tokens[row];
             validate_licensed_tokens(std::span<const TokenId>(&token, 1));
+            commit_memory_candidates(sequence, base_E, base_E + 1, static_cast<std::uint32_t>(row), 1);
             sequence.text_kv_valid = base_E + 1;
             commit_sequence_kv(sequence, sequence.text_kv_valid, 0);
             sequence.tail_hidden_valid = true;
@@ -564,7 +572,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                 lanes.begin() + static_cast<std::ptrdiff_t>(row)) {
             throw std::invalid_argument("MTP batch contains an invalid or duplicate lane");
         }
-        const SequenceState& sequence = active_sequence(lane);
+        SequenceState& sequence = active_sequence(lane);
         const RequestControl& request = requests[lane];
         if (request.lifecycle != Lifecycle::Active ||
             budgets[row].generated_tokens_remaining == 0 || !sequence.kv || !sequence.kv->backend ||
@@ -579,7 +587,12 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             sequence.mtp_draft_count > draft_window) {
             throw std::logic_error("MTP batch row is not decode-ready");
         }
-        maximum_frontier = std::max(maximum_frontier, sequence.execution_frontier);
+        if (kvmem_window_tokens) {
+            prepare_window(sequence, sequence.execution_frontier,
+                std::min(capacity, sequence.execution_frontier +
+                    std::max(draft_window, ngram_draft_window) + draft_window));
+        }
+        maximum_frontier = std::max(maximum_frontier, compact_position(sequence, sequence.execution_frontier));
         signals[row]     = &request.mtp_signal;
         room[row]        = std::min(budgets[row].generated_tokens_remaining,
                                     capacity - sequence.execution_frontier);
@@ -605,6 +618,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                        mtp_minimum_adaptive_window(draft_window), draft_window);
     }
     const std::uint32_t width = verify_window + 1;
+    const auto attention_capacity = kvmem_window_tokens ? kvmem_window_tokens : capacity;
 
     const auto started = Clock::now();
     try {
@@ -613,7 +627,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                              static_cast<std::uint64_t>(lanes.size()));
         DecodeGraphExecutable* executable = nullptr;
         execution::MtpCausalAttentionEnvelopes envelopes =
-            mtp_causal_attention_envelopes(maximum_frontier, verify_window, draft_window, capacity);
+            mtp_causal_attention_envelopes(maximum_frontier, verify_window, draft_window, attention_capacity);
         if (use_cuda_graph) {
             DecodeGraphFamily& family = copy_round ? ngram_graphs : mtp_graphs;
             DecodeGraphProfile& profile =
@@ -621,7 +635,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                                      maximum_frontier, "MTP batch", verify_window);
             executable = &install_graph_profile(family, profile, "MTP batch");
             envelopes  = mtp_causal_attention_envelopes(profile.max_execution_frontier,
-                                                        verify_window, draft_window, capacity);
+                                                        verify_window, draft_window, attention_capacity);
         }
 
         for (std::size_t row = 0; row < lanes.size(); ++row) {
@@ -638,7 +652,8 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
                           : sequence.mtp_draft_count,
                  verify_window, max_by_budget, capacity - sequence.execution_frontier - 1});
             mtp_host_ingress->anchors[row]        = sequence.ledger.back();
-            mtp_host_ingress->base_frontiers[row] = checked_i32(frontier, "MTP batch frontier");
+            mtp_host_ingress->base_frontiers[row] = checked_i32(compact_position(sequence, frontier), "MTP batch cache frontier");
+            mtp_host_ingress->logical_frontiers[row] = checked_i32(frontier, "MTP batch logical frontier");
             mtp_host_ingress->remaining_budgets[row] =
                 checked_i32(budgets[row].generated_tokens_remaining, "MTP batch remaining budget");
             mtp_host_ingress->current_extents[row]      = static_cast<std::int32_t>(extent);
@@ -660,7 +675,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             const StateImageSelectors selectors            = state_selectors(sequence);
             mtp_host_ingress->state_source_slots[row]      = selectors.source;
             mtp_host_ingress->state_destination_slots[row] = selectors.destination;
-            mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta;
+            mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta + checked_i32(sequence.window.removed_tokens, "MTP cache shift");
             mtp_host_ingress->sampling[row]                = request.sampling_host;
             if (request.grammar) {
                 structured_round->fill(
@@ -685,6 +700,7 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             *mtp_host_egress,
             state_images->continuation_hidden_store()};
 
+        schedule_state.execution.memory_statistics = memory_candidate_statistics ? &*memory_candidate_statistics : nullptr;
         mark_workspace_usage(workspace_plan.mtp_round);
         execution::mtp_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                     verify_window, draft_window, envelopes, executable);

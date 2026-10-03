@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export committed parent sources and the clean pinned submodule without private files."""
+"""Export the committed monorepo, including its vendored backends, without private files."""
 import argparse
 import hashlib
 import io
@@ -19,13 +19,13 @@ def main():
     if output.exists():
         raise RuntimeError('Archive already exists.')
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
-    subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', '.', ':(exclude)llama.cpp'],
+    subprocess.run(['git', 'diff', '--exit-code', 'HEAD', '--', '.'],
                    cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
-    pin = subprocess.check_output(['git', 'rev-parse', 'HEAD:llama.cpp'], cwd=ROOT, text=True).strip()
-    manifest = dict(source_commit=commit, llama_commit=pin, llama_patch_applied=False, files={})
+    versions = json.loads((ROOT / 'backends/versions.json').read_text(encoding='utf-8'))
+    manifest = dict(source_commit=commit, vendored_backends=versions, files={})
     output.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(output, 'x:gz') as target:
-        for repository, ref, prefix in [(ROOT, commit, ''), (ROOT / 'llama.cpp', pin, 'llama.cpp/')]:
+        for repository, ref, prefix in [(ROOT, commit, '')]:
             data = subprocess.check_output(['git', '-c', 'core.autocrlf=false', 'archive', ref], cwd=repository)
             with tarfile.open(fileobj=io.BytesIO(data)) as source:
                 for member in source:

@@ -1,5 +1,6 @@
 #include "serve/load_report.h"
 #include "serve/cuda_residency_json.h"
+#include "serve/kvmem_status_json.h"
 
 #include "serve/request_events.h"
 #include "serve/request_log.h"
@@ -74,6 +75,7 @@ Json load_report(const LoadCapacity& capacity, const LoadSample& sample) {
                           {"decode_rounds", stats.decode_rounds},
                           {"decode_row_rounds", stats.decode_row_rounds}}},
     };
+    if (stats.kvmem.enabled) report["kvmem"] = kvmem_status_json(stats.kvmem);
     return report;
 }
 

@@ -717,6 +717,10 @@ public:
     [[nodiscard]] bool isolated_request_feasible(const FakeRequestBasePlan& base) const noexcept {
         return base.isolated_feasible;
     }
+    bool auxiliary_tier_available = true;
+    [[nodiscard]] bool temporary_request_feasible(const FakeRequestBasePlan&) const noexcept {
+        return auxiliary_tier_available;
+    }
 
     [[nodiscard]] std::optional<FakeAdmissionCandidate>
     inspect_admission(const FakePreparedPrompt& prompt, const FakeRequestBasePlan& base, LaneId,
@@ -2863,6 +2867,18 @@ void test_aborted_source_selection_does_not_create_hit_history() {
     require(program.started_action_ids.size() == 1 &&
                 program.started_action_ids.front() == 2000U + first.sequence.id,
             "aborted source selection incorrectly biased later retention policy");
+}
+
+void test_auxiliary_host_pressure_waits_without_rejecting_request() {
+    FakeManager manager = make_manager(2, 3);
+    FakeProgram program;
+    program.auxiliary_tier_available = false;
+    const auto blocked = manager.inspect(program, FakePreparedPrompt{17}, make_base(17), 1);
+    require(blocked.readiness == Readiness::TemporarilyBlocked && !blocked.choice,
+            "temporary Host pressure rejected or admitted the queued request");
+    program.auxiliary_tier_available = true;
+    const auto available = manager.inspect(program, FakePreparedPrompt{17}, make_base(17), 1);
+    require(available.choice.has_value(), "released Host reservation did not unblock admission");
 }
 
 void test_retained_source_is_protected_until_terminal() {
@@ -5151,6 +5167,7 @@ int main() {
              test_uncommitted_pressure_acknowledgement_is_not_degradation);
     run_test("aborted source is not a hit",
              test_aborted_source_selection_does_not_create_hit_history);
+    run_test("auxiliary Host pressure", test_auxiliary_host_pressure_waits_without_rejecting_request);
     run_test("retained source protection", test_retained_source_is_protected_until_terminal);
     run_test("session publication order", test_session_publication_order_controls_tied_source);
     run_test("canonical pressure", test_canonical_pressure_starts_with_disposable_owner);

@@ -119,9 +119,12 @@ llama_memory_context_ptr llama_memory_kvmem_hybrid::init_batch(
 }
 
 void llama_memory_kvmem_hybrid::clear(bool data) {
-    llama_memory_hybrid::clear(data);
     if (attn_kvmem_) {
-        attn_kvmem_->reset_policy();
+        // Drain capture and packed-copy writers before clearing their source KV.
+        attn_kvmem_->clear(data);
+        get_mem_recr()->clear(data);
+    } else {
+        llama_memory_hybrid::clear(data);
     }
 }
 

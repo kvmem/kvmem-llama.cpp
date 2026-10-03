@@ -54,6 +54,8 @@ struct llama_ubatch {
     struct data_t {
         std::vector<llama_token>    token;
         std::vector<float>          embd;
+        std::vector<float>          embd_nextn;
+        std::vector<llama_pos>      logical_pos;
         std::vector<llama_pos>      pos;
         std::vector<int32_t>        n_seq_id;
         std::vector<llama_seq_id *> seq_id;      // these point into the seq_id_data below
@@ -66,6 +68,8 @@ struct llama_ubatch {
 
     // the llama_ubatch pointers above point to this data if set. otherwise - point to external non-owning data
     std::shared_ptr<data_t> data;
+    llama_pos * logical_pos = nullptr;
+    float * embd_nextn = nullptr;
 };
 
 // a helper for sanitizing, fulfilling and splitting a batch

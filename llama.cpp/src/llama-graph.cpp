@@ -15,6 +15,9 @@
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
+#if defined(LLAMA_KVMEM)
+#include "llama-kvmem-hooks.h"
+#endif
 
 #include <cassert>
 #include <cmath>
@@ -104,13 +107,11 @@ void llm_graph_input_embd_h::set_input(const llama_ubatch * ubatch) {
         ggml_backend_tensor_set(embd, ubatch->embd, 0, n_tokens*n_embd*ggml_element_size(h));
     }
 
-    // TODO: extend llama_ubatch to differentiate between token embeddings and hidden states
-    //       for now, we assume that the hidden state is always provided as an embedding
-    //       ref: https://github.com/ggml-org/llama.cpp/pull/23643
-    if (ubatch->embd) {
+    const float * hidden = ubatch->embd_nextn ? ubatch->embd_nextn : ubatch->embd;
+    if (hidden) {
         GGML_ASSERT(n_embd == h->ne[0]);
 
-        ggml_backend_tensor_set(h, ubatch->embd, 0, n_tokens*n_embd*ggml_element_size(h));
+        ggml_backend_tensor_set(h, hidden, 0, n_tokens*n_embd*ggml_element_size(h));
     }
 }
 
@@ -119,7 +120,7 @@ bool llm_graph_input_embd_h::can_reuse(const llm_graph_params & params) {
 
     res &= (!params.ubatch.token) || (tokens && tokens->ne[0] == params.ubatch.n_tokens);
     res &= (!params.ubatch.embd)  || (embd   && embd->ne[1]   == params.ubatch.n_tokens);
-    res &= (!params.ubatch.embd)  || (h      && h->ne[1]      == params.ubatch.n_tokens);
+    res &= (!params.ubatch.embd && !params.ubatch.embd_nextn) || (h && h->ne[1] == params.ubatch.n_tokens);
 
     return res;
 }
@@ -1501,6 +1502,88 @@ void llm_graph_context::cb(ggml_tensor * cur, const char * name, int il) const {
     if (cb_func) {
         cb_func(ubatch, cur, name, il);
     }
+}
+
+static void kvmem_capture_impl(ggml_context * ctx0, ggml_cgraph * gf, ggml_tensor * src, int il, const char * tag) {
+#if defined(LLAMA_KVMEM)
+    const llama_kvmem_params * kp = llama_kvmem_get_params();
+    if (!src || !kp->enabled) {
+        return;
+    }
+    // Recency/identity does not need host raw-K. Skip pinning intermediates
+    // unless retrieval is on, harvest-V is on (V only), or an explicit dump.
+    if (kp->method != 1 && getenv("KVMEM_DUMP_CAPTURE") == nullptr) {
+        if (!kp->harvest_v || tag[0] != 'v') {
+            return;
+        }
+    }
+    // Keep the pre-RoPE tensor itself (rope_ext is not in-place). Avoids a
+    // per-layer GPU cpy; harvest reads this buffer after the full graph.
+    GGML_UNUSED(ctx0);
+    ggml_format_name(src, "kvmem_%s-%d", tag, il);
+    ggml_set_output(src);
+    ggml_build_forward_expand(gf, src);
+    llama_kvmem_register_capture(src, il, tag[0]);
+#else
+    GGML_UNUSED(ctx0);
+    GGML_UNUSED(gf);
+    GGML_UNUSED(src);
+    GGML_UNUSED(il);
+    GGML_UNUSED(tag);
+#endif
+}
+
+void llm_graph_context::kvmem_capture_k(ggml_tensor * k_prerope, int il) const {
+#if defined(LLAMA_KVMEM)
+    // Prefill: full ubatch mean-K. Decode / MTP verify after pin: running mean-K.
+    if (ubatch.n_tokens <= 1) {
+        if (!llama_kvmem_want_decode_mean()) {
+            return;
+        }
+        kvmem_capture_impl(ctx0, gf, k_prerope, il, "k");
+        return;
+    }
+    if (llama_kvmem_want_prefill_capture() || llama_kvmem_want_decode_mean()) {
+        kvmem_capture_impl(ctx0, gf, k_prerope, il, "k");
+    }
+#else
+    GGML_UNUSED(k_prerope);
+    GGML_UNUSED(il);
+#endif
+}
+
+void llm_graph_context::kvmem_capture_q(ggml_tensor * q, int il) const {
+    if (ubatch.n_tokens <= 1) {
+        return;
+    }
+#if defined(LLAMA_KVMEM)
+    if (!llama_kvmem_want_q_capture(ubatch.n_tokens, 1, ubatch.logical_pos ? ubatch.logical_pos : ubatch.pos)) {
+        return;
+    }
+#endif
+    kvmem_capture_impl(ctx0, gf, q, il, "q");
+}
+
+void llm_graph_context::kvmem_capture_v(ggml_tensor * v, int il) const {
+    // Default: no prefill V. --kvmem-harvest-v (or dump) copies token-major
+    // Vcur on the same pipe as K so evict / apply_retrieval skip read_gpu_block.
+    if (ubatch.n_tokens <= 1) {
+        return;
+    }
+#if defined(LLAMA_KVMEM)
+    if (!llama_kvmem_want_prefill_capture()) {
+        return;
+    }
+    const llama_kvmem_params * kp = llama_kvmem_get_params();
+    if (!(kp && kp->harvest_v) && getenv("KVMEM_DUMP_CAPTURE") == nullptr) {
+        return;
+    }
+#else
+    GGML_UNUSED(v);
+    GGML_UNUSED(il);
+    return;
+#endif
+    kvmem_capture_impl(ctx0, gf, v, il, "v");
 }
 
 

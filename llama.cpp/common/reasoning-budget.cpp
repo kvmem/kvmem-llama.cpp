@@ -185,6 +185,21 @@ static void common_reasoning_budget_apply(struct llama_sampler * smpl, llama_tok
     }
 }
 
+void common_reasoning_budget_accept_prefill(struct llama_sampler * smpl, llama_token token) {
+    auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
+    if (ctx->state != REASONING_BUDGET_FORCING) {
+        common_reasoning_budget_accept(smpl, token);
+        return;
+    }
+    // A prompt can contain whitespace or continued reasoning after the budget
+    // is exhausted. Only an actual end tag closes it; output forcing is pending.
+    const int32_t match = ctx->end_matcher.advance(token);
+    if (match >= 0) {
+        ctx->state = REASONING_BUDGET_DONE;
+        ctx->end_match = match;
+    }
+}
+
 static void common_reasoning_budget_reset(struct llama_sampler * smpl) {
     auto * ctx = (common_reasoning_budget_ctx *) smpl->ctx;
     ctx->state = REASONING_BUDGET_IDLE;

@@ -151,6 +151,10 @@ LLAMA_API uint32_t llama_kvmem_store_rows(int32_t store_id);
 LLAMA_API uint64_t llama_kvmem_store_bytes(int32_t store_id);
 LLAMA_API llama_pos llama_kvmem_recr_pos_max(void);
 // After MTP verify: keep the first n_keep batch tokens in the running mean (0 = discard).
+LLAMA_API void llama_kvmem_begin_speculative_evaluation();
+// One accepted prefix: validate capture, fold GDN when recording, then commit
+// target KV and mean-K. False never reports a partially committed batch as usable.
+LLAMA_API bool llama_kvmem_commit_speculative(struct llama_context * ctx, uint32_t n_keep);
 LLAMA_API void llama_kvmem_decode_mean_commit(uint32_t n_keep);
 LLAMA_API void llama_kvmem_decode_mean_discard(void);
 // Write any partial-block running mean to the host store (end of turn / evict).
@@ -179,6 +183,8 @@ LLAMA_API void llama_kvmem_dump_kv_writeback(struct llama_context * ctx, int32_t
 
 #include <vector>
 #include <string>
+#include <memory>
+namespace kvmem { class ContentPrefix; }
 
 namespace kvmem { class SnapshotWriter; class SnapshotReader; struct SnapshotBuffer; }
 // Portable host bundle. The active bundle is borrowed by a lane; swapping
@@ -222,6 +228,13 @@ struct llama_kvmem_turn_spans {
 struct llama_kvmem_query_state {
     std::vector<std::vector<float>> sum;
     std::vector<uint32_t> count;
+    std::shared_ptr<const kvmem::ContentPrefix> prefix;
+    std::vector<llama_kvmem_row_range> ranges;
+};
+struct llama_kvmem_tail_mean_state {
+    std::shared_ptr<const kvmem::ContentPrefix> prefix;
+    std::vector<float> values;
+    uint32_t row = 0;
 };
 struct llama_kvmem_attention_view {
     uint64_t epoch = 0;
@@ -245,6 +258,9 @@ LLAMA_API bool llama_kvmem_commit_resident(bool canonical = true);
 LLAMA_API bool llama_kvmem_get_query(llama_kvmem_query_state & state);
 LLAMA_API bool llama_kvmem_set_query(const llama_kvmem_query_state & state);
 LLAMA_API void llama_kvmem_freeze_query(bool frozen);
-LLAMA_API void llama_kvmem_get_tail_mean(uint32_t row, std::vector<float> & state);
-LLAMA_API void llama_kvmem_set_tail_mean(uint32_t row, const std::vector<float> & state);
+LLAMA_API bool llama_kvmem_get_tail_mean(uint32_t row, llama_kvmem_tail_mean_state & state);
+// Validate before restoring recurrent/draft bytes. Input/media prefix matching
+// and checkpoint selection remain the driver's responsibility.
+LLAMA_API bool llama_kvmem_tail_mean_valid(uint32_t row, const llama_kvmem_tail_mean_state & state);
+LLAMA_API bool llama_kvmem_set_tail_mean(uint32_t row, const llama_kvmem_tail_mean_state & state);
 #endif

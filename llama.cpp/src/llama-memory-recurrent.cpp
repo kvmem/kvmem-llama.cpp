@@ -25,14 +25,19 @@ llama_memory_recurrent::llama_memory_recurrent(
                  uint32_t   mem_size,
                  uint32_t   n_seq_max,
                  uint32_t   n_rs_seq,
-    const layer_filter_cb & filter) : hparams(model.hparams), n_seq_max(n_seq_max) {
+    const layer_filter_cb & filter,
+                     bool   replay) : hparams(model.hparams), n_seq_max(n_seq_max) {
     const int32_t n_layer = hparams.n_layer();
 
     head = 0;
     size = mem_size;
     used = 0;
 
-    this->n_rs_seq = n_rs_seq;
+    this->n_rs_seq = replay ? 0 : n_rs_seq;
+    replay_capacity = replay ? n_rs_seq + 1 : 0;
+    GGML_ASSERT(!replay || (mem_size == 1 && n_seq_max == 1 && n_rs_seq > 0 && n_rs_seq <= 5 &&
+                type_r == GGML_TYPE_F32 && type_s == GGML_TYPE_F32 && hparams.ssm_d_inner == 6144 &&
+                hparams.ssm_d_state == 128 && hparams.ssm_n_group == 16 && hparams.ssm_dt_rank == 48 && hparams.ssm_d_conv == 4));
     rs_idx.assign(n_seq_max, 0);
 
     cells.clear();
@@ -52,7 +57,7 @@ llama_memory_recurrent::llama_memory_recurrent(
         if (it == ctx_map.end()) {
             ggml_init_params params = {
                 // r and s per layer, plus the separate PLE conv row where the model has one
-                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u)*n_layer*ggml_tensor_overhead()),
+                /*.mem_size   =*/ size_t((hparams.ple_conv_state() > 0 ? 3u : 2u) + (replay ? REPLAY_COUNT : 0))*n_layer*ggml_tensor_overhead(),
                 /*.mem_buffer =*/ NULL,
                 /*.no_alloc   =*/ true,
             };
@@ -73,6 +78,7 @@ llama_memory_recurrent::llama_memory_recurrent(
     r_l.resize(n_layer);
     s_l.resize(n_layer);
     p_l.resize(n_layer);
+    replay_l.resize(n_layer, {});
 
     for (int i = 0; i < n_layer; i++) {
         if (filter && !filter(i)) {
@@ -98,13 +104,22 @@ llama_memory_recurrent::llama_memory_recurrent(
             throw std::runtime_error("failed to create ggml context for rs cache");
         }
 
-        const uint32_t n_rows = mem_size * (1 + n_rs_seq);
+        const uint32_t n_rows = mem_size * (1 + this->n_rs_seq);
         ggml_tensor * r = ggml_new_tensor_2d(ctx, type_r, hparams.n_embd_r(), n_rows);
         ggml_tensor * s = ggml_new_tensor_2d(ctx, type_s, hparams.n_embd_s(), n_rows);
         ggml_format_name(r, "cache_r_l%d", i);
         ggml_format_name(s, "cache_s_l%d", i);
         r_l[i] = r;
         s_l[i] = s;
+
+        if (replay) {
+            const int64_t widths[REPLAY_COUNT] = {2048, 6144, 48, 48, 10240};
+            for (int j = 0; j < REPLAY_COUNT; ++j) {
+                auto * record = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, widths[j], replay_capacity);
+                ggml_format_name(record, "gdn_record_%d_l%d", j, i);
+                replay_l[i][j] = record;
+            }
+        }
 
         // the PLE history needs its own row: Meta must mirror it while the delta-net conv state next door stays split
         if (hparams.ple_conv_state() > 0 && hparams.is_ple(i)) {
@@ -131,7 +146,7 @@ llama_memory_recurrent::llama_memory_recurrent(
         const size_t memory_size_p = size_p_bytes();
 
         LLAMA_LOG_INFO("%s: size = %7.2f MiB (%6u cells, %3d layers, %2u seqs %2u rs_seq), R (%s): %7.2f MiB, S (%s): %7.2f MiB, P (%s): %7.2f MiB\n", __func__,
-                (float)(memory_size_r + memory_size_s + memory_size_p) / (1024.0f * 1024.0f), mem_size, n_layer, n_seq_max, n_rs_seq,
+                (float)(memory_size_r + memory_size_s + memory_size_p) / (1024.0f * 1024.0f), mem_size, n_layer, n_seq_max, this->n_rs_seq,
                 ggml_type_name(type_r), (float)memory_size_r / (1024.0f * 1024.0f),
                 ggml_type_name(type_s), (float)memory_size_s / (1024.0f * 1024.0f),
                 ggml_type_name(type_r), (float)memory_size_p / (1024.0f * 1024.0f));
@@ -139,6 +154,9 @@ llama_memory_recurrent::llama_memory_recurrent(
 }
 
 void llama_memory_recurrent::clear(bool data) {
+    replay_recording = false;
+    replay_poisoned = false;
+    replay_cells.clear();
     for (int32_t i = 0; i < (int32_t) size; ++i) {
         cells[i].pos = -1;
         cells[i].seq_id.clear();
@@ -479,6 +497,12 @@ llama_memory_context_ptr llama_memory_recurrent::init_update(llama_context * lct
 }
 
 bool llama_memory_recurrent::prepare(const std::vector<llama_ubatch> & ubatches) {
+    if (replay_capacity && (replay_poisoned || (replay_recording &&
+            (ubatches.size() != 1 || ubatches[0].n_tokens != replay_width ||
+             !ubatches[0].pos || ubatches[0].pos[0] != replay_start)))) {
+        LLAMA_LOG_ERROR("%s: invalid GDN replay state or verification batch\n", __func__);
+        return false;
+    }
     // simply remember the full state because it is very small for this type of cache
     // TODO: optimize
     auto org_cells = cells;
@@ -765,6 +789,9 @@ size_t llama_memory_recurrent::size_p_bytes() const {
 
 void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
     GGML_UNUSED(flags);
+    if (replay_recording || replay_poisoned) {
+        throw std::runtime_error("cannot save an unsettled GDN replay state");
+    }
 
     std::vector<std::pair<uint32_t, uint32_t>> cell_ranges; // ranges, from inclusive, to exclusive
     std::vector<std::pair<uint32_t, uint32_t>> cell_ranges_data; // logical source row ranges
@@ -846,6 +873,9 @@ void llama_memory_recurrent::state_write(llama_io_write_i & io, llama_seq_id seq
 
 void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
     GGML_UNUSED(flags);
+    replay_recording = false;
+    replay_cells.clear();
+    replay_poisoned = true;
 
     uint32_t cell_count;
     io.read(&cell_count, sizeof(cell_count));
@@ -873,6 +903,7 @@ void llama_memory_recurrent::state_read(llama_io_read_i & io, llama_seq_id seq_i
     if (n_rs_seq != 0) {
         set_rs_idx(seq_id, 0);
     }
+    replay_poisoned = false;
 }
 
 void llama_memory_recurrent::state_write_meta(llama_io_write_i & io, const std::vector<std::pair<uint32_t, uint32_t>> & cell_ranges, llama_seq_id seq_id) const {
@@ -1289,6 +1320,48 @@ int32_t llama_memory_recurrent_context::get_rs_z() const {
 
 uint32_t llama_memory_recurrent_context::get_size() const {
     return mem->size;
+}
+
+bool llama_memory_recurrent_context::has_replay() const {
+    return mem->replay_capacity != 0;
+}
+
+bool llama_memory_recurrent_context::is_recording() const {
+    return !is_full && mem->replay_recording;
+}
+
+ggml_tensor * llama_memory_recurrent_context::get_replay(int32_t il, llama_memory_recurrent::replay_kind kind) const {
+    return mem->replay_l.at(il).at(kind);
+}
+
+bool llama_memory_recurrent::replay_begin(llama_pos start, uint32_t width) {
+    if (!replay_capacity || replay_recording || replay_poisoned || !width || width > replay_capacity ||
+            start < 0 || seq_pos_max(0) != start - 1) return false;
+    replay_cells = cells;
+    replay_head = head;
+    replay_used = used;
+    replay_n = n;
+    replay_rs_z = rs_z;
+    replay_start = start;
+    replay_width = width;
+    replay_recording = true;
+    return true;
+}
+
+void llama_memory_recurrent::replay_finish(uint32_t n_keep) {
+    GGML_ASSERT(replay_recording && n_keep <= replay_width);
+    if (n_keep == 0) {
+        cells = replay_cells;
+        head = replay_head;
+        used = replay_used;
+        n = replay_n;
+        rs_z = replay_rs_z;
+    } else {
+        GGML_ASSERT(cells.size() == 1 && cells[0].has_seq_id(0));
+        cells[0].pos = replay_start + n_keep - 1;
+    }
+    replay_recording = false;
+    replay_cells.clear();
 }
 
 ggml_tensor * llama_memory_recurrent_context::get_r_l(int32_t il) const {

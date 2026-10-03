@@ -350,6 +350,10 @@ extern "C" {
     // The correct way to use this API is to discard the deallocated tensors and create new ones.
     GGML_API void                 ggml_backend_sched_reset(ggml_backend_sched_t sched);
 
+    // Put node->src back to the tensors the graph was built with. Call this before
+    // destroying a graph that was previously passed to ggml_backend_sched_alloc_graph.
+    GGML_API void                 ggml_backend_sched_restore_graph_srcs(ggml_backend_sched_t sched);
+
     // Set a callback to be called for each resulting node during graph compute
     GGML_API void                 ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
 
@@ -403,6 +407,8 @@ extern "C" {
     //       express this as a backend registry functionality instead
     GGML_API ggml_backend_dev_t ggml_backend_meta_device(
         ggml_backend_dev_t * devs, size_t n_devs, ggml_backend_meta_get_split_state_t get_split_state, void * get_split_state_ud);
+    GGML_API size_t ggml_backend_meta_device_count(ggml_backend_dev_t meta_dev);
+    GGML_API ggml_backend_dev_t ggml_backend_meta_device_get(ggml_backend_dev_t meta_dev, size_t index);
 
     //
     // Utils

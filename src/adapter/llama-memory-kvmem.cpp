@@ -22,6 +22,7 @@
 
 #include "llama.h"
 #include "kvmem/snapshot.hpp"
+#include "kvmem/native_kv_payload.hpp"
 #include "kvmem/snapshot_buffer.hpp"
 
 #include "ggml-backend.h"
@@ -75,6 +76,7 @@ struct llama_memory_kvmem::ConvStore {
     bool cold = false;
     std::unique_ptr<kvmem::KvMemRuntime> runtime;
     std::unique_ptr<kvmem::RawKvStore>   raw;
+    std::unique_ptr<kvmem::KvContent> content;
     std::vector<RowPosition>             row_positions;
     std::vector<std::vector<float>>      q_sum;
     std::vector<uint32_t>                q_count;
@@ -397,9 +399,10 @@ static bool kvmem_d2d(uint8_t * dst, const uint8_t * src, size_t n, cudaStream_t
 
 static void kvmem_stagein_flush_sync(int64_t * copy_us, int64_t * rope_us,
                                      int64_t * hadamard_us, int64_t * set_us) {
-    kvmem_stagein_flush(copy_us, rope_us, hadamard_us, set_us);
+    const bool copied = kvmem_stagein_flush(copy_us, rope_us, hadamard_us, set_us);
     const int64_t t0 = ggml_time_us();
-    kvmem_stagein_sync();
+    const bool finished = kvmem_stagein_sync_checked();
+    if (!copied || !finished) throw std::runtime_error("KVMem native stage-in copy failed");
     if (set_us) {
         *set_us += ggml_time_us() - t0;
     }
@@ -967,6 +970,7 @@ llama_memory_kvmem::llama_memory_kvmem(
         rcfg.nvme_file = "kvmem_raw_k.bin";
     }
     raw_ = std::make_unique<kvmem::RawKvStore>(rcfg);
+    content_ = std::make_unique<kvmem::KvContent>(block_tokens_);
     q_sum_.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
     q_count_.assign(n_layer_, 0);
     kvmem_capture_bind(this);
@@ -1033,6 +1037,9 @@ void llama_memory_kvmem::reset_turn_policy() {
 }
 
 void llama_memory_kvmem::reset_policy() {
+    if (content_) content_->reset();
+    evaluation_queue_.clear();
+    evaluation_cursor_ = 0;
     ++attention_epoch_;
     reset_turn_policy();
     row_positions_.clear();
@@ -1062,12 +1069,14 @@ void llama_memory_kvmem::begin_cached_turn(bool reset_query) {
 }
 
 void llama_memory_kvmem::truncate_cached(uint32_t n_past) {
-    // Keyed off the block table alone, so it cannot reach a host mirror the
-    // full-seq_rm branch left behind: see host_mirror_stale_ there.
+    // Both logical and packed stores are shortened at the same engine boundary.
     if (runtime_ && n_past >= runtime_->store().total_tokens()) return;
     ++attention_epoch_;
     harvest_flush();
     harvest_gpu_v_commit();
+    content_->truncate(n_past);
+    evaluation_queue_.clear();
+    evaluation_cursor_ = 0;
     if (row_positions_.size() > n_past) row_positions_.resize(n_past);
     if (mtp_) mtp_->truncate_cached(n_past);
     if (raw_) {
@@ -1084,6 +1093,7 @@ void llama_memory_kvmem::set_replay(bool replay) {
         harvest_gpu_v_commit();
         ++attention_epoch_;
         const uint32_t begin = std::max(0, explicit_spans_ ? turn_spans_.replay_begin : query_begin_);
+        content_->change_execution();
         if (raw_) raw_->invalidate_packed_from(begin);
         if (mtp_) mtp_->invalidate_packed_from(begin);
     }
@@ -1130,7 +1140,7 @@ bool llama_memory_kvmem::conv_can_drain(std::string & reason) const {
         reason = "plan_pending";
         return false;
     }
-    // The host mirror no longer describes the block table (see seq_rm), so its
+    // A failed repair may leave the host mirror inconsistent with the block table; its
     // packed K/V cannot be trusted to restage this conversation.
     if (host_mirror_stale_) {
         reason = "host_mirror_stale";
@@ -1157,6 +1167,7 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::make_conv() {
     conv->has_mtp = mtp_ != nullptr;
     conv->runtime = std::make_unique<kvmem::KvMemRuntime>(rt_cfg_);
     conv->raw = std::make_unique<kvmem::RawKvStore>(raw_cfg_);
+    conv->content = std::make_unique<kvmem::KvContent>(block_tokens_);
     conv->q_sum.assign(n_layer_, std::vector<float>(n_head_ * n_embd_head_, 0.0f));
     conv->q_count.assign(n_layer_, 0);
     if (mtp_) {
@@ -1174,6 +1185,7 @@ uint64_t llama_memory_kvmem::conv_host_bytes(const ConvStore & conv) const {
         return 0;
     }
     uint64_t bytes = conv.raw->allocated_bytes() + (conv.mtp_raw ? conv.mtp_raw->allocated_bytes() : 0);
+    bytes += conv.content ? conv.content->allocated_bytes() : 0;
     bytes += conv.runtime->allocated_bytes() + conv.row_positions.capacity()*sizeof(RowPosition);
     bytes += conv.q_count.capacity()*sizeof(uint32_t) + conv.resident.capacity()*sizeof(uint32_t);
     bytes += conv.q_sum.capacity()*sizeof(std::vector<float>);
@@ -1186,6 +1198,8 @@ uint64_t llama_memory_kvmem::host_bytes() const {
         return 0;
     }
     uint64_t bytes = raw_->allocated_bytes() + (mtp_ ? mtp_->host_bytes() : 0);
+    bytes += content_ ? content_->allocated_bytes() : 0;
+    bytes += evaluation_queue_.capacity()*sizeof(evaluation_queue_[0]);
     bytes += runtime_->allocated_bytes() + row_positions_.capacity()*sizeof(RowPosition);
     bytes += q_count_.capacity()*sizeof(uint32_t);
     bytes += q_sum_.capacity()*sizeof(std::vector<float>);
@@ -1211,7 +1225,7 @@ uint64_t llama_memory_kvmem::host_capacity(uint32_t tokens) const {
     return 8*checkpoint + 8*1024*1024 + uint64_t(tokens)*64 +
         raw_->capacity_bytes(tokens, uint32_t(kv_->get_layer_ids().size())) + (mtp_ ? mtp_->capacity_bytes(tokens) : 0) +
         uint64_t(tokens)*sizeof(RowPosition)*2 +
-        ((uint64_t(tokens)/block_tokens_) + 2)*sizeof(kvmem::KvMemBlock)*2;
+        ((uint64_t(tokens)/block_tokens_) + 2)*(sizeof(kvmem::KvMemBlock) + sizeof(uint64_t))*2;
 }
 
 std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv() {
@@ -1293,7 +1307,7 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
         // tier is the residency truth, not gpu_slot: the slot is one field of a
         // pair KvMemStore::set_block_tier writes together
         // (kvmem/src/host/kvmem_store.cpp:249-276), so this filters on the half
-        // that names the tier. This is the same set set_selection stages out.
+        // that names the tier. The native drain stages out these actual slots.
         for (uint32_t id = 0; id < store.block_count(); ++id) {
             const kvmem::KvMemBlock & b = store.blocks()[id];
             if (b.tier == kvmem::KvTier::GPU && b.gpu_slot >= 0 && b.n_tokens > 0) {
@@ -1304,9 +1318,13 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
         // apply_plan_to_kv is the drain half of the sequence relayout already
         // uses: harvest_gpu_v + mtp_->on_stage_out per block, commit,
         // spill_outgoing, seq_rm_logical per block, admit_incoming.
-        const kvmem::KvMemPlan plan = runtime_->prepare_selection({});
-        trace_plan("conv_detach", plan);
-        apply_plan_to_kv(plan);
+        if (native_contract_supported()) {
+            run_native_transaction({}, NativePurpose::Detach);
+        } else {
+            const auto plan = runtime_->prepare_native_selection({});
+            trace_plan("conv_detach", plan);
+            apply_plan_to_kv(plan);
+        }
         // Belt and braces: a detached store carrying a stale gpu_slot would
         // make gpu_kv_already_resident() and attention_view() read cells that
         // belong to another conversation. KvMemStore::set_block_tier already
@@ -1314,8 +1332,8 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
         // unless a block never reached a lower tier. Demote rather than only
         // clearing the slot: tier GPU with gpu_slot -1 is read three
         // incompatible ways downstream (stage_in wants a fresh slot,
-        // resident_tokens counts it as absent, set_selection will not stage it
-        // out again), so clearing alone would trade one inconsistent state for
+        // resident_tokens and native planning count it as absent), so clearing
+        // alone would trade one inconsistent state for
         // another on a block conv->resident will ask to be restaged.
         for (uint32_t id = 0; id < store.block_count(); ++id) {
             const kvmem::KvMemBlock & b = store.blocks()[id];
@@ -1370,6 +1388,7 @@ std::unique_ptr<llama_memory_kvmem::ConvStore> llama_memory_kvmem::detach_conv()
     conv->has_mtp = mtp_ != nullptr;
     conv->runtime = std::move(runtime_);
     conv->raw = std::move(raw_);
+    conv->content = std::move(content_);
     // One statement after the trunk's own mirror, the way truncate_cached()
     // drives mtp_->truncate_cached(): the follower's packed draft K/V is keyed
     // by the trunk's block ids and means nothing beside another store.
@@ -1402,6 +1421,9 @@ bool llama_memory_kvmem::attach_conv(std::unique_ptr<ConvStore> conv) {
     // existed has none and gets a fresh one to rebuild at the next stage-out.
     runtime_ = std::move(conv->runtime);
     raw_ = std::move(conv->raw);
+    content_ = std::move(conv->content);
+    evaluation_queue_.clear();
+    evaluation_cursor_ = 0;
     row_positions_ = std::move(conv->row_positions);
     q_sum_ = std::move(conv->q_sum);
     q_count_ = std::move(conv->q_count);
@@ -1505,40 +1527,13 @@ bool llama_memory_kvmem::attach_conv(std::unique_ptr<ConvStore> conv) {
     // filled n_slots_-1..0, which is the layout attention_view() calls
     // canonical. Positions need no fixup: the pool keeps original positions and
     // the packed K in raw_ was harvested already RoPE'd at that position.
-    const kvmem::KvMemPlan plan = runtime_->prepare_selection(conv->resident);
-    trace_plan("conv_attach", plan);
-    apply_plan_to_kv(plan);
-    auto & store = runtime_->store();
-    uint32_t n_raw = 0;
-    uint32_t n_skip = 0;
-    for (uint32_t id : plan.stage_in) {
-        if (id >= store.block_count() || store.blocks()[id].gpu_slot < 0) {
-            continue;
-        }
-        if (gpu_kv_already_resident(id)) {
-            n_skip++;
-            continue;
-        }
-        write_block_to_gpu(id);
-        n_raw++;
-    }
-    kvmem_stagein_flush_sync(retr_.enabled ? &retr_.copy_us : nullptr,
-                             retr_.enabled ? &retr_.rope_us : nullptr,
-                             retr_.enabled ? &retr_.hadamard_us : nullptr,
-                             retr_.enabled ? &retr_.set_us : nullptr);
-    if (mtp_) {
-        // A follower coverage miss leaves its cells empty rather than
-        // labelling them with this block's positions, because the bytes in
-        // them are the previous conversation's draft K. That holds for the
-        // rest of the request and not only for this call: the strictness is a
-        // per-slot mark swap_raw() set above, which follow_retrieval() reads
-        // on the retrieval path too, and which only a full packed write
-        // clears.
-        mtp_->follow_retrieval();
-    }
-    if (trace_) {
-        kvmem_diag("KVMEM_STORE_ATTACH rows=%u blocks=%zu raw=%u skip=%u free_slots=%zu\n",
-                store.total_tokens(), plan.stage_in.size(), n_raw, n_skip, free_slots_.size());
+    if (native_contract_supported()) {
+        run_native_transaction(conv->resident, NativePurpose::Attach);
+    } else {
+        const auto plan = runtime_->prepare_native_selection(conv->resident);
+        trace_plan("conv_attach", plan);
+        apply_plan_to_kv(plan);
+        restore_attached(plan);
     }
     return true;
 }
@@ -1788,27 +1783,20 @@ uint32_t llama_memory_kvmem::resident_tokens() const {
     return n;
 }
 
-void llama_memory_kvmem::trace_plan(const char * tag, const kvmem::KvMemPlan & plan) const {
+void llama_memory_kvmem::trace_plan(const char * tag, const kvmem::NativeResidencyPlan & plan) const {
     if (!trace_) {
         return;
     }
-    uint32_t skip = 0;
-    for (const auto & r : plan.remaps) {
-        if (r.skip) {
-            skip++;
-        }
-    }
-    kvmem_diag("KVMEM_TRACE %s stage_in=%zu stage_out=%zu skip=%u gpu_reused=%u window=%u free_slots=%zu\n",
+    kvmem_diag("KVMEM_TRACE %s stage_in=%zu stage_out=%zu gpu_reused=%u window=%u free_slots=%zu\n",
             tag,
             plan.stage_in.size(),
             plan.stage_out.size(),
-            skip,
             plan.gpu_reused_blocks,
             plan.total_window_tokens,
             free_slots_.size());
 }
 
-void llama_memory_kvmem::apply_plan_to_kv(const kvmem::KvMemPlan & plan) {
+void llama_memory_kvmem::apply_plan_to_kv(const kvmem::NativeResidencyPlan & plan) {
     if (!plan.stage_in.empty() || !plan.stage_out.empty()) ++attention_epoch_;
     auto & store = runtime_->store();
     for (uint32_t id : plan.stage_out) {
@@ -2018,9 +2006,9 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
     // tensors on its own GPU. Use the backend's per-tensor host path for a
     // layer split until device-local layout scratch is introduced.
     bool d2d_ok = n_res > 0 && !multi_gpu_;
-    uint8_t * scratch = nullptr;
+    uint8_t * scratch = native_layout_scratch_;
     if (d2d_ok) {
-        const cudaError_t alloc_error = cudaMalloc(reinterpret_cast<void **>(&scratch),
+        const cudaError_t alloc_error = scratch ? cudaSuccess : cudaMalloc(reinterpret_cast<void **>(&scratch),
                                                    static_cast<size_t>(n_res) * scratch_stride);
         if (alloc_error != cudaSuccess) {
             if (alloc_error == cudaErrorMemoryAllocation) {
@@ -2126,10 +2114,11 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
                 retr_.layout_h2d_us += ggml_time_us() - t_s;
             }
         }
-        cudaFree(scratch);
+        if (!native_layout_scratch_) cudaFree(scratch);
         scratch = nullptr;
         d2d_ok = copy_ok;
         if (!copy_ok) {
+            if (native_transfer_pending_) throw std::runtime_error("KVMem native layout copy failed");
             LLAMA_LOG_ERROR("%s: layout D2D failed; reloading residents from raw-K\n", __func__);
         }
         if (d2d_ok && mtp_) {
@@ -2140,7 +2129,7 @@ bool llama_memory_kvmem::layout_gpu_slots_by_orig_pos() {
                 }
                 mm.push_back({items[i].slot, static_cast<int32_t>(i), items[i].n});
             }
-            mtp_d2d_ok = mm.empty() || mtp_->layout_d2d(mm.data(), mm.size());
+            mtp_d2d_ok = mm.empty() || mtp_->layout_d2d(mm.data(), mm.size(), native_mtp_scratch_);
             if (!mtp_d2d_ok) {
                 LLAMA_LOG_WARN("%s: MTP layout D2D failed; restoring those blocks from raw\n",
                                __func__);
@@ -2301,6 +2290,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
         runtime_->register_append(n_new_tokens);
     }
     const uint32_t t1 = store.total_tokens();
+    content_->reserve(t1);
 
     std::vector<uint32_t> incoming;
     for (const auto & b : store.blocks()) {
@@ -2317,11 +2307,15 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
     // working set and place decode tokens into gen_reserve slots.
     if (!retrieval_pinned_ && !keep_selected_) {
         try {
-            need_offload = runtime_->maybe_offload_during_prefill(
-                    n_new_tokens, resident_tokens(), kv_size_, incoming);
+            if (native_contract_supported()) {
+                need_offload = store.prefill_needs_offload(resident_tokens(), n_new_tokens, kv_size_);
+            } else {
+                need_offload = runtime_->maybe_offload_native_during_prefill(
+                        n_new_tokens, resident_tokens(), kv_size_, incoming);
+            }
         } catch (const std::exception & e) {
             LLAMA_LOG_ERROR("%s: KVMem reselect failed: %s\n", __func__, e.what());
-            runtime_->truncate_to(t0);
+            if (content_->stamp().valid) { runtime_->truncate_to(t0); content_->truncate(t0); }
             return false;
         }
     }
@@ -2336,16 +2330,21 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
 
     if (need_offload) {
         try {
-            const kvmem::KvMemPlan & plan = runtime_->last_plan();
-            trace_plan("prefill_pressure", plan);
-            apply_plan_to_kv(plan);
+            if (native_contract_supported()) {
+                run_native_transaction(store.pick_prefill_pressure_blocks(incoming), NativePurpose::Pressure);
+            } else {
+                const auto & prepared = runtime_->last_native_plan();
+                trace_plan("prefill_pressure", prepared);
+                apply_plan_to_kv(prepared);
+            }
+            const auto & plan = runtime_->last_native_plan();
             if (perf_.enabled) {
                 perf_.n_pressure += 1;
                 perf_.n_pressure_out += static_cast<uint32_t>(plan.stage_out.size());
             }
         } catch (const std::exception & e) {
             LLAMA_LOG_ERROR("%s: KVMem reselect failed: %s\n", __func__, e.what());
-            runtime_->truncate_to(t0);
+            if (content_->stamp().valid) { runtime_->truncate_to(t0); content_->truncate(t0); }
             return false;
         }
     } else {
@@ -2358,7 +2357,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
                 // Pinned retrieval will not evict the working set. gen_reserve
                 // exhaustion is a known v1 limit (see docs/architecture.md).
                 LLAMA_LOG_ERROR("%s: no free GPU slot for block %u\n", __func__, id);
-                runtime_->truncate_to(t0);
+                if (content_->stamp().valid) { runtime_->truncate_to(t0); content_->truncate(t0); }
                 return false;
             }
             store.set_block_gpu_slot(id, slot);
@@ -2369,7 +2368,7 @@ bool llama_memory_kvmem::prepare_working_set(uint32_t n_new_tokens) {
     for (uint32_t id : incoming) {
         if (id < store.block_count() && store.blocks()[id].gpu_slot < 0) {
             LLAMA_LOG_ERROR("%s: incoming block %u was not placed on GPU\n", __func__, id);
-            runtime_->truncate_to(t0);
+            if (content_->stamp().valid) { runtime_->truncate_to(t0); content_->truncate(t0); }
             return false;
         }
     }
@@ -2381,11 +2380,23 @@ bool llama_memory_kvmem::prepare_ubatches(
         uint32_t n_new_tokens,
         llama_kv_cache::slot_info_vec_t & sinfos) {
     const uint32_t old_rows = store_n_tokens();
+    uint32_t rewrite_begin = old_rows;
     for (const auto & ub : ubatches) {
         for (uint32_t i = 0; i < ub.n_tokens; ++i) {
             const llama_pos row = ub.logical_pos ? ub.logical_pos[i] : ub.pos[i];
-            if (row >= 0 && (uint32_t) row < old_rows) { ++attention_epoch_; break; }
+            if (row >= 0 && (uint32_t) row < old_rows) {
+                rewrite_begin = std::min(rewrite_begin, (uint32_t) row);
+            }
         }
+    }
+    if (!content_->stamp().valid || native_transfer_pending_) return false;
+    if (rewrite_begin < old_rows) {
+        harvest_flush();
+        harvest_gpu_v_commit();
+        raw_->invalidate_packed_from(rewrite_begin);
+        if (mtp_) mtp_->invalidate_packed_from(rewrite_begin);
+        content_->change_execution();
+        ++attention_epoch_;
     }
     if (!prepare_working_set(n_new_tokens)) {
         return false;
@@ -2410,12 +2421,19 @@ bool llama_memory_kvmem::prepare_ubatches(
         }
         sinfos.push_back(std::move(sinfo));
     }
+    content_->reserve(store_n_tokens());
+    evaluation_queue_.clear();
+    evaluation_cursor_ = 0;
     pos_queue_.clear();
     for (const auto & ubatch : ubatches) {
         std::vector<llama_pos> p(ubatch.n_tokens);
         for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
             p[i] = ubatch.logical_pos ? ubatch.logical_pos[i] : ubatch.pos[i];
         }
+        for (size_t i = 1; i < p.size(); ++i) {
+            if (p[i] != p[0] + (llama_pos) i) return false;
+        }
+        if (!p.empty()) evaluation_queue_.push_back({(uint32_t) p.front(), (uint32_t) p.back() + 1});
         pos_queue_.push_back(std::move(p));
     }
     return true;
@@ -2483,17 +2501,18 @@ bool llama_memory_kvmem::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1)
     if (!replay_ &&
         seq_id <= 0 && p0 <= 0 &&
         (p1 < 0 || p1 >= static_cast<llama_pos>(runtime_->store().total_tokens()))) {
-        // Known divergence, deliberately not repaired here so the default
-        // path stays byte-identical: the block table is zeroed while the host
-        // mirror keeps its blocks, and truncate_cached's guard
-        // (n_past >= total_tokens) can no longer reach them. The re-prefilled
-        // block 0 then keeps the previous content's packed K, because both
-        // harvest_gpu_v and harvest_full_blocks_async skip a layer whose
-        // packed K is already present. Record it so a store swap declines to
-        // carry this store rather than restaging those bytes into another
-        // conversation's cells; reset_policy() clears both and the flag.
-        host_mirror_stale_ = true;
+        // A new logical history must not inherit packed rows from the previous
+        // incarnation. Drain writers before discarding either half of the store.
+        harvest_flush();
+        harvest_gpu_v_commit();
+        raw_->clear();
+        if (mtp_) mtp_->truncate_cached(0);
         runtime_->truncate_to(0);
+        content_->reset();
+        row_positions_.clear();
+        evaluation_queue_.clear();
+        evaluation_cursor_ = 0;
+        host_mirror_stale_ = false;
         reset_slots();
         retrieval_pinned_ = false;
     }
@@ -2538,6 +2557,7 @@ void llama_memory_kvmem::state_write(llama_io_write_i & io, llama_seq_id seq_id,
 
 void llama_memory_kvmem::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
     ++attention_epoch_;
+    content_->change_execution();
     kv_->state_read(io, seq_id, flags);
 }
 
@@ -3192,6 +3212,17 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
 }
 
 void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
+    harvest_pending_impl(sched);
+    if (evaluation_cursor_ < evaluation_queue_.size()) {
+        const auto span = evaluation_queue_[evaluation_cursor_++];
+        const bool speculative = speculative_evaluation_;
+        content_->complete(span.first, span.second, !speculative);
+        if (speculative) speculative_span_ = span;
+    }
+    harvest_full_blocks_async();
+}
+
+void llama_memory_kvmem::harvest_pending_impl(ggml_backend_sched_t sched) {
     if (want_decode_mean()) {
         decode_mean_ingest(sched);
         return;
@@ -3215,7 +3246,6 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
         if (sched) {
             ggml_backend_sched_synchronize(sched);
         }
-        harvest_full_blocks_async();
         return;
     }
     if (multi_gpu_) {
@@ -3240,7 +3270,6 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
             }
         }
         const int64_t t_block = ggml_time_us();
-        harvest_full_blocks_async();
         const int64_t block_us = ggml_time_us() - t_block;
         if (perf_.enabled) {
             fprintf(stderr, "KVMEM_MULTI_HARVEST mode=%s n=%zu sync_ms=%.3f read_ms=%.3f host_ms=%.3f block_ms=%.3f\n",
@@ -3273,7 +3302,6 @@ void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {
             ggml_backend_sched_synchronize(sched);
         }
     }
-    harvest_full_blocks_async();
     const int64_t entry_us = ggml_time_us() - t_entry;
     perf_.harvest_entry_us += entry_us;
     perf_.n_ubatch += 1;
@@ -3602,7 +3630,9 @@ void llama_memory_kvmem::harvest_gpu_v(uint32_t block_id) {
     }
     const size_t krow = ggml_row_size(type_k_, n_embd_k_);
     const size_t vrow = ggml_row_size(type_v_, n_embd_v_);
-    const uint32_t nt = blk.n_tokens;
+    const uint32_t nt = (uint32_t) std::min<uint64_t>(blk.n_tokens,
+            content_->stamp().frontier > blk.orig_pos_start ? content_->stamp().frontier - blk.orig_pos_start : 0);
+    if (!nt) return;
     const uint32_t cell0 = static_cast<uint32_t>(blk.gpu_slot) * block_tokens_;
     if (!multi_gpu_) {
         kvmem_stagein_gpu_ready((size_t) block_tokens_ * std::max(n_embd_k_, n_embd_v_),
@@ -3696,7 +3726,7 @@ void llama_memory_kvmem::harvest_full_blocks_async() {
     auto & store = runtime_->store();
     uint32_t n_enq = 0;
     for (const auto & b : store.blocks()) {
-        if (b.gpu_slot < 0 || b.n_tokens != block_tokens_) {
+        if (b.gpu_slot < 0 || b.n_tokens != block_tokens_ || b.orig_pos_end() > content_->stamp().frontier) {
             continue;
         }
         if (b.block_id < harvest_gpu_queued_.size() && harvest_gpu_queued_[b.block_id]) {
@@ -3737,6 +3767,9 @@ void llama_memory_kvmem::decode_mean_reset() {
 }
 
 void llama_memory_kvmem::decode_mean_discard() {
+    speculative_span_.reset();
+    speculative_evaluation_ = false;
+    speculative_stamp_.reset();
     decode_mean_pending_k_.clear();
     decode_mean_pending_pos_.clear();
 }
@@ -3811,6 +3844,7 @@ bool llama_memory_kvmem::decode_mean_add_host_layer(ggml_tensor * t, int il,
 
 void llama_memory_kvmem::decode_mean_ingest(ggml_backend_sched_t sched) {
     if (pending_capture_.empty() || pos_queue_.empty()) {
+        if (sched) ggml_backend_sched_synchronize(sched);
         decode_mean_stats_.n_miss++;
         if (trace_ || decode_mean_stats_.n_miss <= 3) {
             kvmem_diag("KVMEM_DECODE_MEAN ingest_skip capture=%zu posq=%zu "
@@ -3847,7 +3881,7 @@ void llama_memory_kvmem::decode_mean_ingest(ggml_backend_sched_t sched) {
                 n0.t ? ggml_type_name(n0.t->type) : "?",
                 n0.t && kvmem_cuda_tensor_ptr(n0.t) ? 1 : 0);
     }
-    if (decode_mean_pending_pos_.size() == 1) {
+    if (decode_mean_pending_pos_.size() == 1 && !speculative_evaluation_) {
         decode_mean_commit(1);
     }
 }
@@ -3906,7 +3940,45 @@ void llama_memory_kvmem::decode_mean_add_range(uint32_t tok0, uint32_t n_add) {
     decode_mean_stats_.n_tok += n_add;
 }
 
+void llama_memory_kvmem::begin_speculative_evaluation() {
+    if (speculative_evaluation_ || !content_->stamp().valid ||
+            content_->reserved() != content_->stamp().frontier ||
+            evaluation_cursor_ != evaluation_queue_.size())
+        throw std::runtime_error("speculative evaluation requires a settled accepted prefix");
+    speculative_stamp_ = content_->stamp();
+    speculative_evaluation_ = true;
+}
+
+bool llama_memory_kvmem::commit_speculative(llama_context * ctx, uint32_t n_keep) {
+    if (ctx) llama_synchronize(ctx);
+    if (!speculative_evaluation_ || !speculative_span_ || !speculative_stamp_ ||
+            n_keep > speculative_span_->second - speculative_span_->first) return false;
+    const auto & now = content_->stamp();
+    if (!now.valid || !(now.session == speculative_stamp_->session) ||
+            now.execution_history != speculative_stamp_->execution_history ||
+            speculative_span_->first != speculative_stamp_->frontier ||
+            evaluation_cursor_ != evaluation_queue_.size()) return false;
+    if (recr_ && recr_->replay_recording && !gdn_replay_commit(ctx, n_keep)) {
+        content_->invalidate();
+        decode_mean_discard();
+        return false;
+    }
+    try {
+        decode_mean_commit(n_keep);
+        return true;
+    } catch (...) {
+        content_->invalidate();
+        decode_mean_discard();
+        throw;
+    }
+}
+
 void llama_memory_kvmem::decode_mean_commit(uint32_t n_keep) {
+    if (speculative_span_) {
+        const auto span = *speculative_span_;
+        content_->accept(span.first + std::min(n_keep, span.second - span.first));
+        speculative_span_.reset();
+    }
     if (n_keep == 0 || decode_mean_pending_pos_.empty()) {
         decode_mean_discard();
         return;
@@ -4004,8 +4076,11 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
     }
     const kvmem::KvMemBlock & blk = store.blocks()[block_id];
     if (blk.gpu_slot < 0 || !raw_->has_block(block_id)) {
+        if (native_transfer_pending_) throw std::runtime_error("KVMem restore has no packed block");
         return;
     }
+    if (native_transfer_pending_ && !packed_complete(block_id, blk.n_tokens))
+        throw std::runtime_error("KVMem restore has incomplete packed K/V");
     ++attention_epoch_;
     occupy_block_cells(block_id);
     const uint32_t nt = blk.n_tokens;
@@ -4047,6 +4122,8 @@ void llama_memory_kvmem::write_block_to_gpu(uint32_t block_id) {
         const int64_t t_copy = ggml_time_us();
         const bool have_k = raw_->copy_k_gpu(block_id, il, kpack.data(), nt);
         const bool have_v = !v_trans_ && raw_->copy_v_gpu(block_id, il, vpack.data(), nt);
+        if (native_transfer_pending_ && (!have_k || !have_v))
+            throw std::runtime_error("KVMem packed K/V read failed");
         if (retr_.enabled) {
             retr_.copy_us += ggml_time_us() - t_copy;
         }
@@ -4263,7 +4340,9 @@ llama_kvmem_attention_view llama_memory_kvmem::attention_view(bool canonical) co
     llama_kvmem_attention_view view;
     view.epoch = attention_epoch_;
     view.rows = store_n_tokens();
-    view.valid = kv_ && runtime_ && store().config().optimize_stage_in;
+    view.valid = kv_ && runtime_ && store().config().optimize_stage_in &&
+            content_ && content_->stamp().valid && !native_transfer_pending_ &&
+            content_->stamp().frontier == store_n_tokens() && evaluation_cursor_ == evaluation_queue_.size();
     uint32_t resident_rows = 0;
     for (const auto & b : store().blocks()) {
         if (b.gpu_slot < 0 || !b.n_tokens) continue;
@@ -4383,6 +4462,8 @@ bool llama_memory_kvmem::commit_resident(bool canonical) {
 
 bool llama_memory_kvmem::get_query(llama_kvmem_query_state & state) {
     harvest_flush();
+    state = {};
+    if (!content_->stamp().valid || speculative_evaluation_) return false;
     bool any = false;
     uint32_t rows = 0;
     for (uint32_t il = 0; il < n_layer_; ++il) {
@@ -4394,10 +4475,25 @@ bool llama_memory_kvmem::get_query(llama_kvmem_query_state & state) {
     if (!any) return false;
     state.sum = q_sum_;
     state.count = q_count_;
+    state.ranges = explicit_spans_ ? turn_spans_.query :
+        std::vector<llama_kvmem_row_range>{{query_begin_, query_end_}};
+    uint64_t end = 0;
+    for (const auto & range : state.ranges) {
+        if (range.begin < 0 || range.end <= range.begin) return false;
+        end = std::max(end, uint64_t(range.end));
+    }
+    if (end > content_->stamp().frontier) return false;
+    state.prefix = content_->prefix(end);
     return true;
 }
 
 bool llama_memory_kvmem::set_query(const llama_kvmem_query_state & state) {
+    if (!content_->contains(state.prefix) || speculative_evaluation_) return false;
+    const auto ranges = explicit_spans_ ? turn_spans_.query :
+        std::vector<llama_kvmem_row_range>{{query_begin_, query_end_}};
+    if (state.ranges.size() != ranges.size()) return false;
+    for (size_t i = 0; i < ranges.size(); ++i)
+        if (ranges[i].begin != state.ranges[i].begin || ranges[i].end != state.ranges[i].end) return false;
     if (state.sum.size() != n_layer_ || state.count.size() != n_layer_) return false;
     uint32_t rows = 0;
     for (uint32_t il = 0; il < n_layer_; ++il) {
@@ -4416,35 +4512,73 @@ bool llama_memory_kvmem::set_query(const llama_kvmem_query_state & state) {
     return true;
 }
 
+bool llama_memory_kvmem::get_tail_mean(uint32_t row, llama_kvmem_tail_mean_state & state) {
+    harvest_flush();
+    decode_mean_flush();
+    state = {};
+    if (!content_->stamp().valid || speculative_evaluation_ || row > content_->stamp().frontier) return false;
+    state.row = row;
+    state.prefix = content_->prefix(row);
+    state.values = raw_->mean_checkpoint(row);
+    return tail_mean_valid(row, state);
+}
+
+bool llama_memory_kvmem::tail_mean_valid(uint32_t row, const llama_kvmem_tail_mean_state & state) const {
+    if (state.row != row || !content_->contains(state.prefix) || state.prefix->frontier() != row) return false;
+    const auto & values = state.values;
+    if (row % block_tokens_ == 0) return values.empty();
+    const size_t stride = 1 + n_embd_k_;
+    if (values.size() != n_layer_*stride ||
+            !std::all_of(values.begin(), values.end(), [](float x) { return std::isfinite(x); })) return false;
+    for (size_t il = 0; il < n_layer_; ++il) {
+        const float n = values[il*stride];
+        if (n < 0 || n > row % block_tokens_ || n != std::floor(n)) return false;
+    }
+    return true;
+}
+
+bool llama_memory_kvmem::set_tail_mean(uint32_t row, const llama_kvmem_tail_mean_state & state) {
+    if (!tail_mean_valid(row, state) || speculative_evaluation_ || decode_mean_n_ != 0) return false;
+    harvest_flush();
+    raw_->restore_mean_checkpoint(row, state.values);
+    return true;
+}
+
 void llama_memory_kvmem::apply_retrieval() {
     if (method_ != 1) { harvest_flush(); return; }
     apply_selection(preview_retrieval());
 }
 
 void llama_memory_kvmem::apply_selection(const llama_kvmem_selection & selection) {
+    if (selection.epoch != attention_epoch_ || selection.rows != store_n_tokens())
+        throw std::runtime_error("stale KVMem selection");
+    if (native_contract_supported()) {
+        run_native_transaction(selection.blocks, NativePurpose::Retrieval);
+    } else {
+        apply_native_selection(selection);
+    }
+}
+
+void llama_memory_kvmem::apply_native_selection(const llama_kvmem_selection & selection) {
     if (selection.epoch != attention_epoch_ || selection.rows != store_n_tokens()) {
         throw std::runtime_error("stale KVMem selection");
     }
     const int64_t t_all = ggml_time_us();
-    kvmem::KvMemPlan plan;
+    kvmem::NativeResidencyPlan plan;
     {
         const int64_t t0 = ggml_time_us();
-        plan = runtime_->prepare_selection(selection.blocks);
+        plan = runtime_->prepare_native_selection(selection.blocks);
         if (retr_.enabled) {
             retr_.plan_us += ggml_time_us() - t0;
             retr_.n_stage_in = static_cast<uint32_t>(plan.stage_in.size());
-            for (const auto & r : plan.remaps) {
-                if (r.skip) {
-                    retr_.n_skip++;
-                }
-            }
+            retr_.n_skip = plan.gpu_reused_blocks;
         }
     }
     trace_plan("retrieval", plan);
     if (trace_) {
         kvmem_diag("KVMEM_TRACE selected");
-        for (const auto & r : plan.remaps) {
-            fprintf(stderr, " %u", r.block_id);
+        for (uint32_t id : plan.selected) {
+            fprintf(stderr, " %u", id);
         }
         fprintf(stderr, "\n");
     }
@@ -4469,17 +4603,17 @@ void llama_memory_kvmem::apply_selection(const llama_kvmem_selection & selection
                 is_stage_in[id] = true;
             }
         }
-        for (const auto & r : plan.remaps) {
-            if (r.block_id >= store.block_count() || is_stage_in[r.block_id]) {
+        for (uint32_t id : plan.selected) {
+            if (id >= store.block_count() || is_stage_in[id]) {
                 continue;
             }
-            const kvmem::KvMemBlock & b = store.blocks()[r.block_id];
-            if (b.gpu_slot < 0 || b.orig_pos_start == 0 || !raw_->has_block(r.block_id)) {
+            const kvmem::KvMemBlock & b = store.blocks()[id];
+            if (b.gpu_slot < 0 || b.orig_pos_start == 0 || !raw_->has_block(id)) {
                 continue;
             }
-            kvmem_diag("KVMEM_KV --- native reused block %u orig=%u skip=%d (GPU vs packed) ---\n",
-                    r.block_id, b.orig_pos_start, (int) r.skip);
-            dump_kv_compare(static_cast<int32_t>(r.block_id), false);
+            kvmem_diag("KVMEM_KV --- native reused block %u orig=%u (GPU vs packed) ---\n",
+                    id, b.orig_pos_start);
+            dump_kv_compare(static_cast<int32_t>(id), false);
             break;
         }
         if (retr_.enabled) {
@@ -4849,6 +4983,15 @@ bool llama_kvmem_want_decode_mean(void) {
     return mem && mem->want_decode_mean();
 }
 
+void llama_kvmem_begin_speculative_evaluation() {
+    if (auto * mem = kvmem_capture_active()) mem->begin_speculative_evaluation();
+}
+
+bool llama_kvmem_commit_speculative(llama_context * ctx, uint32_t n_keep) {
+    if (auto * mem = kvmem_capture_active()) return mem->commit_speculative(ctx, n_keep);
+    return true;
+}
+
 void llama_kvmem_decode_mean_commit(uint32_t n_keep) {
     if (llama_memory_kvmem * mem = kvmem_capture_active()) {
         mem->decode_mean_commit(n_keep);
@@ -5052,16 +5195,23 @@ void llama_kvmem_set_media_ranges(const uint32_t * starts, const uint32_t * ends
     }
 }
 
-void llama_kvmem_get_tail_mean(uint32_t row, std::vector<float> & state) {
+bool llama_kvmem_get_tail_mean(uint32_t row, llama_kvmem_tail_mean_state & state) {
+    state = {};
+    state.row = row;
     if (auto * mem = kvmem_capture_active()) {
-        mem->harvest_flush();
-        mem->decode_mean_flush();
-        state = mem->raw().mean_checkpoint(row);
+        return mem->get_tail_mean(row, state);
     }
+    return true;
 }
 
-void llama_kvmem_set_tail_mean(uint32_t row, const std::vector<float> & state) {
-    if (auto * mem = kvmem_capture_active()) mem->raw().restore_mean_checkpoint(row, state);
+bool llama_kvmem_tail_mean_valid(uint32_t row, const llama_kvmem_tail_mean_state & state) {
+    if (auto * mem = kvmem_capture_active()) return mem->tail_mean_valid(row, state);
+    return state.row == row && !state.prefix && state.values.empty();
+}
+
+bool llama_kvmem_set_tail_mean(uint32_t row, const llama_kvmem_tail_mean_state & state) {
+    if (auto * mem = kvmem_capture_active()) return mem->set_tail_mean(row, state);
+    return llama_kvmem_tail_mean_valid(row, state);
 }
 
 bool llama_kvmem_store_swap_supported(void) {
@@ -5111,6 +5261,7 @@ void llama_kvmem_store_bundle_reset(llama_kvmem_store_bundle * bundle) {
     auto & store = *bundle->store;
     store.runtime->truncate_to(0);
     store.raw->truncate_to(0);
+    store.content->reset();
     if (store.mtp_raw) store.mtp_raw->truncate_to(0);
     store.row_positions.clear();
     store.resident.clear();
@@ -5352,4 +5503,283 @@ void llama_kvmem_store_snapshot_read(int32_t id, kvmem::SnapshotReader & in) {
 uint64_t llama_kvmem_store_capacity(uint32_t tokens) {
     auto * mem = kvmem_capture_active();
     return mem ? mem->host_capacity(tokens) : 0;
+}
+
+void llama_memory_kvmem::restore_attached(const kvmem::NativeResidencyPlan & plan) {
+    auto & store = runtime_->store();
+    uint32_t n_raw = 0;
+    uint32_t n_skip = 0;
+    for (uint32_t id : plan.stage_in) {
+        if (id >= store.block_count() || store.blocks()[id].gpu_slot < 0) {
+            continue;
+        }
+        if (gpu_kv_already_resident(id)) {
+            n_skip++;
+            continue;
+        }
+        write_block_to_gpu(id);
+        n_raw++;
+    }
+    kvmem_stagein_flush_sync(retr_.enabled ? &retr_.copy_us : nullptr,
+                             retr_.enabled ? &retr_.rope_us : nullptr,
+                             retr_.enabled ? &retr_.hadamard_us : nullptr,
+                             retr_.enabled ? &retr_.set_us : nullptr);
+    if (mtp_) {
+        // A follower coverage miss leaves its cells empty rather than
+        // labelling them with this block's positions, because the bytes in
+        // them are the previous conversation's draft K. That holds for the
+        // rest of the request and not only for this call: the strictness is a
+        // per-slot mark swap_raw() set above, which follow_retrieval() reads
+        // on the retrieval path too, and which only a full packed write
+        // clears.
+        mtp_->follow_retrieval();
+    }
+    if (trace_) {
+        kvmem_diag("KVMEM_STORE_ATTACH rows=%u blocks=%zu raw=%u skip=%u free_slots=%zu\n",
+                store.total_tokens(), plan.stage_in.size(), n_raw, n_skip, free_slots_.size());
+    }
+}
+
+bool llama_memory_kvmem::native_contract_supported() const {
+    // The native packed-row bridge has complete K AND V on this path. Other
+    // engine configurations retain their existing bridge until qualified.
+    return !v_trans_ && !multi_gpu_ && !kv_->get_layer_ids().empty() && !raw_cfg_.nvme_bytes &&
+            !rt_cfg_.cpu_bytes && !rt_cfg_.nvme_bytes && store().config().optimize_stage_in;
+}
+
+bool llama_memory_kvmem::packed_complete(uint32_t id, uint32_t tokens) const {
+    if (!raw_ || !tokens) return false;
+    for (uint32_t il : kv_->get_layer_ids()) {
+        if (!raw_->has_k_gpu(id, il, tokens) || !raw_->has_v_gpu(id, il, tokens)) return false;
+    }
+    return true;
+}
+
+bool llama_memory_kvmem::native_cells_complete(const kvmem::BlockDescriptor & block) const {
+    const auto & b = store().blocks().at((size_t) block.id);
+    if (b.gpu_slot < 0 || b.in_flight || b.tier != kvmem::KvTier::GPU) return false;
+    const uint32_t cell0 = b.gpu_slot * block_tokens_;
+    const auto & cells = kv_->get_cells(0);
+    if ((uint64_t) cell0 + block.valid_tokens > cells.size() ||
+        block.original_start + block.valid_tokens > row_positions_.size()) return false;
+    for (uint32_t j = 0; j < block.valid_tokens; ++j) {
+        const auto & row = row_positions_[(size_t) block.original_start + j];
+        const auto & ext = cells.ext_get(cell0 + j);
+        if (cells.is_empty(cell0 + j) || !cells.seq_has(cell0 + j, 0) ||
+            ext.logical_pos != (llama_pos) (block.original_start + j) || cells.pos_get(cell0 + j) != row.pos[0] ||
+            (row.spatial && (ext.y != row.pos[1] || ext.x != row.pos[2]))) return false;
+    }
+    return true;
+}
+
+// These objects never escape run_native_transaction: the engine owner outlives
+// the local MemorySession, including its abort/drain on exceptions. A session
+// identity travels with ConvStore, while physical buffers stay with the engine.
+struct llama_memory_kvmem::NativeBackend final : kvmem::MemoryBackend {
+    llama_memory_kvmem & owner;
+    std::vector<uint32_t> selected;
+    NativePurpose purpose;
+    NativeBackend(llama_memory_kvmem & o, std::vector<uint32_t> s, NativePurpose p)
+        : owner(o), selected(std::move(s)), purpose(p) {}
+    kvmem::MemoryDescriptor descriptor() const override {
+        kvmem::MemoryDescriptor d;
+        // In-process compatibility, never a claim of a portable state image.
+        d.identity = {"llama.cpp", "7fe450e+kvmem-native-v1",
+            std::to_string(reinterpret_cast<uintptr_t>(&owner.model_)), "attention-only-v1"};
+        d.layout = kvmem::raw_kv_payload_layout(owner.raw_cfg_,
+            std::string("llama-packed-") + ggml_type_name(owner.type_k_) + "/" + ggml_type_name(owner.type_v_),
+            owner.kv_->get_layer_ids());
+        d.capabilities.page_tokens = owner.block_tokens_;
+        d.capabilities.max_position = INT32_MAX;
+        d.capabilities.native_payload = true;
+        d.capabilities.sparse_view = true;
+        d.capabilities.original_rope_positions = true;
+        // Mean-K/Q and recurrent checkpoints still belong to their engine APIs.
+        return d;
+    }
+    kvmem::MemoryStamp stamp() const noexcept override { return owner.content_->stamp(); }
+    kvmem::MemorySnapshot snapshot() const override {
+        if (owner.native_transfer_pending_)
+            throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending, "native view is being replaced");
+        kvmem::MemorySnapshot result;
+        result.stamp = stamp();
+        const auto count = (result.stamp.frontier + owner.block_tokens_ - 1) / owner.block_tokens_;
+        for (uint64_t id = 0; id < count; ++id) {
+            auto b = owner.content_->block(id);
+            result.blocks.push_back({b, owner.packed_complete((uint32_t) id, b.valid_tokens) ? b.content_version : 0});
+            const auto & physical = owner.store().blocks().at((size_t) id);
+            if (physical.gpu_slot >= 0 && physical.tier == kvmem::KvTier::GPU && !physical.in_flight) {
+                if (!owner.native_cells_complete(b))
+                    throw kvmem::MemoryError(kvmem::MemoryErrorCode::Stale, "resident KV has a position/coverage gap");
+                result.resident.push_back(id);
+            }
+        }
+        return result;
+    }
+    std::unique_ptr<kvmem::MemoryTransfer> prepare(const kvmem::WorkingSetPlan &) override;
+    void invalidate() noexcept override { owner.content_->invalidate(); }
+};
+
+struct llama_memory_kvmem::NativeTransfer final : kvmem::MemoryTransfer {
+    NativeBackend & backend;
+    kvmem::WorkingSetPlan plan;
+    uint8_t * layout = nullptr;
+    uint8_t * mtp_layout = nullptr;
+    bool armed = false, destructive = false, published = false;
+    kvmem::MemoryPhase phase = kvmem::MemoryPhase::Prepared;
+    NativeTransfer(NativeBackend & b, const kvmem::WorkingSetPlan & p) : backend(b), plan(p) {}
+    ~NativeTransfer() override {
+        if (armed && !published) abort();
+        if (layout) cudaFree(layout);
+        if (mtp_layout) cudaFree(mtp_layout);
+    }
+    void start_spill() override {
+        if (phase != kvmem::MemoryPhase::Prepared) throw std::logic_error("native spill order");
+        auto & o = backend.owner;
+        for (const auto & b : plan.spill) o.harvest_gpu_v((uint32_t) b.id);
+        o.harvest_gpu_v_commit();
+        o.raw_->wait_writes();
+        for (const auto & b : plan.evict) {
+            if (!o.packed_complete((uint32_t) b.id, b.valid_tokens))
+                throw kvmem::MemoryError(kvmem::MemoryErrorCode::TransferFailed, "incomplete native spill");
+        }
+        phase = kvmem::MemoryPhase::Spilling;
+        if (o.native_probe_) o.native_probe_(o, phase);
+    }
+    kvmem::TransferPoll poll() override {
+        // The existing copy path fences before returning. This backend makes
+        // no asynchronous-transfer claim; MemorySession still enforces order.
+        if (phase != kvmem::MemoryPhase::Spilling && phase != kvmem::MemoryPhase::Restoring)
+            throw std::logic_error("native poll order");
+        return {kvmem::TransferStatus::Complete, {}};
+    }
+    void start_restore() override {
+        if (phase != kvmem::MemoryPhase::Spilling) throw std::logic_error("native restore order");
+        auto & o = backend.owner;
+        destructive = true;
+        o.native_layout_scratch_ = layout;
+        o.native_mtp_scratch_ = mtp_layout;
+        if (backend.purpose == NativePurpose::Retrieval) {
+            o.apply_native_selection({o.attention_epoch_, o.store_n_tokens(), backend.selected});
+        } else {
+            const auto native = o.runtime_->prepare_native_selection(backend.selected);
+            o.trace_plan(backend.purpose == NativePurpose::Detach ? "conv_detach" :
+                         backend.purpose == NativePurpose::Attach ? "conv_attach" : "prefill_pressure", native);
+            o.apply_plan_to_kv(native);
+            if (backend.purpose == NativePurpose::Attach) o.restore_attached(native);
+            if (backend.purpose == NativePurpose::Pressure) {
+                for (const auto & b : plan.restore) o.write_block_to_gpu((uint32_t) b.id);
+            }
+        }
+        kvmem_stagein_flush_sync(nullptr, nullptr, nullptr, nullptr);
+        phase = kvmem::MemoryPhase::Restoring;
+        if (o.native_probe_) o.native_probe_(o, phase);
+    }
+    void publish(const kvmem::ExecutionView & view) override {
+        auto & o = backend.owner;
+        if (phase != kvmem::MemoryPhase::Restoring || !(view.stamp == plan.next.stamp))
+            throw std::logic_error("native publish order or version");
+        // Validate only completed rows. Pressure admission can also own future
+        // cells, which are reservations and are absent from this ExecutionView.
+        const auto & cells = o.kv_->get_cells(0);
+        for (const auto & item : view.blocks) {
+            if (!o.native_cells_complete(item.block))
+                throw std::runtime_error("native publish before complete KV restoration");
+        }
+        if (cells.get_used() != view.visible_tokens)
+            throw std::runtime_error("native publish contains unaccounted attention rows");
+        if (o.native_probe_) o.native_probe_(o, kvmem::MemoryPhase::Ready);
+        o.content_->publish(plan.expected, view.stamp);
+        o.native_transfer_pending_ = false;
+        o.native_layout_scratch_ = o.native_mtp_scratch_ = nullptr;
+        published = true;
+        armed = false;
+        if (o.trace_) kvmem_diag("KVMEM_NATIVE_PUBLISH session=%llu incarnation=%llu committed=%llu reserved=%llu view=%llu\n",
+            (unsigned long long) view.stamp.session.id, (unsigned long long) view.stamp.session.incarnation,
+            (unsigned long long) view.stamp.frontier, (unsigned long long) o.content_->reserved(),
+            (unsigned long long) view.stamp.view_version);
+    }
+    kvmem::AbortResult abort() noexcept override {
+        if (!armed) return destructive ? kvmem::AbortResult::SessionInvalidated : kvmem::AbortResult::PreviousViewPreserved;
+        auto & o = backend.owner;
+        try {
+            kvmem_stagein_flush_sync(nullptr, nullptr, nullptr, nullptr);
+            o.harvest_flush();
+            o.harvest_gpu_v_commit();
+            if (o.raw_) o.raw_->wait_writes();
+        } catch (...) { destructive = true; }
+        if (destructive) {
+            o.conv_reset_to_empty("native transfer abort");
+            o.content_->invalidate();
+        }
+        o.native_transfer_pending_ = false;
+        o.native_layout_scratch_ = o.native_mtp_scratch_ = nullptr;
+        armed = false;
+        return destructive ? kvmem::AbortResult::SessionInvalidated : kvmem::AbortResult::PreviousViewPreserved;
+    }
+};
+
+std::unique_ptr<kvmem::MemoryTransfer> llama_memory_kvmem::NativeBackend::prepare(const kvmem::WorkingSetPlan & plan) {
+    auto & o = owner;
+    if (!(stamp() == plan.expected) || o.native_transfer_pending_ || o.runtime_->pending())
+        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Stale, "native preparation changed");
+    const auto native = o.store().plan_native_selection(selected);
+    for (const auto & b : plan.restore) {
+        if (o.store().blocks().at((size_t) b.id).n_tokens != b.valid_tokens)
+            throw kvmem::MemoryError(kvmem::MemoryErrorCode::InvalidPlan, "append requires a resident partial tail");
+    }
+    if (selected.size() > o.n_slots_ || native.stage_in.size() > o.free_slots_.size() + native.stage_out.size())
+        throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded, "native slot reservation exceeds pool");
+    auto transfer = std::make_unique<NativeTransfer>(*this, plan);
+    // Physical destination capacity is the already allocated, exclusively owned
+    // slot pool. Reserve packed host destinations and layout device scratch now.
+    for (const auto & b : plan.evict) o.raw_->reserve_packed((uint32_t) b.id, o.kv_->get_layer_ids());
+    if (!kvmem_stagein_gpu_ready((size_t) o.block_tokens_ * std::max(o.n_embd_k_, o.n_embd_v_),
+            o.block_tokens_ * std::max(ggml_row_size(o.type_k_, o.n_embd_k_), ggml_row_size(o.type_v_, o.n_embd_v_))))
+        throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded, "native copy scratch unavailable");
+    if (purpose == NativePurpose::Retrieval && !selected.empty()) {
+        const size_t bytes = selected.size() * o.block_tokens_ *
+                (ggml_row_size(o.type_k_, o.n_embd_k_) + ggml_row_size(o.type_v_, o.n_embd_v_));
+        if (cudaMalloc(reinterpret_cast<void **>(&transfer->layout), bytes) != cudaSuccess) {
+            (void) cudaGetLastError();
+            throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded, "native layout scratch unavailable");
+        }
+        if (o.mtp_ && cudaMalloc(reinterpret_cast<void **>(&transfer->mtp_layout), o.mtp_->layout_scratch_bytes(selected.size())) != cudaSuccess) {
+            (void) cudaGetLastError();
+            throw kvmem::MemoryError(kvmem::MemoryErrorCode::BudgetExceeded, "native MTP layout scratch unavailable");
+        }
+    }
+    if (o.native_probe_) o.native_probe_(o, kvmem::MemoryPhase::Prepared);
+    o.native_transfer_pending_ = true;
+    transfer->armed = true;
+    return transfer;
+}
+
+void llama_memory_kvmem::run_native_transaction(const std::vector<uint32_t> & selected, NativePurpose purpose) {
+    harvest_flush();
+    harvest_gpu_v_commit();
+    raw_->wait_writes();
+    if (!content_->stamp().valid || evaluation_cursor_ != evaluation_queue_.size() ||
+        content_->evaluated() != content_->stamp().frontier ||
+        (purpose != NativePurpose::Pressure && content_->reserved() != content_->stamp().frontier))
+        throw kvmem::MemoryError(kvmem::MemoryErrorCode::Pending, "graph rows are not complete");
+    auto backend = std::make_shared<NativeBackend>(*this, selected, purpose);
+    kvmem::MemorySession session(backend);
+    std::vector<uint64_t> committed;
+    for (uint32_t id : selected) {
+        if ((uint64_t) id * block_tokens_ < content_->stamp().frontier) committed.push_back(id);
+    }
+    const uint64_t committed_blocks = (content_->stamp().frontier + block_tokens_ - 1) / block_tokens_;
+    const uint64_t reserved_blocks = (content_->reserved() + block_tokens_ - 1) / block_tokens_;
+    kvmem::MemoryBudget budget;
+    budget.selected_tokens = kv_size_;
+    budget.reserve_tokens = (reserved_blocks - committed_blocks) * block_tokens_;
+    budget.device_tokens = kv_size_;
+    // RawKvStore retains all history even with recency selection. Its payload
+    // envelope is the current logical catalog; server Host accounting also
+    // includes means, staging and parked conversations outside this contract.
+    budget.host_payload_bytes = committed_blocks * backend->descriptor().layout.record_bytes;
+    session.prepare(backend->stamp(), committed, {}, budget);
+    while (session.phase() != kvmem::MemoryPhase::Ready) session.advance();
+    session.publish();
 }

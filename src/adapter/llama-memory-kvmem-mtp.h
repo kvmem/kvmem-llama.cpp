@@ -87,7 +87,8 @@ public:
         uint32_t n_tokens = 0;
     };
     bool slot_holds(int32_t slot, uint32_t orig_pos) const;
-    bool layout_d2d(const LayoutMove * moves, size_t n_moves);
+    size_t layout_scratch_bytes(size_t n_moves) const;
+    bool layout_d2d(const LayoutMove * moves, size_t n_moves, uint8_t * prepared_scratch = nullptr);
     void occupy_block(uint32_t block_id);
     bool remove_logical(llama_pos p0, llama_pos p1) {
         if (target_) target_->note_attention_change();

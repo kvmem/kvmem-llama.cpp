@@ -42,6 +42,23 @@ GGML_BACKEND_API void ggml_backend_cuda_unregister_host_buffer(void * buffer);
 
 GGML_BACKEND_API ggml_backend_reg_t ggml_backend_cuda_reg(void);
 
+// FP32 Qwen GDN layout: 128-wide heads, 16 key heads, 48 value heads, conv width 4.
+struct ggml_cuda_gdn_replay_layer {
+    float * state;
+    float * conv;
+    const float * key;
+    const float * value;
+    const float * gate;
+    const float * beta;
+    const float * conv_input;
+};
+
+// layers points to a device array. The caller orders this stream after verification.
+// n_keep == 0 is a no-op; records outside the accepted prefix are never read.
+GGML_BACKEND_API bool ggml_backend_cuda_gdn_fold(
+        const struct ggml_cuda_gdn_replay_layer * layers,
+        int n_layers, int n_keep, int capacity, void * stream);
+
 #ifdef  __cplusplus
 }
 #endif

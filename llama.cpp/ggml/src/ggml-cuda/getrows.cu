@@ -454,6 +454,11 @@ void ggml_cuda_op_get_rows(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT(src1->nb[0] == ggml_type_size(src1->type));
     GGML_ASSERT(dst->nb[0]  == ggml_type_size(dst->type));
 
+    // An empty index list is a no-op. dim3 rejects a 0-sized grid, including during capture.
+    if (ne00 == 0 || ne10 == 0 || ne11 == 0 || ne12 == 0) {
+        return;
+    }
+
     get_rows_cuda(src0->data, src0->type, (const int32_t *) src1->data, dst->data, dst->type,
         ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
 }

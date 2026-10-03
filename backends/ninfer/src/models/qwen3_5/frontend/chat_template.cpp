@@ -371,6 +371,12 @@ RenderedChat CompiledChatTemplate::render_as(const std::vector<ChatMessage>& mes
         if (extent) message_blocks[i] = containing_message(layout, *extent);
         if (message_blocks[i]) ++block_users[*message_blocks[i]];
     }
+    for (std::size_t i = messages.size(); i > 0; --i) {
+        if (real_user(messages[i - 1])) {
+            result.memory_query = content_regions[i - 1];
+            break;
+        }
+    }
     for (std::size_t i = 0; i < messages.size(); ++i) {
         if (!message_blocks[i]) continue;
         const auto& block = layout.messages[*message_blocks[i]];

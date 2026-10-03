@@ -1,4 +1,5 @@
 #pragma once
+#include "models/qwen3_5/execution/memory_statistics.h"
 #include "models/qwen3_5/program/internal.h"
 
 
@@ -88,7 +89,9 @@ public:
         proposal_head_n_   = count;
     }
 
+    void set_memory_statistics(const MemoryStatistics* value) noexcept { statistics_ = value; }
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
+    void set_cache_position_shift(std::uint32_t shift) noexcept { cache_position_shift_ = shift; }
 
     void set_rope_yarn(const ops::RopeYarn& yarn) noexcept { rope_yarn_ = yarn; }
 
@@ -263,9 +266,11 @@ private:
     qwen3_5::RoundState& io_;
     Tensor& prefill_hidden_;
     std::uint32_t prefill_chunk_;
+    const MemoryStatistics* statistics_ = nullptr;
     bool fast_prefill_kernel_ = false;
     void* first_token_logits_ = nullptr;
     std::uint32_t text_kv_base_;
+    std::uint32_t cache_position_shift_ = 0;
     const Tensor* active_cache_positions_                                          = nullptr;
     const Tensor* active_rope_positions_                                           = nullptr;
     const Tensor* active_kv_table_rows_                                            = nullptr;

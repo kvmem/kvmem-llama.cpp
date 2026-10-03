@@ -114,6 +114,9 @@ struct RewriteCheckpointByteSpec {
 struct RenderedChat {
     std::string text;
     std::vector<text::ByteSpan> literal_spans;
+    // Actual last user content provenance from Jinja input regions, not text search.
+    std::optional<text::ByteSpan> memory_query;
+
     bool starts_in_reasoning = false;
     std::vector<MediaPlaceholderByteSpec> media_placeholders;
     std::vector<MediaTokenRunByteSpec> media_token_runs;

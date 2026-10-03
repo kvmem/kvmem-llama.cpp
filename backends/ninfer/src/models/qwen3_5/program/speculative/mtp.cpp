@@ -31,6 +31,7 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
     configure_text_card(card, state.execution, state.sampling, state.state_source_slot,
                         state.state_destination_slot, state.mtp_proposal_extent);
 
+    position -= static_cast<std::int32_t>(state.cache_position_shift);
     Tensor position_view = state.execution.io.mtp->target_positions.slice(0, 0, 1);
     ops::set_i32_scalar(position_view, position, state.execution.device.stream);
     Tensor mtp_hidden         = state.execution.io.mtp->ar_hidden;
@@ -145,7 +146,7 @@ auto mtp_decode_batch_body(MtpBatchContext& state, std::int32_t batch_size,
                                      .target_tokens           = target_tokens,
                                      .drafts                  = current_drafts,
                                      .current_extents         = current_extents,
-                                     .frontiers               = frontiers,
+                                     .frontiers               = frame.logical_frontiers.slice(0, 0, batch_size),
                                      .anchors                 = anchors,
                                      .licensed_tokens         = licensed_tokens,
                                      .licensed_counts         = licensed_counts,

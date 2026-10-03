@@ -88,6 +88,7 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
             Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
             cb(Qcur, "Qcur_normed", il);
 
+            kvmem_capture_q(Qcur, il);
             Qcur = ggml_rope_ext(
                     ctx0, Qcur, inp_pos, nullptr,
                     n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
@@ -97,6 +98,7 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
             Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
             cb(Kcur, "Kcur_normed", il);
 
+            kvmem_capture_k(Kcur, il);
             Kcur = ggml_rope_ext(
                     ctx0, Kcur, inp_pos, nullptr,
                     n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
@@ -106,6 +108,7 @@ llama_model_qwen3::graph::graph(const llama_model & model, const llm_graph_param
             cb(Qcur, "Qcur", il);
             cb(Kcur, "Kcur", il);
             cb(Vcur, "Vcur", il);
+            kvmem_capture_v(Vcur, il);
 
             cur = build_attn(inp_attn,
                     model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,

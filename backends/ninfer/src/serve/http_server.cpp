@@ -3,6 +3,7 @@
 #include "product/logging/logging.h"
 #include "serve/anthropic_messages.h"
 #include "serve/http_transport.h"
+#include "serve/kvmem_status_json.h"
 #include "serve/mcp_proxy.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
@@ -711,7 +712,7 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
         {"frequency_penalty", overrides.frequency_penalty.value_or(preset.frequency_penalty)},
     };
     params["seed"] = overrides.seed ? nlohmann::json(*overrides.seed) : nlohmann::json(-1);
-    const nlohmann::json props = {
+    nlohmann::json props = {
         {"default_generation_settings",
          {{"n_ctx", load_capacity_.max_context},
           {"speculative", options_.speculative.backend != ninfer::SpeculativeBackend::None},
@@ -726,6 +727,25 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
         // The WebUI ungreys its "Use llama-server proxy" option from this flag alone.
         {"cors_proxy_enabled", options_.webui_mcp_proxy},
     };
+    props["backend"] = "ninfer";
+    props["kvmem"] = {{"enabled", options_.kvmem.selected_tokens != 0},
+        {"selected_tokens", options_.kvmem.selected_tokens},
+        {"reserve_tokens", options_.kvmem.reserve_tokens},
+        {"host_payload_budget_bytes", options_.kvmem.host_bytes}};
+    if (options_.kvmem.selected_tokens) {
+        props["kvmem"]["usage"] = kvmem_status_json(service_->runtime_stats().kvmem);
+        props["kvmem"]["capabilities"] = {{"text_chat", true}, {"streaming", true},
+            {"history_reuse", options_.allow_prefix_reuse}, {"original_positions", true},
+            {"disk_restore", !options_.kvmem.disk_path.empty()},
+            {"speculative_decoding", options_.speculative.backend == SpeculativeBackend::Mtp},
+            {"mtp_drafts", options_.speculative.draft_tokens}, {"multimodal", options_.enable_vision},
+            {"ngram_drafts", options_.speculative.ngram_draft_tokens},
+            {"ngram_min_match", options_.speculative.ngram_min_match},
+            {"max_active_requests", options_.max_concurrency},
+            {"retained_sessions", options_.kvmem.retained_sessions},
+            {"disk_budget_bytes", options_.kvmem.disk_bytes},
+            {"cross_backend_kv_transfer", false}};
+    }
     res.set_content(props.dump(), "application/json");
 }
 

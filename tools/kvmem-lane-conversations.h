@@ -133,26 +133,26 @@ public:
         }
         bool restaged = true;
         if (op.id == op.outgoing) {
-            if (op.fresh) memory_clear_all(st);
+            if (op.fresh) llama_driver_clear(st);
         } else {
             bundle_ptr bundle {nullptr, llama_kvmem_store_bundle_free};
             bundle = std::move(incoming->parked);
             if (!bundle) bundle.reset(llama_kvmem_store_bundle_create());
             if (op.fresh) {
                 llama_kvmem_store_bundle_reset(bundle.get());
-                conversation_drop_payload(incoming->payload);
+                llama_driver_drop_conversation(incoming->payload);
             }
-            conversation_swap(st, outgoing->payload);
+            llama_driver_swap_conversation(st, outgoing->payload);
             try {
                 restaged = llama_kvmem_store_bundle_swap(bundle.get());
             } catch (...) {
                 incoming->parked = std::move(bundle);
-                conversation_swap(st, outgoing->payload);
-                if (!llama_kvmem_store_n_tokens() && !st.cached_tokens.empty()) memory_clear_all(st);
+                llama_driver_swap_conversation(st, outgoing->payload);
+                if (!llama_kvmem_store_n_tokens() && !st.cached_tokens.empty()) llama_driver_clear(st);
                 throw;
             }
             outgoing->parked = std::move(bundle);
-            conversation_swap(st, incoming->payload);
+            llama_driver_swap_conversation(st, incoming->payload);
             {
                 std::lock_guard<std::mutex> lock(mu_);
                 // The handover has happened even if subsequent repair fails.
@@ -162,8 +162,8 @@ public:
                 op.attached = true;
             }
             st.mm_live_checkpoint.reset();
-            if (!restaged && !st.cached_tokens.empty()) memory_clear_all(st);
-            if (!llama_kvmem_store_bundle_rows(outgoing->parked.get())) conversation_drop_payload(outgoing->payload);
+            if (!restaged && !st.cached_tokens.empty()) llama_driver_clear(st);
+            if (!llama_kvmem_store_bundle_rows(outgoing->parked.get())) llama_driver_drop_conversation(outgoing->payload);
         }
         st.mm_reset_requested = false;
         std::lock_guard<std::mutex> lock(mu_);
@@ -190,7 +190,7 @@ public:
         op.finished = true;
         try {
             kvmem_execution_scope execution(st.execution.get());
-            multimodal_finish_request(st);
+            llama_driver_finish(st);
             if (st.cached_prompt) st.cached_prompt = st.cached_prompt->cache_index();
             if (st.mm_query && st.mm_query->prefix) {
                 auto query = std::make_shared<MultimodalQuery>(*st.mm_query);

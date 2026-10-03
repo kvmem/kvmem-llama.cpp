@@ -275,6 +275,7 @@ void ProgramImpl::prepare_graphs() {
                 mtp_host_ingress->anchors[row] = 0;
                 mtp_host_ingress->base_frontiers[row] =
                     checked_i32(frontier, "graph representative MTP frontier");
+                mtp_host_ingress->logical_frontiers[row] = mtp_host_ingress->base_frontiers[row];
                 mtp_host_ingress->remaining_budgets[row] =
                     checked_i32(capacity, "graph representative MTP budget");
                 mtp_host_ingress->current_extents[row] = static_cast<std::int32_t>(extent);
@@ -303,6 +304,8 @@ void ProgramImpl::prepare_graphs() {
                 ordinary_host_ingress->tokens[row] = 0;
                 ordinary_host_ingress->cache_positions[row] =
                     checked_i32(frontier, "graph representative ordinary position");
+                ordinary_host_ingress->logical_frontiers[row] =
+                    checked_i32(frontier, "graph representative ordinary RNG frontier");
                 ordinary_host_ingress->rope_positions[row] =
                     checked_i32(frontier, "graph representative ordinary RoPE position");
                 ordinary_host_ingress->text_kv_table_rows[row] = static_cast<std::int32_t>(row);
@@ -325,7 +328,8 @@ void ProgramImpl::prepare_graphs() {
                                         stage_runtime.get(),
                                         rope_yarn,
                                         fast_prefill_kernel,
-                                        mtp_attention_window};
+                                        mtp_attention_window,
+                                        memory_candidate_statistics ? &*memory_candidate_statistics : nullptr};
     };
 
     const auto& text_attention = *parameters.model.config().text.attention;
@@ -336,8 +340,8 @@ void ProgramImpl::prepare_graphs() {
 
     if (speculative_backend == SpeculativeBackend::None) {
         const auto ordinary_profiles =
-            ordinary_graph_profiles(capacity, attention_geometry, kv_storage);
-        validate_graph_profiles(ordinary_profiles, capacity - 1, "ordinary");
+            ordinary_graph_profiles(kvmem_window_tokens ? kvmem_window_tokens : capacity, attention_geometry, kv_storage);
+        validate_graph_profiles(ordinary_profiles, (kvmem_window_tokens ? kvmem_window_tokens : capacity) - 1, "ordinary");
         const std::uint32_t ordinary_batch_limit = max_concurrency;
         execution::OrdinaryBatchContext ordinary_state{
             execution_core(),      decoder->text_kv,
@@ -379,9 +383,9 @@ void ProgramImpl::prepare_graphs() {
         constexpr std::uint32_t kMtpClassesPerWidth = 64;
         for (std::uint32_t verify_window = first_window; verify_window <= draft_window;
              ++verify_window) {
-            const auto planned_profiles = mtp_graph_profiles(capacity, verify_window, draft_window,
+            const auto planned_profiles = mtp_graph_profiles(kvmem_window_tokens ? kvmem_window_tokens : capacity, verify_window, draft_window,
                                                              attention_geometry, kv_storage);
-            validate_graph_profiles(planned_profiles, capacity - 1, "MTP");
+            validate_graph_profiles(planned_profiles, (kvmem_window_tokens ? kvmem_window_tokens : capacity) - 1, "MTP");
             for (const GraphExecutionProfile& planned : planned_profiles) {
                 if (planned.topology_class >= kMtpClassesPerWidth) {
                     throw std::logic_error("MTP graph profiles exceed the classes of one width");
@@ -400,7 +404,7 @@ void ProgramImpl::prepare_graphs() {
             device.synchronize();
             execution::mtp_decode_batch(mtp_state, 1, verify_window, draft_window,
                                         mtp_causal_attention_envelopes(code_warm.max, verify_window,
-                                                                       draft_window, capacity),
+                                                                       draft_window, kvmem_window_tokens ? kvmem_window_tokens : capacity),
                                         nullptr);
             device.synchronize();
 
@@ -422,7 +426,7 @@ void ProgramImpl::prepare_graphs() {
                         mtp_state, static_cast<std::int32_t>(batch_size), verify_window,
                         draft_window,
                         mtp_causal_attention_envelopes(planned.max, verify_window, draft_window,
-                                                       capacity),
+                                                       kvmem_window_tokens ? kvmem_window_tokens : capacity),
                         profile.definition);
                 }
             }
@@ -432,9 +436,10 @@ void ProgramImpl::prepare_graphs() {
             // frame viewed at that width. Above 15 drafts only one request may be active.
             const std::uint32_t verify_window = ngram_draft_window;
             const std::uint32_t batch_limit   = verify_window > 15U ? 1U : max_concurrency;
-            const auto planned_profiles = mtp_graph_profiles(capacity, verify_window, draft_window,
+            const auto attention_capacity = kvmem_window_tokens ? kvmem_window_tokens : capacity;
+            const auto planned_profiles = mtp_graph_profiles(attention_capacity, verify_window, draft_window,
                                                              attention_geometry, kv_storage);
-            validate_graph_profiles(planned_profiles, capacity - 1, "ngram MTP");
+            validate_graph_profiles(planned_profiles, attention_capacity - 1, "ngram MTP");
             qwen3_5::MtpDecodeState frame = io.mtp_decode->verification_view(verify_window);
             execution::MtpBatchContext mtp_state{execution_core(),
                                                  decoder->text_kv,
@@ -448,7 +453,7 @@ void ProgramImpl::prepare_graphs() {
             device.synchronize();
             execution::mtp_decode_batch(mtp_state, 1, verify_window, draft_window,
                                         mtp_causal_attention_envelopes(code_warm.max, verify_window,
-                                                                       draft_window, capacity),
+                                                                       draft_window, attention_capacity),
                                         nullptr);
             device.synchronize();
 
@@ -467,7 +472,7 @@ void ProgramImpl::prepare_graphs() {
                         mtp_state, static_cast<std::int32_t>(batch_size), verify_window,
                         draft_window,
                         mtp_causal_attention_envelopes(planned.max, verify_window, draft_window,
-                                                       capacity),
+                                                       attention_capacity),
                         profile.definition);
                 }
             }

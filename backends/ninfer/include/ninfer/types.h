@@ -350,6 +350,23 @@ enum class CudaMemoryPolicy : std::uint8_t {
     Mixed,
 };
 
+// Optional sparse KV working set. B and R are independent whole-page budgets;
+// Host retains native page records, including quantization scale planes.
+struct KvmemOptions {
+    std::uint32_t selected_tokens = 0; // B; zero disables KVMem
+    std::uint32_t reserve_tokens = 0;  // R; also covers each prefill chunk
+    std::uint64_t host_bytes = 0;      // H; hard bound on archived native payload
+    std::uint32_t retained_sessions = 4; // bounded inactive Host histories, 1..16
+    bool verify_transfers = false;    // correctness diagnostics, off in product runs
+    // Optional cold snapshots of named inactive text sessions. Temporary writes
+    // also count toward disk_bytes. No online KV paging or DirectStorage.
+    std::filesystem::path disk_path;
+    std::uint64_t disk_bytes = 0;
+    [[nodiscard]] std::uint64_t device_tokens() const noexcept {
+        return static_cast<std::uint64_t>(selected_tokens) + reserve_tokens;
+    }
+};
+
 struct EngineOptions {
     std::filesystem::path artifact_path;
     std::filesystem::path chat_template_path;
@@ -372,6 +389,8 @@ struct EngineOptions {
     // Past the model's native window (max_position_embeddings), up to four times it: positions run
     // unscaled RoPE, or with rope_yarn the whole window takes Qwen's YaRN at factor
     // max_context / native (ops::RopeYarn).
+    // Single-device bounded working sets; original RoPE positions stay logical.
+    KvmemOptions kvmem;
     bool rope_yarn = false;
     // A fixed YaRN factor in (1,4] for every position of the text and MTP layers, whatever
     // max_context is: Qwen documents one factor per deployment rather than one per window. 1 leaves
@@ -1291,7 +1310,27 @@ struct CudaResidencySummary {
     std::size_t verified_reserve_bytes = 0;
 };
 
+// Gauges of the current KVMem history (active or retained), not process-lifetime
+// counters. Payload H excludes statistics, checkpoint images and native workspace.
+struct KvmemMemorySummary {
+    bool enabled = false;
+    std::uint32_t selected_tokens = 0, reserve_tokens = 0;
+    std::uint64_t host_payload_budget_bytes = 0, host_payload_bytes = 0;
+    std::uint64_t statistics_bytes = 0, checkpoint_bytes = 0;
+    std::uint64_t transfer_staging_bytes = 0;
+    std::uint64_t statistics_staging_bytes = 0;
+    std::uint32_t mtp_resident_pages = 0;
+    std::uint32_t retained_sessions = 0;
+    std::uint64_t history_hits = 0, history_misses = 0, history_evictions = 0;
+    std::uint64_t disk_hits = 0, disk_writes = 0, disk_errors = 0;
+    std::uint64_t active_host_reservation_bytes = 0;
+    std::uint32_t evaluated_tokens = 0, checkpoint_tokens = 0, resident_pages = 0;
+    std::uint32_t history_swaps = 0;
+    std::uint64_t history_spilled_bytes = 0, history_restored_bytes = 0;
+};
+
 struct MemorySummary {
+    KvmemMemorySummary kvmem;
     int device                                = 0;
     std::uint32_t max_context                 = 0;
     KvCapacityMode kv_capacity_mode           = KvCapacityMode::Explicit;
@@ -1361,6 +1400,7 @@ struct RuntimeHostWorkStats {
 // Monotonic execution counters, boundary-consistent current gauges, and explicitly named last
 // decision observations. Consumers derive interval counters by subtracting two snapshots.
 struct RuntimeStats {
+    KvmemMemorySummary kvmem;
     RuntimeHostWorkStats host_work;
     // Published by the worker so monitoring never takes the execution lock or queries CUDA/PDH.
     CudaResidencySummary cuda_residency;

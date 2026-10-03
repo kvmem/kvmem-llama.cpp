@@ -1,8 +1,9 @@
 #pragma once
 
-// Engine-agnostic storage/copy hooks. P0 is host-only: the runtime updates
-// tier metadata without touching device memory. llama.cpp adapter (P1+)
-// implements copies via ggml_backend_tensor_get/set.
+// Legacy slot hooks for the existing llama adapter and parked metadata runtimes.
+// The default no-op behavior is retained for those existing callers only.
+// New backend integration uses MemoryBackend in memory_contract.hpp, whose
+// operations are all mandatory and whose transfers have explicit completion.
 
 #include <cstdint>
 
@@ -15,7 +16,7 @@ public:
     virtual int32_t alloc_gpu_slot() { return -1; }
     virtual void free_gpu_slot(int32_t /*slot*/) {}
 
-    // Byte copies. P0 stubs are no-ops so unit tests stay GPU-free.
+    // Legacy byte-copy hooks; do not use the defaults as a production backend.
     virtual void copy_block_to_host(uint32_t /*block_id*/,
                                     int32_t /*gpu_slot*/,
                                     void * /*host*/,

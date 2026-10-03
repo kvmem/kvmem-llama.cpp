@@ -18,6 +18,7 @@
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-hybrid-idx.h"
 #include "llama-memory-recurrent.h"
+#include "llama-kvmem-factory.h"
 
 #include "llama.h"
 #include "models/models.h"
@@ -2273,6 +2274,12 @@ ggml_tensor * llama_model::get_rope_factors(const llama_cparams & cparams, int i
 
 llama_memory_i * llama_model::create_memory(const llama_memory_params & params, const llama_cparams & cparams) const {
     llama_memory_i * res;
+
+#if defined(LLAMA_KVMEM)
+    if (llama_memory_i * kvmem = llama_memory_kvmem_maybe_create(*this, params, cparams)) {
+        return kvmem;
+    }
+#endif
 
     switch (arch) {
         // Models that need specific instantiation should be handled in the

@@ -650,7 +650,11 @@ bool kvmem_stagein_h2d_bytes(void * gpu_dst, const void * host, size_t n) {
 }
 
 void kvmem_stagein_sync() {
-    cuda_ok(cudaStreamSynchronize(stream()), "sync");
+    (void) kvmem_stagein_sync_checked();
+}
+
+bool kvmem_stagein_sync_checked() {
+    return cuda_ok(cudaStreamSynchronize(stream()), "sync");
 }
 
 static bool rope_from_dev(int64_t n_tokens, int n_head, int n_embd_head,

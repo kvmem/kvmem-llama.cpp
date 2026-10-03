@@ -15,7 +15,7 @@
 #include "kvmem-server-devices.h"
 #include "kvmem-server-env.h"
 #include "kvmem-vision.h"
-#include "kvmem-prefill-policy.h"
+#include "llama-kvmem-driver.h"
 #include "kvmem-conversation-store.h"
 #include "kvmem-session-files.h"
 #include "kvmem-session-transfer.h"
@@ -168,17 +168,6 @@ static void print_usage(const char * argv0) {
             argv0);
 }
 
-static std::vector<llama_token> tokenize_text(const llama_vocab * vocab, const std::string & text, bool add_special) {
-    const int n = -llama_tokenize(vocab, text.c_str(), (int32_t) text.size(), nullptr, 0, add_special, true);
-    std::vector<llama_token> out;
-    if (n <= 0) {
-        return out;
-    }
-    out.resize((size_t) n);
-    llama_tokenize(vocab, text.c_str(), (int32_t) text.size(), out.data(), n, add_special, true);
-    return out;
-}
-
 static std::string token_piece(const llama_vocab * vocab, llama_token id) {
     char buf[256];
     const int n = llama_token_to_piece(vocab, id, buf, sizeof(buf), 0, true);
@@ -204,205 +193,29 @@ static int force_pos_from_substr(const llama_vocab * vocab, const std::vector<ll
     return -1;
 }
 
-struct MultimodalCheckpointAccounting {
-    std::atomic<size_t> live_bytes {0};
-    std::atomic<size_t> peak_bytes {0};
-    void add(size_t bytes) {
-        const size_t live = live_bytes.fetch_add(bytes) + bytes;
-        size_t peak = peak_bytes.load();
-        while (peak < live && !peak_bytes.compare_exchange_weak(peak, live)) {}
-    }
-};
-
-struct MultimodalCheckpointData {
-    MultimodalCheckpointData() = default;
-    MultimodalCheckpointData(const MultimodalCheckpointData &) = delete;
-    MultimodalCheckpointData & operator=(const MultimodalCheckpointData &) = delete;
-    ~MultimodalCheckpointData() { if (accounting) accounting->live_bytes -= bytes(); }
-    std::vector<uint8_t> recurrent;
-    std::vector<uint8_t> draft_carry;
-    std::vector<float> tail_mean;
-    std::shared_ptr<MultimodalCheckpointAccounting> accounting;
-    size_t bytes() const { return recurrent.size() + draft_carry.size() + tail_mean.size()*sizeof(float); }
-};
-
-struct MultimodalCheckpoint {
-    int row = 0;
-    bool media_boundary = false;
-    std::shared_ptr<const MultimodalCheckpointData> data;
-};
-
-struct MultimodalQuery {
-    int begin = -1, end = -1, force = -1;
-    std::string user;
-    std::shared_ptr<kvmem_prompt> prefix;
-    std::vector<std::pair<uint32_t, std::string>> media;
-    llama_kvmem_query_state state;
-};
-
-// N host KV stores, one GPU working set, time-multiplexed
-// (--kvmem-conversations). ServerState keeps holding the ACTIVE conversation's
-// payload under the field names it already uses; kvmem_conversation holds the
-// payload of every conversation, and the active entry's payload members are
-// empty while they are on loan to ServerState. Metadata (client_id, stored) is
-// always authoritative in the entry, never in ServerState.
-//
-// conversation_swap() below is the single list of conversation-scoped fields. A
-// new one added to ServerState and forgotten there would leak state across
-// conversations, so the struct and the swap belong in view of each other.
-struct kvmem_conversation {
-    bool cold = false;
-    bool disk_gen = false, disk_query = false;
-    std::unique_ptr<kvmem_session_payload> payload; // frozen RAM/disk allocation manifest
-    std::string client_id;  // bound kvmem.conversation_id; empty = inferred
-    uint32_t stored = 0;    // llama_kvmem_store_n_tokens() at the last commit
-    std::vector<llama_token> cached_tokens;
-    std::shared_ptr<kvmem_prompt> cached_prompt;
-    std::vector<MultimodalCheckpoint> mm_checkpoints;
-    int mm_live_row = 0;
-    std::shared_ptr<const MultimodalCheckpointData> mm_live_checkpoint;
-    std::shared_ptr<const MultimodalQuery> mm_query;
-    std::vector<uint8_t> gdn_ckpt;
-    std::vector<uint8_t> gdn_carry, gdn_query_carry;
-    int gdn_ckpt_pos = -1;
-    std::vector<uint8_t> gdn_ckpt_query;
-    int gdn_ckpt_query_pos = -1;
-    int last_query_begin = -1;
-    int last_query_end = -1;
-    std::string last_user_text;
-    int last_n_gen = 0;
-};
-
-struct kvmem_conv_counts {
-    uint64_t disk_bytes = 0, disk_bytes_max = 0;
-    uint64_t spills = 0, restores = 0, disk_errors = 0;
-    int count = 1;
-    int max = 1;
-    int active = 0;
-    uint64_t bytes = 0;
-    uint64_t bytes_max = 0;
-    uint64_t extends = 0;
-    uint64_t forks = 0;
-    // Requests that planned a different conversation and stayed on the
-    // attached one. Neither an extend nor a fork: nothing was forked, parked
-    // or created.
-    uint64_t refusals = 0;
-    uint64_t resets = 0;
-    uint64_t evictions = 0;
-    uint64_t switches = 0;
-};
-
-// /slots never takes the inference lock, and kvmem_server_progress resets its
-// payload per task, so these sticky counters are published rather than read.
-class kvmem_conv_stats {
-public:
-    void publish(const kvmem_conv_counts & counts) {
-        std::lock_guard<std::mutex> lock(mu_);
-        data_ = counts;
-    }
-    kvmem_conv_counts snapshot() const {
-        std::lock_guard<std::mutex> lock(mu_);
-        return data_;
-    }
-private:
-    mutable std::mutex mu_;
-    kvmem_conv_counts data_;
-};
-
-struct ServerState {
-    std::unique_ptr<llama_kvmem_execution_state, decltype(&llama_kvmem_execution_free)> execution{
-        llama_kvmem_execution_create(), llama_kvmem_execution_free};
-    ~ServerState() {
-        kvmem_execution_scope scope(execution.get());
-        vision.reset();
-        kvmem_spec_stop(spec);
-        if (ctx) llama_free(ctx);
-    }
+struct ServerState : LlamaEngineState {
     std::mutex mu;
     kvmem_server_progress progress;
     kvmem_server_log log;
-    llama_model * model = nullptr;
-    llama_context * ctx = nullptr;
-    const llama_vocab * vocab = nullptr;
-    common_chat_templates_ptr tmpls;
-    llama_kvmem_params kparams {};
-    int n_batch = 512;
     int n_predict_default = -1;
     json sampling_overrides = json::object();
-    int query_last_fallback = 64;
-    int query_max_tokens = 512;
-    bool query_replay_auto = true;
-    bool query_policy_user = true;
-    bool recurrent_cache_valid = true; // Positions alone do not identify a conversation.
-    uint32_t turn_generation_rows = 0;
-    bool turn_query_exact = false;
     std::string model_name = "kvmem";
-    kvmem_spec_session spec;
-    ggml_type cache_type_k = GGML_TYPE_Q8_0;
-    ggml_type cache_type_v = GGML_TYPE_Q8_0;
-    ggml_type spec_cache_type = GGML_TYPE_F16;
-    bool spec_mtp = false;
-    int spec_n_max = 3;
-    float spec_p_min = 0.0f;
     bool enable_thinking_default = false;
     std::map<std::string, std::string> template_kwargs;
     int reasoning_budget_default = -1;
     std::string reasoning_budget_message;
-    std::vector<llama_token> cached_tokens;
-    std::shared_ptr<kvmem_vision> vision;
-    std::shared_ptr<kvmem_prompt> active_prompt;
-    std::shared_ptr<kvmem_prompt> cached_prompt;
-    std::vector<MultimodalCheckpoint> mm_checkpoints;
-    std::shared_ptr<MultimodalCheckpoint> mm_rollback;
-    std::shared_ptr<kvmem_prompt> mm_rollback_prompt;
-    int mm_live_row = 0;
-    std::shared_ptr<const MultimodalCheckpointData> mm_live_checkpoint;
-    kvmem_prefill_perf mm_perf;
-    std::shared_ptr<MultimodalCheckpointAccounting> mm_checkpoint_accounting = std::make_shared<MultimodalCheckpointAccounting>();
-    std::shared_ptr<const MultimodalQuery> mm_query;
-    std::shared_ptr<const MultimodalQuery> mm_pending_query;
-    bool mm_committed = true;
-    uint32_t mm_new_text = 0;
-    uint32_t mm_new_image = 0;
-    uint32_t mm_replayed = 0;
-    uint32_t mm_tail_replayed = 0;
-    int mm_lcp = 0;
-    std::string mm_error;
-    int mm_error_status = 500;
-    bool mm_reset_requested = false;
-    int perf_p_eval = 0;
-    std::vector<uint8_t> gdn_ckpt;
-    std::vector<uint8_t> gdn_carry, gdn_query_carry;
-    int gdn_ckpt_pos = -1; // gen-start (eval_end-1); next-turn suffix rewind
-    std::vector<uint8_t> gdn_ckpt_query;
-    int gdn_ckpt_query_pos = -1; // last query-begin; fallback if LCP < gen-start
-    // Last query span that actually landed query+suffix on GPU (retrieval
-    // replay or a later same-query skip). -1 = nothing to skip against.
-    int last_query_begin = -1;
-    int last_query_end = -1;
-    std::string last_user_text;
-    std::string turn_last_user;
-    int last_n_gen = 0;
-    // Multi-conversation host stores. max_stores <= 1 (the default) keeps conv
-    // empty, conv_active at -1 and every conversation_* helper an early return.
-    kvmem_store_limits conv_limits;
-    kvmem_store_table conv_table;
-    std::map<int, kvmem_conversation> conv;
-    int conv_active = -1;
-    uint64_t conv_clock = 0;
-    bool conv_budget_warned = false;
-    std::string turn_conversation_id;
-    kvmem_conv_counts conv_counts;
-    kvmem_conv_stats conv_stats;
-    std::unique_ptr<kvmem_session_files> session_files;
-    uint64_t session_generation = 0;
 };
 
-struct StreamIo {
+struct StreamIo;
+static bool stream_heartbeat(StreamIo * io);
+
+struct StreamIo : kvmem::RequestControl {
+    StreamIo() { keep_alive = [this]() { return stream_heartbeat(this); }; }
+    StreamIo(const StreamIo &) = delete;
+    StreamIo & operator=(const StreamIo &) = delete;
     httplib::DataSink * sink = nullptr;
     const httplib::Request * req = nullptr;
     std::chrono::steady_clock::time_point last_beat{};
-    bool aborted = false;
 };
 
 static bool stream_peer_gone(const StreamIo * io) {
@@ -446,1273 +259,7 @@ static bool stream_heartbeat(StreamIo * io) {
     return true;
 }
 
-static int decode_span(llama_context * ctx, const llama_token * toks, int pos0, int pos1, int n_batch,
-                       const char * what, StreamIo * io = nullptr);
-static int decode_span_maybe_spec(ServerState & st, const llama_token * toks, int pos0, int pos1,
-                                  const char * what, StreamIo * io = nullptr);
-static void multimodal_commit(ServerState & st, const std::vector<llama_token> & gen);
-
-static bool gdn_sync_to(ServerState & st, const std::vector<llama_token> & prompt, int n_past,
-                        StreamIo * io = nullptr) {
-    if (!llama_kvmem_has_recurrent()) {
-        return true;
-    }
-    const llama_pos want = n_past - 1;
-    llama_pos rmax = llama_kvmem_recr_pos_max();
-    std::vector<uint8_t> carry;
-    llama_pos draft_rows = n_past;
-    if (st.spec.ok) {
-        common_speculative_get_state(st.spec.spec, 0, carry);
-        if (carry.size() >= sizeof(draft_rows)) std::memcpy(&draft_rows, carry.data(), sizeof(draft_rows));
-    }
-    if (st.recurrent_cache_valid && rmax == want && draft_rows == n_past) return true;
-    const std::vector<uint8_t> * saved_carry = nullptr;
-    const uint8_t * blob = nullptr;
-    size_t blob_n = 0;
-    int ckpt_pos = -1;
-    auto consider = [&](const std::vector<uint8_t> & buf, int pos, const std::vector<uint8_t> & saved) {
-        if (buf.empty() || pos < 0 || pos > want) {
-            return;
-        }
-        if (pos >= ckpt_pos) {
-            blob = buf.data();
-            blob_n = buf.size();
-            ckpt_pos = pos;
-            saved_carry = &saved;
-        }
-    };
-    consider(st.gdn_ckpt, st.gdn_ckpt_pos, st.gdn_carry);
-    consider(st.gdn_ckpt_query, st.gdn_ckpt_query_pos, st.gdn_query_carry);
-    if (blob == nullptr) {
-        fprintf(stderr, "KVMEM_TRACE gdn_sync fail rmax=%d want=%d ckpt_pos=%d query_pos=%d\n",
-                (int) rmax, (int) want, st.gdn_ckpt_pos, st.gdn_ckpt_query_pos);
-        return false;
-    }
-    const llama_state_seq_flags fl = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-    if (llama_state_seq_set_data_ext(st.ctx, blob, blob_n, 0, fl) != blob_n) {
-        fprintf(stderr, "GDN catch-up restore failed\n");
-        return false;
-    }
-    const int from = ckpt_pos + 1;
-    if (st.spec.ok) {
-        if (!saved_carry || saved_carry->empty()) return false;
-        common_speculative_set_state(st.spec.spec, 0, *saved_carry);
-        if (!llama_kvmem_remove_logical(st.spec.ctx_dft, from, -1)) return false;
-    }
-    if (from < n_past) {
-        llama_kvmem_set_replay(true);
-        const int rc = decode_span_maybe_spec(st, prompt.data(), from, n_past, "gdn-catchup", io);
-        llama_kvmem_set_replay(false);
-        if (rc == KVMEM_DECODE_ABORT) {
-            if (io) {
-                io->aborted = true;
-            }
-            return false;
-        }
-        if (rc != 0) {
-            return false;
-        }
-    }
-    rmax = llama_kvmem_recr_pos_max();
-    kvmem_diag("KVMEM_TRACE gdn_sync ckpt_pos=%d from=%d n_past=%d rmax=%d\n",
-            ckpt_pos, from, n_past, (int) rmax);
-    st.recurrent_cache_valid = rmax == want;
-    return st.recurrent_cache_valid;
-}
-
-static int common_token_prefix(const std::vector<llama_token> & a,
-                               const std::vector<llama_token> & b) {
-    const int n = (int) std::min(a.size(), b.size());
-    int i = 0;
-    while (i < n && a[(size_t) i] == b[(size_t) i]) {
-        i++;
-    }
-    return i;
-}
-
-// Exchange the active conversation's payload with `conv`. Called twice per
-// switch: once to park the outgoing conversation, once to install the incoming
-// one. Swapping is an involution, so calling it twice on the same entry undoes
-// it, which is how a refused switch is rolled back.
-static void conversation_swap(ServerState & st, kvmem_conversation & conv) {
-    st.cached_tokens.swap(conv.cached_tokens);
-    st.cached_prompt.swap(conv.cached_prompt);
-    st.mm_checkpoints.swap(conv.mm_checkpoints);
-    std::swap(st.mm_live_row, conv.mm_live_row);
-    st.mm_live_checkpoint.swap(conv.mm_live_checkpoint);
-    st.mm_query.swap(conv.mm_query);
-    st.gdn_ckpt.swap(conv.gdn_ckpt);
-    st.gdn_carry.swap(conv.gdn_carry);
-    st.gdn_query_carry.swap(conv.gdn_query_carry);
-    std::swap(st.gdn_ckpt_pos, conv.gdn_ckpt_pos);
-    st.gdn_ckpt_query.swap(conv.gdn_ckpt_query);
-    std::swap(st.gdn_ckpt_query_pos, conv.gdn_ckpt_query_pos);
-    std::swap(st.last_query_begin, conv.last_query_begin);
-    std::swap(st.last_query_end, conv.last_query_end);
-    st.last_user_text.swap(conv.last_user_text);
-    std::swap(st.last_n_gen, conv.last_n_gen);
-    st.recurrent_cache_valid = false;
-}
-
-// Accounted host bytes of one conversation: the adapter's raw K/V store plus
-// the server-side recurrent checkpoints and token history. RawKvStore walks
-// blocks times layers under its own mutex, so this runs once per request, at
-// the commit, and once more for an eviction's trace line. Selection reads the
-// figure the last commit stored in the table instead of recomputing it.
-static uint64_t conversation_bytes(const ServerState & st, int id) {
-    const kvmem_store_table::entry * held = st.conv_table.find(id);
-    if (!held) {
-        return 0;
-    }
-    uint64_t bytes = st.kparams.enabled ? llama_kvmem_store_bytes(held->store_id) : 0;
-    const auto entry = st.conv.find(id);
-    if (entry == st.conv.end()) {
-        return bytes;
-    }
-    const bool active = id == st.conv_active;
-    const auto & checkpoints = active ? st.mm_checkpoints : entry->second.mm_checkpoints;
-    std::set<const MultimodalCheckpointData *> unique;
-    for (const auto & checkpoint : checkpoints) {
-        if (checkpoint.data && unique.insert(checkpoint.data.get()).second) {
-            bytes += checkpoint.data->bytes();
-        }
-    }
-    const auto & live = active ? st.mm_live_checkpoint : entry->second.mm_live_checkpoint;
-    if (live && unique.insert(live.get()).second) bytes += live->bytes();
-    const auto & tokens = active ? st.cached_tokens : entry->second.cached_tokens;
-    bytes += (uint64_t) tokens.capacity() * sizeof(llama_token);
-    const auto & conv = entry->second;
-    bytes += sizeof(kvmem_conversation) + conv.client_id.capacity();
-    if (conv.payload) bytes += conv.payload->metadata_bytes();
-    bytes += (active ? st.gdn_ckpt : conv.gdn_ckpt).capacity();
-    bytes += (active ? st.gdn_carry : conv.gdn_carry).capacity();
-    bytes += (active ? st.gdn_query_carry : conv.gdn_query_carry).capacity();
-    bytes += (active ? st.gdn_ckpt_query : conv.gdn_ckpt_query).capacity();
-    bytes += (active ? st.last_user_text : conv.last_user_text).capacity();
-    bytes += checkpoints.capacity()*sizeof(MultimodalCheckpoint);
-    const auto & prompt = active ? st.cached_prompt : conv.cached_prompt;
-    if (prompt) bytes += prompt->index_bytes();
-    const auto & query = active ? st.mm_query : conv.mm_query;
-    if (query) {
-        bytes += sizeof(MultimodalQuery) + query->user.capacity() + query->state.count.capacity()*sizeof(uint32_t);
-        bytes += query->state.sum.capacity()*sizeof(std::vector<float>);
-        for (const auto & sum : query->state.sum) bytes += sum.capacity()*sizeof(float);
-        if (query->prefix && query->prefix != prompt) bytes += query->prefix->index_bytes();
-        for (const auto & media : query->media) bytes += sizeof(media) + media.second.capacity();
-    }
-    return bytes;
-}
-
-// Describe one live conversation for the selection policy, reading that
-// conversation's own payload: ServerState's fields when it is the attached one,
-// the parked entry otherwise.
-static kvmem_store_match conversation_match(const ServerState & st, int id, const kvmem_prompt & prompt) {
-    kvmem_store_match match;
-    match.id = id;
-    const kvmem_store_table::entry * held = st.conv_table.find(id);
-    const auto entry = st.conv.find(id);
-    if (!held || entry == st.conv.end()) {
-        return match;
-    }
-    const kvmem_conversation & conv = entry->second;
-    if (conv.payload && conv.payload->invalid) return match;
-    const bool active = id == st.conv_active;
-    match.used = held->used;
-    // The accounted figure from that conversation's last commit, not a fresh
-    // walk: llama_kvmem_store_bytes takes the store mutex and walks blocks
-    // times layers, and this runs once per live store on the prefill latency
-    // path. Only the attached conversation's footprint can have moved since,
-    // and conversation_commit refreshes exactly that one.
-    match.bytes = held->bytes;
-    match.client_id = conv.client_id;
-    match.rows = (int) (active ? st.cached_tokens.size() : conv.cached_tokens.size());
-    match.last_n_gen = active ? st.last_n_gen : conv.last_n_gen;
-    if (st.vision || st.query_policy_user) {
-        // Default path: the media-aware prefix and the recurrent checkpoint
-        // rows run_prefill_multimodal would use (kvmem-multimodal-server.h:242-256).
-        const auto & cached = active ? st.cached_prompt : conv.cached_prompt;
-        match.lcp = cached ? (int) prompt.common_prefix(*cached) : 0;
-        match.live_row = active ? st.mm_live_row : conv.mm_live_row;
-        for (const auto & checkpoint : (active ? st.mm_checkpoints : conv.mm_checkpoints)) {
-            match.ckpt_rows.push_back(checkpoint.row);
-        }
-    } else {
-        // Legacy path: the token prefix, gated by the rows the store actually
-        // holds and by a GDN snapshot at or before the match point, which is
-        // gdn_sync_to's consider() pair.
-        const auto & cached = active ? st.cached_tokens : conv.cached_tokens;
-        match.lcp = common_token_prefix(cached, prompt.tokens);
-        const uint32_t stored = active
-                ? (st.kparams.enabled ? llama_kvmem_store_n_tokens() : (uint32_t) st.cached_tokens.size())
-                : conv.stored;
-        match.live_row = (int) stored;
-        if (!llama_kvmem_has_recurrent()) {
-            match.ckpt_rows.push_back(match.lcp);
-        } else {
-            const int gen_start = active ? st.gdn_ckpt_pos : conv.gdn_ckpt_pos;
-            const int query = active ? st.gdn_ckpt_query_pos : conv.gdn_ckpt_query_pos;
-            const bool have_gen = !(active ? st.gdn_ckpt : conv.gdn_ckpt).empty() || (!active && conv.cold && conv.disk_gen);
-            const bool have_query = !(active ? st.gdn_ckpt_query : conv.gdn_ckpt_query).empty() || (!active && conv.cold && conv.disk_query);
-            if (gen_start >= 0 && have_gen) {
-                match.ckpt_rows.push_back(gen_start + 1);
-            }
-            if (query >= 0 && have_query) {
-                match.ckpt_rows.push_back(query + 1);
-            }
-        }
-    }
-    return match;
-}
-
-// Least recently used conversation that is not the attached one.
-static int conversation_lru_victim(const ServerState & st) {
-    for (int id : st.conv_table.lru_order()) {
-        if (id != st.conv_active) {
-            return id;
-        }
-    }
-    return -1;
-}
-
-// Frees one parked conversation and reports whether it actually went. Never
-// the attached one: llama_memory_clear reaches the attached host store, so an
-// inactive store is released through the adapter handle instead, and a table
-// row dropped without that release would leave a host store nothing can reach.
-static bool conversation_evict(ServerState & st, int id, const char * reason) {
-    if (id == st.conv_active) {
-        return false;
-    }
-    const kvmem_store_table::entry * held = st.conv_table.find(id);
-    if (!held) {
-        return false;
-    }
-    const uint32_t rows = st.kparams.enabled ? llama_kvmem_store_rows(held->store_id) : 0;
-    const uint64_t bytes = conversation_bytes(st, id);
-    const int32_t store_id = held->store_id;
-    // Partial deletion must never leave a selectable cache with missing KV.
-    if (st.conv.at(id).payload) st.conv.at(id).payload->invalid = true;
-    if (st.session_files && !st.session_files->erase(id)) {
-        ++st.conv_counts.disk_errors;
-        LOG_WRN("srv    KVMEM cannot remove session file id=%d; retaining quota charge\n", id);
-        return false;
-    }
-    if (st.kparams.enabled && !llama_kvmem_store_destroy(store_id)) {
-        // Dropping the row anyway would leave the bundle in the adapter's pool
-        // with nothing naming it: one runtime with its pinned arena and two
-        // host mirrors, leaked for the life of the process. Report the refusal
-        // so the caller's skip path runs.
-        LOG_WRN("srv    KVMEM conv=%d store=%d refused destroy; row kept\n", id, (int) store_id);
-        return false;
-    }
-    st.conv_table.erase(id);
-    st.conv.erase(id);
-    ++st.conv_counts.evictions;
-    kvmem_diag("KVMEM_TRACE store_evict id=%d rows=%u bytes=%llu reason=%s\n",
-            id, rows, (unsigned long long) bytes, reason);
-    return true;
-}
-
-// Drop a parked conversation's payload, keeping only its identity. The store
-// it described no longer holds those rows, so the next request that selects it
-// must take an ordinary cache miss rather than resume a checkpoint against KV
-// that was never restored. Assigning a default entry is deliberate: it keeps
-// this complete as kvmem_conversation grows.
-static void conversation_drop_payload(kvmem_conversation & conv) {
-    kvmem_conversation kept;
-    kept.client_id = conv.client_id;
-    conv = std::move(kept);
-}
-
-static void conversation_publish(ServerState & st) {
-    if (st.conv_limits.max_stores <= 1) {
-        return;
-    }
-    st.conv_counts.count = st.conv_table.count();
-    st.conv_counts.max = st.conv_limits.max_stores;
-    st.conv_counts.active = st.conv_active;
-    st.conv_counts.bytes = st.conv_table.bytes_total();
-    st.conv_counts.bytes_max = st.conv_limits.max_bytes;
-    if (st.session_files) {
-        st.conv_counts.disk_bytes = st.session_files->bytes();
-        st.conv_counts.disk_bytes_max = st.session_files->limit();
-    }
-    st.conv_stats.publish(st.conv_counts);
-}
-
-static void memory_clear_all(ServerState & st);
-#include "kvmem-session-cache.h"
-
-// Runs when the conversation's footprint is final for the committed turn.
-static void conversation_enforce_budget(ServerState & st) {
-    if (st.conv_limits.max_stores <= 1) {
-        return;
-    }
-    if (st.session_files) {
-        session_make_room(st, st.conv_active);
-        return;
-    }
-    while (st.conv_table.count() > st.conv_limits.max_stores) {
-        const int victim = conversation_lru_victim(st);
-        if (victim < 0 || !conversation_evict(st, victim, "lru")) {
-            break;
-        }
-    }
-    while (st.conv_limits.max_bytes != 0 && st.conv_table.bytes_total() > st.conv_limits.max_bytes) {
-        const int victim = conversation_lru_victim(st);
-        if (victim < 0) {
-            // The attached conversation alone exceeds the cap. Report it and
-            // serve the request: that reproduces today's uncapped single-store
-            // behavior instead of failing a request the server would serve.
-            if (!st.conv_budget_warned) {
-                st.conv_budget_warned = true;
-                LOG_WRN("srv    KVMEM one conversation exceeds --kvmem-conversations-gb (bytes=%llu cap=%llu); nothing evicted\n",
-                        (unsigned long long) st.conv_table.bytes_total(),
-                        (unsigned long long) st.conv_limits.max_bytes);
-            }
-            break;
-        }
-        if (!conversation_evict(st, victim, "bytes")) {
-            break;
-        }
-    }
-}
-
-static void conversation_commit(ServerState & st, uint32_t stored) {
-    if (st.conv_limits.max_stores <= 1) {
-        return;
-    }
-    const auto entry = st.conv.find(st.conv_active);
-    if (entry == st.conv.end()) {
-        return;
-    }
-    if (st.session_files) {
-        if (st.cached_prompt && st.cached_prompt->has_media()) st.cached_prompt = st.cached_prompt->cache_index();
-        if (st.mm_query && st.mm_query->prefix && st.mm_query->prefix->has_media()) {
-            auto query = std::make_shared<MultimodalQuery>(*st.mm_query);
-            query->prefix = query->prefix->cache_index(); st.mm_query = std::move(query);
-        }
-    }
-    entry->second.stored = stored;
-    if (!st.turn_conversation_id.empty()) {
-        // One id names one conversation: a client that reuses an id after its
-        // own context was compacted must not leave two stores answering to it.
-        for (auto & other : st.conv) {
-            if (other.first != st.conv_active && other.second.client_id == st.turn_conversation_id) {
-                other.second.client_id.clear();
-            }
-        }
-        entry->second.client_id = st.turn_conversation_id;
-    }
-    st.conv_table.touch(st.conv_active, ++st.conv_clock);
-    st.conv_table.set_bytes(st.conv_active, conversation_bytes(st, st.conv_active));
-    conversation_enforce_budget(st);
-    conversation_publish(st);
-}
-
-static void memory_clear_all(ServerState & st) {
-    llama_memory_t mem = llama_get_memory(st.ctx);
-    if (mem) {
-        llama_memory_clear(mem, true);
-    }
-    if (st.spec.ctx_dft) {
-        llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
-        if (md) {
-            llama_memory_clear(md, true);
-        }
-    }
-    st.cached_tokens.clear();
-    st.cached_prompt.reset();
-    st.mm_checkpoints.clear();
-    st.mm_live_row = 0;
-    st.mm_live_checkpoint.reset();
-    st.mm_query.reset();
-    st.mm_pending_query.reset();
-    st.gdn_ckpt.clear();
-    st.gdn_carry.clear();
-    st.gdn_query_carry.clear();
-    if (st.spec.ok) {
-        std::vector<uint8_t> carry;
-        common_speculative_get_state(st.spec.spec, 0, carry);
-        std::fill(carry.begin(), carry.end(), 0);
-        common_speculative_set_state(st.spec.spec, 0, carry);
-    }
-    st.gdn_ckpt_pos = -1;
-    st.gdn_ckpt_query.clear();
-    st.gdn_ckpt_query_pos = -1;
-    st.last_query_begin = -1;
-    st.last_query_end = -1;
-    st.last_user_text.clear();
-    st.last_n_gen = 0;
-    st.recurrent_cache_valid = true;
-    // Clears the attached conversation only: llama_memory_clear reaches the
-    // host store that is bound right now, and every st.* field above is that
-    // conversation's payload.
-    if (!st.conv.empty()) {
-        const auto entry = st.conv.find(st.conv_active);
-        if (entry != st.conv.end()) {
-            entry->second.stored = 0;
-        }
-        ++st.conv_counts.resets;
-    }
-}
-
-// Pick the conversation this request continues and attach its host store.
-// Called once per request, under the inference lock, after the prompt is
-// parsed and validated and before anything reads or writes KVMem state.
-//
-// With --kvmem-conversations absent this returns before touching anything:
-// no table, no bookkeeping, no store switch, no policy, no trace. Default
-// behavior is then identical by construction rather than by argument.
-static void conversation_begin_request(ServerState & st, const kvmem_prompt & prompt,
-                                       const std::string & client_id) {
-    if (st.conv_limits.max_stores <= 1) {
-        return;
-    }
-    if (st.conv.find(st.conv_active) == st.conv.end()) {
-        return; // never armed, or arming failed at startup
-    }
-    const int eval_end = (int) prompt.tokens.size() - (st.spec.ok ? 1 : 0);
-    std::vector<kvmem_store_match> matches;
-    matches.reserve(st.conv_table.entries().size());
-    for (const auto & held : st.conv_table.entries()) {
-        matches.push_back(conversation_match(st, held.id, prompt));
-    }
-    // cache_reset is deliberately not a separate action: the policy still maps
-    // the request to a conversation, and the fork path below clears that one
-    // store. One client resetting its own history must not wipe another
-    // client's store.
-    kvmem_store_limits limits = st.conv_limits;
-    limits.attached = st.conv_active;
-    const kvmem_store_plan plan = kvmem_store_select(matches, eval_end, st.spec.ok,
-            client_id, limits);
-    const bool allocating = plan.action == kvmem_store_action::fresh && plan.id < 0;
-    // Two of the conditions the switch needs are already knowable: the
-    // previous request's rows must be committed, and conv_active must name the
-    // store the adapter actually has attached. Check them before the plan is
-    // executed, because a refusal after the fact would have destroyed an LRU
-    // victim and created a store for a conversation the request then does not
-    // move to. resolve() is pure and plan.evict never names plan.id, so asking
-    // it here gives the same answer it gives below.
-    const kvmem_store_table::entry * attached = st.conv_table.find(st.conv_active);
-    const int32_t attached_store = attached ? attached->store_id : -1;
-    const bool would_switch = allocating || st.conv_table.resolve(plan) != st.conv_active;
-    const bool refused = would_switch &&
-            (!st.mm_committed || attached_store != llama_kvmem_store_current());
-    if (refused) {
-        LOG_WRN("srv    KVMEM store switch refused action=%s conv=%d committed=%d parked=%d active=%d\n",
-                kvmem_store_action_name(plan.action), st.conv_table.resolve(plan),
-                (int) st.mm_committed, (int) attached_store, (int) llama_kvmem_store_current());
-    }
-    if (!refused) {
-        const int room = (int) matches.size() - st.conv_limits.max_stores + (allocating ? 1 : 0);
-        int evicted = 0;
-        for (int id : plan.evict) {
-            if (!conversation_evict(st, id, evicted < room ? "lru" : "bytes")) {
-                // The policy excludes both the target and the attached store, so
-                // this is unreachable. Never fall back to dropping the row: the
-                // adapter handle would survive with nothing naming it.
-                LOG_WRN("srv    KVMEM eviction plan named conv=%d, which cannot be released; skipped\n", id);
-                continue;
-            }
-            ++evicted;
-        }
-    }
-    // Eviction is executed above, one entry at a time, so resolve() only names
-    // the target and rejects a stale id from an earlier plan. A refused plan
-    // stays on the attached conversation and neither evicts nor allocates; the
-    // caps it declined to enforce are enforced again at the next turn that
-    // commits. That is not necessarily this one: conversation_commit() runs
-    // only from commit_cached(), so a turn that fails after the mapping never
-    // re-measures, and the byte overage stays until some later turn commits.
-    int target = refused ? st.conv_active : st.conv_table.resolve(plan);
-    // Every way this request can end up on the attached conversation after
-    // planning another one. None of them forks, parks or creates anything, so
-    // none of them may be counted as a fork.
-    bool fell_back = refused;
-    bool force_reset = false;
-    if (!refused && allocating) {
-        const int32_t store_id = llama_kvmem_store_create();
-        if (store_id >= 0) {
-            target = st.conv_table.add(store_id);
-            st.conv.emplace(target, kvmem_conversation{});
-        } else {
-            // No further host store available. Reuse the least recently used
-            // one, cleared below once the switch has actually attached it.
-            target = conversation_lru_victim(st);
-            force_reset = target >= 0;
-        }
-    }
-    if (target < 0 || st.conv.find(target) == st.conv.end()) {
-        target = st.conv_active; // stale plan id: fall back to today's path
-        force_reset = false;
-        fell_back = true;
-    }
-    bool switched = false;
-    bool restaged = false;
-    if (target != st.conv_active) {
-        const int parked_id = st.conv_active;
-        const kvmem_store_table::entry * parked = st.conv_table.find(parked_id);
-        const int32_t parked_store = parked ? parked->store_id : -1;
-        const kvmem_store_table::entry * held = st.conv_table.find(target);
-        const auto outgoing = st.conv.find(parked_id);
-        const auto incoming = st.conv.find(target);
-        // st.mm_committed and the conv_active/adapter-active agreement were
-        // checked above, before the plan was executed, and nothing since can
-        // have changed the adapter's active store: store_create appends and
-        // store_destroy refuses the active id. What is left to check is a
-        // table entry or a payload row this switch needs and cannot find. On
-        // any of those the switch would report success without moving anything
-        // (llama_kvmem_store_switch short-circuits a switch to the active
-        // store) and both failure detectors below would read clean while this
-        // conversation decoded against another one's KV.
-        if (!held || outgoing == st.conv.end() || incoming == st.conv.end()) {
-            // A handle the adapter does not know, or a row the table and the
-            // payload map disagree about. Stay where we are rather than switch
-            // on ambiguous state.
-            LOG_WRN("srv    KVMEM store switch refused conv=%d held=%d outgoing=%d incoming=%d\n",
-                    target, (int) (held != nullptr), (int) (outgoing != st.conv.end()),
-                    (int) (incoming != st.conv.end()));
-            target = st.conv_active;
-            force_reset = false;
-            fell_back = true;
-        } else {
-            conversation_swap(st, outgoing->second);
-            restaged = llama_kvmem_store_switch(held->store_id);
-            if (llama_kvmem_store_current() == held->store_id) {
-                conversation_swap(st, incoming->second);
-                st.conv_active = target;
-                // The context's recurrent state still belongs to the previous
-                // conversation, so multimodal_restore's live short-circuit
-                // must not skip the restore (kvmem-multimodal-server.h:84).
-                st.mm_live_checkpoint.reset();
-                switched = true;
-                ++st.conv_counts.switches;
-                if (!restaged && (st.mm_live_row > 0 || !st.cached_tokens.empty())) {
-                    // Attached but holding no rows: either this store was
-                    // already empty or the adapter could not rebuild its
-                    // working set from host RAM. The payload would claim rows
-                    // the KV no longer has, so drop it and let prefill take
-                    // its ordinary cache-miss path.
-                    kvmem_diag("KVMEM_TRACE store_stale id=%d rows=%d reason=working_set_not_rebuilt\n",
-                            target, st.mm_live_row);
-                    memory_clear_all(st);
-                    force_reset = false; // already empty, and resets count once
-                }
-                // The switch clears the outgoing store when the adapter cannot
-                // drain it safely, and the bool above describes the incoming
-                // store only. Cross-check what the parked handle still holds
-                // instead of trusting it: a payload claiming rows its store no
-                // longer has would resume a checkpoint against KV that was
-                // never restored, and nothing later reconciles the two.
-                if (parked_store >= 0 && llama_kvmem_store_rows(parked_store) == 0 &&
-                    !outgoing->second.cached_tokens.empty()) {
-                    kvmem_diag("KVMEM_TRACE store_wiped id=%d rows=%d reason=outgoing_not_drainable\n",
-                            parked_id, (int) outgoing->second.cached_tokens.size());
-                    conversation_drop_payload(outgoing->second);
-                }
-            } else {
-                // Nothing moved. Put the previous conversation back and let
-                // prefill decide against it, as a single-store server would.
-                conversation_swap(st, outgoing->second);
-                LOG_WRN("srv    KVMEM store switch failed conv=%d store=%d\n",
-                        target, (int) held->store_id);
-                // The same cross-check the success branch runs, for the same
-                // reason: swap_conv() clears the outgoing store before the
-                // attach whenever it cannot be drained, so a throw out of the
-                // attach leaves this branch restoring a payload that claims
-                // rows the store no longer has. The outgoing conversation is
-                // the attached one again here, so its payload lives in st.*.
-                if (parked_store >= 0 && llama_kvmem_store_rows(parked_store) == 0 &&
-                    !st.cached_tokens.empty()) {
-                    kvmem_diag("KVMEM_TRACE store_wiped id=%d rows=%d reason=switch_failed\n",
-                            parked_id, (int) st.cached_tokens.size());
-                    memory_clear_all(st);
-                }
-                target = st.conv_active;
-                force_reset = false;
-                fell_back = true;
-            }
-        }
-    }
-    if (force_reset) {
-        // Clear the reused store here rather than through
-        // st.mm_reset_requested: only run_prefill_multimodal consumes that
-        // flag, so on the legacy retrieval path it would never be read and the
-        // prefill would extend a live conversation's rows with an unrelated
-        // prompt, truncating its tail with no eviction accounting. This
-        // clears the attached store and its payload and counts the reset.
-        kvmem_diag("KVMEM_TRACE store_reuse id=%d reason=no_store_available\n", target);
-        memory_clear_all(st);
-    }
-    st.conv_table.touch(target, ++st.conv_clock);
-    if (fell_back) {
-        ++st.conv_counts.refusals;
-    } else if (plan.action == kvmem_store_action::extend && target == plan.id) {
-        ++st.conv_counts.extends;
-    } else {
-        ++st.conv_counts.forks;
-    }
-    conversation_publish(st);
-    kvmem_diag("KVMEM_TRACE store_select action=%s id=%d lcp=%d keep=%d stores=%zu "
-            "bytes=%llu reason=%s switched=%d restaged=%d\n",
-            kvmem_store_action_name(plan.action), target, plan.lcp, plan.keep,
-            st.conv_table.entries().size(), (unsigned long long) st.conv_table.bytes_total(),
-            plan.reason, (int) switched, (int) restaged);
-}
-
-// Persist GDN after a successful prefill (eval_end-1) for the next turn's
-// suffix rewind. Intra-turn query rewind uses a local snapshot, not this slot.
-static void persist_gdn_ckpt_gen_start(ServerState & st, int eval_end) {
-    if (!st.ctx || eval_end <= 0 || !llama_kvmem_has_recurrent()) {
-        return;
-    }
-    llama_synchronize(st.ctx);
-    const llama_state_seq_flags fl = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-    const size_t sz = llama_state_seq_get_size_ext(st.ctx, 0, fl);
-    if (sz == 0) {
-        kvmem_diag("KVMEM_TRACE gdn_ckpt gen_start skipped size=0 eval_end=%d\n", eval_end);
-        return;
-    }
-    std::vector<uint8_t> buf(sz);
-    if (llama_state_seq_get_data_ext(st.ctx, buf.data(), sz, 0, fl) != sz) {
-        fprintf(stderr, "KVMEM_TRACE gdn_ckpt gen_start copy failed eval_end=%d\n", eval_end);
-        return;
-    }
-    st.gdn_ckpt.swap(buf);
-    if (st.spec.ok) common_speculative_get_state(st.spec.spec, 0, st.gdn_carry);
-    st.gdn_ckpt_pos = eval_end - 1;
-    kvmem_diag("KVMEM_TRACE gdn_ckpt pos_end=%d bytes=%zu ckpt_pos=%d what=gen_start\n",
-            eval_end, sz, st.gdn_ckpt_pos);
-}
-
-static void commit_cached(ServerState & st, const std::vector<llama_token> & prompt,
-                          const std::vector<llama_token> & gen) {
-    st.cached_tokens = prompt;
-    st.cached_tokens.insert(st.cached_tokens.end(), gen.begin(), gen.end());
-    st.last_n_gen = (int) gen.size();
-    if (st.vision || st.query_policy_user) multimodal_commit(st, gen);
-    else st.cached_prompt = st.active_prompt->with_generated(gen);
-    const uint32_t stored = llama_kvmem_store_n_tokens();
-    conversation_commit(st, stored);
-    kvmem_diag("KVMEM_TRACE cache_commit n_prompt=%d n_gen=%d n_cached=%d stored=%u\n",
-            (int) prompt.size(), (int) gen.size(), (int) st.cached_tokens.size(),
-            stored);
-}
-
-static int decode_span(llama_context * ctx, const llama_token * toks, int pos0, int pos1, int n_batch,
-                       const char * what, StreamIo * io) {
-    if (pos0 >= pos1) {
-        return 0;
-    }
-    if (n_batch <= 0) {
-        n_batch = 512;
-    }
-    // Explicit pos: T5 query sits in the middle of the prompt (last user, then
-    // assistant tool XML + role=tool). llama_batch_get_one would append at
-    // seq_pos_max+1 and miss the hole after seq_rm(q0,q1).
-    llama_batch batch = llama_batch_init(n_batch, 0, 1);
-    int n_pos = pos0;
-    while (n_pos < pos1) {
-        if (!stream_heartbeat(io)) {
-            kvmem_diag("KVMEM_TRACE stream_abort phase=prefill pos=%d what=%s\n",
-                    n_pos, what ? what : "");
-            llama_batch_free(batch);
-            return KVMEM_DECODE_ABORT;
-        }
-        const int n = std::min(n_batch, pos1 - n_pos);
-        common_batch_clear(batch);
-        for (int i = 0; i < n; ++i) {
-            common_batch_add(batch, toks[n_pos + i], n_pos + i, { 0 }, i == n - 1);
-        }
-        const int rc = llama_decode(ctx, batch);
-        if (rc != 0) {
-            fprintf(stderr, "llama_decode(%s) failed rc=%d at pos=%d n=%d\n", what, rc, n_pos, n);
-            llama_batch_free(batch);
-            return rc;
-        }
-        n_pos += n;
-    }
-    llama_batch_free(batch);
-    return 0;
-}
-
-static int decode_span_maybe_spec(ServerState & st, const llama_token * toks, int pos0, int pos1,
-                                 const char * what, StreamIo * io) {
-    if (st.spec.ok) {
-        auto abort_fn = [io]() { return !stream_heartbeat(io); };
-        return kvmem_spec_decode_span(st.ctx, st.spec.spec, toks, pos0, pos1, st.n_batch, what, abort_fn);
-    }
-    return decode_span(st.ctx, toks, pos0, pos1, st.n_batch, what, io);
-}
-
-#include "kvmem-multimodal-server.h"
 #include "kvmem-lane-conversations.h"
-
-static bool run_prefill_retrieval(ServerState & st, const std::vector<llama_token> & prompt,
-                                 StreamIo * io = nullptr, int * n_cache_hit = nullptr) {
-    if (st.vision || st.query_policy_user) return run_prefill_multimodal(st, io, n_cache_hit);
-    if (!stream_heartbeat(io)) {
-        kvmem_diag("KVMEM_TRACE stream_abort phase=prefill_start n_prompt=%d\n",
-                (int) prompt.size());
-        return false;
-    }
-    const int n_prompt = (int) prompt.size();
-    llama_context * ctx = st.ctx;
-    const int eval_end = st.spec.ok ? n_prompt - 1 : n_prompt;
-
-    const bool do_retr = st.kparams.enabled && st.kparams.method == 1 && st.kparams.query_begin > 0;
-    int q0 = st.kparams.query_begin;
-    int q1 = st.kparams.query_end;
-    if (q0 < 0) {
-        q0 = 0;
-    }
-    if (q1 <= q0 || q1 > eval_end) {
-        q1 = eval_end;
-    }
-    const bool replay_fits = llama_kvmem_query_replay_fits(
-            (uint32_t) std::max(q0, 0), (uint32_t) std::max(eval_end, 0));
-
-    int n_past = 0;
-    bool reused = false;
-    uint32_t stored = st.kparams.enabled ? llama_kvmem_store_n_tokens()
-                                         : (uint32_t) st.cached_tokens.size();
-    if (!st.cached_tokens.empty() && n_prompt > 1) {
-        const int lcp = common_token_prefix(st.cached_tokens, prompt);
-        kvmem_diag("KVMEM_TRACE prefix_try lcp=%d n_cached=%d stored=%u n_prompt=%d\n",
-                lcp, (int) st.cached_tokens.size(), stored, n_prompt);
-        reused = lcp > 0 && lcp < n_prompt && stored >= (uint32_t) lcp;
-        if (reused) {
-            n_past = lcp;
-        }
-    }
-
-    llama_pos kv_smax = -1;
-    if (llama_memory_t mem = llama_get_memory(ctx)) {
-        kv_smax = llama_memory_seq_pos_max(mem, 0);
-    }
-    const llama_pos gdn_rmax = llama_kvmem_has_recurrent()
-            ? llama_kvmem_recr_pos_max()
-            : (n_past > 0 ? (llama_pos) (n_past - 1) : (llama_pos) -1);
-    const bool same_query = !st.last_user_text.empty() &&
-            st.last_user_text == st.turn_last_user;
-    const bool gdn_at_tip = !llama_kvmem_has_recurrent() ||
-            (st.recurrent_cache_valid && n_past > 0 && gdn_rmax == (llama_pos) (n_past - 1));
-    const bool kv_at_tip = n_past > 0 && kv_smax >= (llama_pos) (n_past - 1);
-    // Same last-user: keep the GPU window and only prefill the new tail.
-    // Suffix after query is recency (recent_tokens), not skip-gated.
-    // New user / miss / GDN not at tip / no gen slots → full retrieval.
-    const int n_cached = (int) st.cached_tokens.size();
-    // Continuation: LCP covers the previous cache except last gen (thinking
-    // stripped / re-templated). +64 is a few prompt-side template tokens.
-    // Compact leaves LCP far short of n_cached.
-    const uint32_t suffix_slack = (uint32_t) std::max(0, st.last_n_gen) + 64u;
-    const bool suffix_cont = reused
-            && (uint32_t) (n_cached - n_past) <= suffix_slack;
-    if (reused && !suffix_cont) {
-        kvmem_diag("KVMEM_TRACE prefix_rewrite drop_reuse=1 n_past=%d n_cached=%d "
-                "n_prompt=%d last_n_gen=%d slack=%u same_query=%d\n",
-                n_past, n_cached, n_prompt, st.last_n_gen, suffix_slack,
-                (int) same_query);
-        memory_clear_all(st);
-        n_past = 0;
-        reused = false;
-    }
-    const uint32_t n_new_tok = (uint32_t) std::max(0, eval_end - n_past);
-    const uint32_t bt = std::max(1u, st.kparams.block_tokens);
-    const uint32_t need_slots = n_new_tok == 0 ? 0u : (n_new_tok + bt - 1) / bt;
-    const uint32_t free_slots = llama_kvmem_free_slots();
-    bool past_query = n_past > q1;
-    bool warm_skip = do_retr && reused && suffix_cont && same_query && past_query &&
-            gdn_at_tip && kv_at_tip && free_slots >= need_slots;
-
-    if (reused) {
-        if (st.kparams.enabled) {
-            if (past_query && same_query) {
-                llama_kvmem_begin_cached_turn_keep_query();
-            } else {
-                llama_kvmem_begin_cached_turn();
-            }
-            if (warm_skip) {
-                llama_kvmem_keep_selected();
-            }
-        }
-        llama_memory_t mem = llama_get_memory(ctx);
-        if (mem) {
-            llama_memory_seq_rm(mem, 0, n_past, -1);
-        }
-        if (st.spec.ctx_dft) {
-            llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
-            if (md) {
-                llama_memory_seq_rm(md, 0, n_past, -1);
-            }
-        }
-        if (st.kparams.enabled) {
-            llama_kvmem_truncate_cached((uint32_t) n_past);
-        }
-        // Continuation already has GDN at n_past. Catch-up from query would
-        // llama_decode at q0 while seq_pos_max is n_past-1 (M-RoPE X < Y).
-        if (!warm_skip && !gdn_sync_to(st, prompt, n_past, io)) {
-            if (io && io->aborted) {
-                return false;
-            }
-            reused = false;
-            warm_skip = false;
-        }
-    }
-    if (!reused) {
-        memory_clear_all(st);
-        n_past = 0;
-        warm_skip = false;
-        past_query = false;
-    }
-    // DeepSeek usage: prefix cache hit = kept LCP (n_past). Full miss if reuse
-    // was dropped (gdn_sync fail / empty cache).
-    if (n_cache_hit) {
-        *n_cache_hit = n_past < 0 ? 0 : n_past;
-        if (*n_cache_hit > n_prompt) {
-            *n_cache_hit = n_prompt;
-        }
-    }
-
-    // GDN ckpt/rewind only on the first pass of this query. Continuation
-    // already has GDN at n_past; replaying the decode suffix is recency, not
-    // a mandatory catch-up.
-    const bool recr_ckpt = do_retr && replay_fits && llama_kvmem_has_recurrent() &&
-            !warm_skip && !past_query;
-    kvmem_diag("KVMEM_TRACE prefix_reuse reused=%d n_past=%d n_prompt=%d n_cached=%d "
-            "n_new=%d stored=%u query=[%d,%d) replay_fits=%d warm_skip=%d "
-            "same_query=%d suffix_cont=%d last_n_gen=%d slack=%u "
-            "gdn_rmax=%d kv_smax=%d free_slots=%u need_slots=%u\n",
-            (int) reused, n_past, n_prompt, (int) st.cached_tokens.size(),
-            eval_end - n_past, llama_kvmem_store_n_tokens(),
-            q0, q1, (int) replay_fits, (int) warm_skip, (int) same_query,
-            (int) suffix_cont, st.last_n_gen, suffix_slack,
-            (int) gdn_rmax, (int) kv_smax, free_slots, need_slots);
-
-    auto take_rc = [&](int rc) -> bool {
-        if (rc == KVMEM_DECODE_ABORT) {
-            if (io) {
-                io->aborted = true;
-            }
-            return false;
-        }
-        return rc == 0;
-    };
-    auto dec = [&](int a, int b, const char * what) -> bool {
-        if (a < 0) {
-            a = 0;
-        }
-        if (b > eval_end) {
-            b = eval_end;
-        }
-        if (a >= b) {
-            return true;
-        }
-        return take_rc(decode_span_maybe_spec(st, prompt.data(), a, b, what, io));
-    };
-    // Hole-fill / recapture of positions that may already sit in KV. Trunk
-    // only: MTP draft is M-RoPE and cannot decode Y while X (seq_pos_max)
-    // is still ahead of Y.
-    auto replay = [&](int a, int b, const char * what) -> bool {
-        if (a < 0) {
-            a = 0;
-        }
-        if (b > eval_end) {
-            b = eval_end;
-        }
-        if (a >= b) {
-            return true;
-        }
-        llama_kvmem_set_replay(true);
-        const int rc = decode_span(st.ctx, prompt.data(), a, b, st.n_batch, what, io);
-        llama_kvmem_set_replay(false);
-        return take_rc(rc);
-    };
-
-    auto note_prefill = [&]() {
-        llama_synchronize(ctx);
-        const llama_perf_context_data p = llama_perf_context(ctx);
-        const int d = p.n_p_eval - st.perf_p_eval;
-        st.perf_p_eval = p.n_p_eval;
-        kvmem_diag("KVMEM_TRACE prefix_prefill n_p_eval=%d reused=%d n_past=%d n_new=%d\n",
-                d, (int) reused, n_past, eval_end - n_past);
-    };
-    auto commit_last_query = [&](bool ok) {
-        if (ok) {
-            st.last_query_begin = q0;
-            st.last_query_end = q1;
-            st.last_user_text = st.turn_last_user;
-        } else {
-            st.last_query_begin = -1;
-            st.last_query_end = -1;
-            st.last_user_text.clear();
-        }
-    };
-
-    if (warm_skip) {
-        kvmem_diag("KVMEM_TRACE query_replay_skip_same query=[%d,%d) n_past=%d n_new=%d\n",
-                q0, q1, n_past, eval_end - n_past);
-        if (!dec(n_past, eval_end, "prefill-tail")) {
-            return false;
-        }
-        if (st.spec.ctx_dft) {
-            llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
-            if (md) {
-                kvmem_diag("KVMEM_TRACE mtp_after_query_replay seq_pos=[%d,%d]\n",
-                        llama_memory_seq_pos_min(md, 0), llama_memory_seq_pos_max(md, 0));
-            }
-        }
-        llama_kvmem_pin_working_set();
-        note_prefill();
-        commit_last_query(true);
-        persist_gdn_ckpt_gen_start(st, eval_end);
-        return true;
-    }
-
-    // Same last-user, query already in the prefix, but skip could not keep
-    // the window (usually gen-reserve full). Reuse the captured Q for top-k;
-    // do not llama_decode at q0 (M-RoPE requires seq_pos_max < q0).
-    if (do_retr && reused && suffix_cont && same_query && past_query) {
-        kvmem_diag("KVMEM_TRACE query_reuse_q reselect=1 query=[%d,%d) n_past=%d n_new=%d\n",
-                q0, q1, n_past, eval_end - n_past);
-        llama_kvmem_apply_retrieval(ctx);
-        if (!dec(n_past, eval_end, "prefill-tail")) {
-            return false;
-        }
-        if (st.spec.ctx_dft) {
-            llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
-            if (md) {
-                kvmem_diag("KVMEM_TRACE mtp_after_query_replay seq_pos=[%d,%d]\n",
-                        llama_memory_seq_pos_min(md, 0), llama_memory_seq_pos_max(md, 0));
-            }
-        }
-        llama_kvmem_pin_working_set();
-        note_prefill();
-        commit_last_query(true);
-        persist_gdn_ckpt_gen_start(st, eval_end);
-        return true;
-    }
-
-    if (!do_retr) {
-        if (!dec(n_past, eval_end, reused ? "prefill-suffix" : "prefill")) {
-            return false;
-        }
-        note_prefill();
-        commit_last_query(false);
-        persist_gdn_ckpt_gen_start(st, eval_end);
-        return true;
-    }
-
-    llama_kvmem_reset_query();
-    if (!dec(n_past, q0, reused ? "prefill-suffix" : "prefill")) {
-        return false;
-    }
-    std::vector<uint8_t> gdn_ckpt;
-    if (recr_ckpt) {
-        if (n_past > q0 && !gdn_sync_to(st, prompt, q0, io)) {
-            LOG_ERR("srv    KVMEM_TRACE gdn_sync to query_begin failed\n");
-            return false;
-        }
-        llama_synchronize(ctx);
-        const llama_state_seq_flags fl = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-        const size_t sz = llama_state_seq_get_size_ext(ctx, 0, fl);
-        if (sz == 0) {
-            fprintf(stderr, "GDN checkpoint size 0\n");
-            return false;
-        }
-        gdn_ckpt.resize(sz);
-        if (llama_state_seq_get_data_ext(ctx, gdn_ckpt.data(), sz, 0, fl) != sz) {
-            fprintf(stderr, "GDN checkpoint copy failed\n");
-            return false;
-        }
-        st.gdn_ckpt_query = gdn_ckpt;
-        if (st.spec.ok) common_speculative_get_state(st.spec.spec, 0, st.gdn_query_carry);
-        st.gdn_ckpt_query_pos = q0 > 0 ? q0 - 1 : -1;
-        kvmem_diag("KVMEM_TRACE gdn_ckpt_query pos_end=%d bytes=%zu query_begin=%d ckpt_pos=%d\n",
-                q0, sz, q0, st.gdn_ckpt_query_pos);
-    }
-    // Query may already sit inside the reused prefix (T5: last user, then
-    // assistant tool XML + role=tool). Recapture Q over the cached part
-    // (replay skips K/mean); prefill only the missing tail of the span.
-    if (n_past > q0 && n_past < q1) {
-        if (!replay(q0, n_past, "query-q-capture")) {
-            return false;
-        }
-    }
-    if (n_past < q1) {
-        if (!dec(std::max(n_past, q0), q1, "prefill-query")) {
-            return false;
-        }
-    } else if (!replay(q0, q1, "query-q-capture")) {
-        return false;
-    }
-    kvmem_diag("KVMEM_TRACE query_q_capture n_past=%d query=[%d,%d) recapture=%d\n",
-            n_past, q0, q1, (int) (n_past > q0));
-    llama_synchronize(ctx);
-    {
-        const llama_perf_context_data p = llama_perf_context(ctx);
-        const int d = p.n_p_eval - st.perf_p_eval;
-        st.perf_p_eval = p.n_p_eval;
-        kvmem_diag("KVMEM_TRACE prefix_prefill n_p_eval=%d reused=%d n_past=%d n_new=%d\n",
-                d, (int) reused, n_past, eval_end - n_past);
-    }
-
-    const int tail0 = std::max(n_past, q1);
-    const uint32_t tail_tok = (uint32_t) std::max(0, eval_end - tail0);
-    const uint32_t gen_res = std::max(1u, st.kparams.gen_reserve);
-    const bool tail_fits_gen = tail_tok <= gen_res;
-
-    if (tail_fits_gen) {
-        llama_kvmem_apply_retrieval(ctx);
-        if (!replay_fits) {
-            kvmem_diag("KVMEM_TRACE query_replay_skip query=[%d,%d) eval_end=%d "
-                    "(sink+suffix exceeds GPU budget)\n",
-                    q0, q1, eval_end);
-        } else {
-            if (recr_ckpt && !gdn_ckpt.empty()) {
-                const llama_state_seq_flags fl = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-                if (llama_state_seq_set_data_ext(ctx, gdn_ckpt.data(), gdn_ckpt.size(), 0, fl) != gdn_ckpt.size()) {
-                    fprintf(stderr, "GDN restore failed\n");
-                    return false;
-                }
-                kvmem_diag("KVMEM_TRACE gdn_restore bytes=%zu\n", gdn_ckpt.size());
-            }
-            llama_memory_t mem = llama_get_memory(ctx);
-            if (mem) {
-                kvmem_diag("KVMEM_TRACE before_seq_rm seq_pos=[%d,%d] query=[%d,%d)\n",
-                        llama_memory_seq_pos_min(mem, 0), llama_memory_seq_pos_max(mem, 0),
-                        q0, q1);
-                llama_memory_seq_rm(mem, 0, q0, q1);
-                kvmem_diag("KVMEM_TRACE after_seq_rm seq_pos=[%d,%d] auto_pos0=%d\n",
-                        llama_memory_seq_pos_min(mem, 0), llama_memory_seq_pos_max(mem, 0),
-                        llama_memory_seq_pos_max(mem, 0) + 1);
-            }
-            if (st.spec.ctx_dft && !past_query) {
-                llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
-                if (md) {
-                    llama_memory_seq_rm(md, 0, q0, q1);
-                    kvmem_diag("KVMEM_TRACE mtp_after_seq_rm seq_pos=[%d,%d]\n",
-                            llama_memory_seq_pos_min(md, 0), llama_memory_seq_pos_max(md, 0));
-                }
-            }
-            if (!replay(q0, q1, "query replay")) {
-                return false;
-            }
-            llama_synchronize(ctx);
-            kvmem_diag("KVMEM_TRACE query_replay begin=%d n=%d recr_ckpt=%d\n",
-                    q0, q1 - q0, (int) recr_ckpt);
-            if (st.spec.ctx_dft && !past_query) {
-                // First pass of this query: seq_rm left a hole in the draft cache.
-                // M-RoPE cannot fill it while a suffix remains, so drop [q0, inf)
-                // and append in order up to q1. Continuation keeps draft suffix.
-                llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
-                if (md) {
-                    llama_memory_seq_rm(md, 0, q0, -1);
-                }
-                if (q1 > q0) {
-                    const int rc = decode_span(st.spec.ctx_dft, prompt.data(), q0, q1, st.n_batch,
-                                               "mtp-resync", io);
-                    if (!take_rc(rc)) {
-                        return false;
-                    }
-                    kvmem_diag("KVMEM_TRACE mtp_resync query=[%d,%d) to=%d\n", q0, q1, q1);
-                }
-            }
-        }
-        if (!dec(tail0, eval_end, "prefill-tail")) {
-            return false;
-        }
-    } else {
-        // Compact / long history after last-user: tail is not this turn's
-        // decode slack. Prefill with spill, then retrieve.
-        kvmem_diag("KVMEM_TRACE prefill_tail_offload n=%u gen_reserve=%u query=[%d,%d)\n",
-                tail_tok, gen_res, q0, q1);
-        if (!dec(tail0, eval_end, "prefill-tail")) {
-            return false;
-        }
-        llama_kvmem_apply_retrieval(ctx);
-    }
-    if (st.spec.ctx_dft) {
-        llama_memory_t md = llama_get_memory(st.spec.ctx_dft);
-        if (md) {
-            kvmem_diag("KVMEM_TRACE mtp_after_query_replay seq_pos=[%d,%d]\n",
-                    llama_memory_seq_pos_min(md, 0), llama_memory_seq_pos_max(md, 0));
-        }
-    }
-    commit_last_query(true);
-    persist_gdn_ckpt_gen_start(st, eval_end);
-    return true;
-}
-
-static std::string trim_copy(const std::string & s) {
-    size_t a = 0;
-    size_t b = s.size();
-    while (a < b && (s[a] == ' ' || s[a] == '\n' || s[a] == '\r' || s[a] == '\t')) {
-        ++a;
-    }
-    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\n' || s[b - 1] == '\r' || s[b - 1] == '\t')) {
-        --b;
-    }
-    return s.substr(a, b - a);
-}
-
-// Last ChatML user *role block* in the rendered prompt, not rfind(content).
-// Thinking/tool text can quote last_user; only <|im_start|>user ... <|im_end|>
-// counts. If last_user is set, pick the last block whose content equals it
-// (two identical user turns → the later block).
-static bool find_last_user_role_block(const std::string & prompt, const std::string & last_user,
-                                      size_t & content0, size_t & content1, int & n_blocks, int & pick) {
-    static const char * hdrs[] = {
-        "<|im_start|>user\n",
-        "<|im_start|>user\r\n",
-        "<|im_start|>user",
-    };
-    struct Blk {
-        size_t c0;
-        size_t c1;
-    };
-    std::vector<Blk> blks;
-    size_t search = 0;
-    while (search < prompt.size()) {
-        size_t best = std::string::npos;
-        size_t best_len = 0;
-        for (const char * h : hdrs) {
-            const size_t n = std::strlen(h);
-            const size_t p = prompt.find(h, search);
-            if (p == std::string::npos) {
-                continue;
-            }
-            if (best == std::string::npos || p < best || (p == best && n > best_len)) {
-                best = p;
-                best_len = n;
-            }
-        }
-        if (best == std::string::npos) {
-            break;
-        }
-        const size_t c0 = best + best_len;
-        const size_t end = prompt.find("<|im_end|>", c0);
-        if (end == std::string::npos) {
-            break;
-        }
-        blks.push_back(Blk{c0, end});
-        search = best + 1;
-    }
-    n_blocks = (int) blks.size();
-    pick = -1;
-    if (blks.empty()) {
-        return false;
-    }
-    const std::string want = trim_copy(last_user);
-    if (!want.empty()) {
-        for (int i = n_blocks - 1; i >= 0; --i) {
-            const std::string got = trim_copy(prompt.substr(blks[(size_t) i].c0,
-                    blks[(size_t) i].c1 - blks[(size_t) i].c0));
-            if (got == want) {
-                pick = i;
-                break;
-            }
-        }
-    }
-    if (pick < 0) {
-        // No exact content match (template wrapping). Do not fall back to
-        // the last user-role header: Qwen tools are often rendered as user
-        // + <tool_response>. Leave the caller to query-last fallback.
-        if (!want.empty()) {
-            return false;
-        }
-        pick = n_blocks - 1;
-    }
-    content0 = blks[(size_t) pick].c0;
-    content1 = blks[(size_t) pick].c1;
-    return content0 < content1;
-}
-
-static void derive_query_span(ServerState & st, const std::string & prompt, const std::string & last_user,
-                              const std::vector<llama_token> & toks, int & qbegin, int & qend) {
-    qbegin = -1;
-    qend = (int) toks.size();
-    size_t c0 = 0;
-    size_t c1 = 0;
-    int n_blocks = 0;
-    int pick = -1;
-    if (find_last_user_role_block(prompt, last_user, c0, c1, n_blocks, pick)) {
-        const std::string prefix = prompt.substr(0, c0);
-        const std::string through = prompt.substr(0, c1);
-        qbegin = (int) tokenize_text(st.vocab, prefix, true).size();
-        qend = (int) tokenize_text(st.vocab, through, true).size();
-        kvmem_diag("KVMEM_TRACE query_loc method=role_block n_user_blocks=%d pick=%d "
-                "span=[%zu,%zu) tokens=[%d,%d)\n",
-                n_blocks, pick, c0, c1, qbegin, qend);
-    }
-    if (qend > (int) toks.size()) {
-        qend = (int) toks.size();
-    }
-    if (qbegin < 0 || qend <= qbegin) {
-        qend = (int) toks.size();
-        const int last = std::min(st.query_last_fallback, qend);
-        qbegin = qend > last ? qend - last : 0;
-        kvmem_diag("KVMEM_TRACE query_loc method=query_last tokens=[%d,%d)\n",
-                qbegin, qend);
-    }
-    if (qbegin >= qend) {
-        qbegin = 0;
-    }
-}
-
-static bool derive_native_query_span(const ServerState & st, const std::string & formatted,
-                                      const common_chat_templates_inputs & inputs, const kvmem_prompt & prompt,
-                                      int & begin, int & end) {
-    // Render the structured prefix ending at the real last user. This retains
-    // native vision wrappers and does not confuse tool_response user-style
-    // blocks with an actual user message. Require an exact causal prefix match.
-    auto prefix_inputs = inputs;
-    while (!prefix_inputs.messages.empty() && prefix_inputs.messages.back().role != "user")
-        prefix_inputs.messages.pop_back();
-    if (prefix_inputs.messages.empty()) return false;
-    prefix_inputs.add_generation_prompt = false;
-    std::string prefix;
-    try {
-        prefix = common_chat_templates_apply(st.tmpls.get(), prefix_inputs).prompt;
-    } catch (const std::exception &) {
-        return false; // A template may require the full trailing tool sequence.
-    }
-    size_t c0 = 0, c1 = 0;
-    int count = 0, pick = -1;
-    if (!find_last_user_role_block(prefix, "", c0, c1, count, pick) ||
-            formatted.compare(0, c1, prefix, 0, c1) != 0) return false;
-    int full_count = 0, unused = -1;
-    if (!find_last_user_role_block(formatted, "", c0, c1, full_count, unused)) return false;
-    common_chat_msg_delimiters delimiters;
-    delimiters.add(COMMON_CHAT_ROLE_USER, "<|im_start|>user");
-    delimiters.add(COMMON_CHAT_ROLE_UNKNOWN, "<|im_end|>");
-    delimiters.tokenize(st.vocab);
-    const auto spans = prompt.message_spans(delimiters);
-    std::vector<common_chat_msg_span> users;
-    for (const auto & span : spans.spans) if (span.role == COMMON_CHAT_ROLE_USER) users.push_back(span);
-    if ((int) users.size() != full_count || pick < 0 || pick >= (int) users.size()) return false;
-    begin = users[pick].pos + delimiters.delimiters.front().tokens.size();
-    end = users[pick].pos + users[pick].len;
-    for (const auto & image : prompt.media_ranges()) {
-        if ((int) image.first >= begin && (int) image.second <= end) begin = image.second;
-    }
-    if (begin >= end) return false;
-    std::string text;
-    for (int row = begin; row < end; ++row)
-        text += common_token_to_piece(st.vocab, prompt.tokens[row], false);
-    if (trim_copy(text).empty()) return false;
-    kvmem_diag("KVMEM_TRACE query_loc method=native_role pick=%d tokens=[%d,%d)\n", pick, begin, end);
-    return true;
-}
-
-static void clamp_query_span(const ServerState & st, int & qbegin, int & qend) {
-    const int cap = st.query_max_tokens;
-    if (cap > 0 && qend > qbegin && (qend - qbegin) > cap) {
-        kvmem_diag("KVMEM_TRACE query_clamp span=[%d,%d) tokens=%d cap=%d -> [%d,%d)\n",
-                qbegin, qend, qend - qbegin, cap, qend - cap, qend);
-        qbegin = qend - cap;
-    }
-}
 
 struct ChatRequest {
     std::vector<common_chat_msg> msgs;
@@ -2882,7 +1429,7 @@ int main(int argc, char ** argv) {
             st.conv_active = st.conv_table.add(llama_kvmem_store_current());
             st.conv.emplace(st.conv_active, kvmem_conversation{});
             st.conv_table.touch(st.conv_active, ++st.conv_clock);
-            conversation_publish(st);
+            llama_driver_publish_conversations(st);
             LOG_INF("srv    KVMEM conversations=%d host_bytes_max=%llu\n",
                     options.conversations, (unsigned long long) st.conv_limits.max_bytes);
             // Every host store builds its own runtime, so the pinned arena
@@ -3233,7 +1780,7 @@ int main(int argc, char ** argv) {
         std::shared_ptr<kvmem_prompt> parsed_prompt;
         try {
             parsed_prompt = media_files.empty()
-                ? std::make_shared<kvmem_prompt>(tokenize_text(st.vocab, prompt, true))
+                ? std::make_shared<kvmem_prompt>(llama_driver_tokenize(st.vocab, prompt, true))
                 : st.vision->tokenize(prompt, media_files);
         } catch (const std::exception & e) {
             res.status = 400;
@@ -3252,7 +1799,7 @@ int main(int argc, char ** argv) {
             return;
         }
         try {
-            multimodal_validate_capacity(st, *parsed_prompt, (int) toks.size());
+            llama_driver_validate_capacity(st, *parsed_prompt, (int) toks.size());
         } catch (const std::exception & e) {
             res.status = 400;
             res.set_content(json{{"error", e.what()}}.dump(), "application/json");
@@ -3324,7 +1871,7 @@ int main(int argc, char ** argv) {
                 kvmem_execution_scope execution(st.execution.get());
                 if (lane_conversations) lane_conversations->finish(*operation, st);
                 else {
-                    multimodal_finish_request(st);
+                    llama_driver_finish(st);
                     if (st.active_prompt) st.active_prompt->release_media();
                 }
                 lease->release();
@@ -3340,8 +1887,8 @@ int main(int argc, char ** argv) {
         st.turn_conversation_id = cr.conversation_id;
         try {
             if (lane_conversations) lane_conversations->attach(*operation, st, cr.conversation_id);
-            else if (st.session_files) session_begin_request(st, *parsed_prompt, cr.conversation_id, cr.max_tokens);
-            else conversation_begin_request(st, *parsed_prompt, cr.conversation_id);
+            else if (st.session_files) llama_driver_begin_disk_request(st, *parsed_prompt, cr.conversation_id, cr.max_tokens);
+            else llama_driver_begin_request(st, *parsed_prompt, cr.conversation_id);
         } catch (const std::exception & e) {
             res.status = 503;
             res.set_content(json{{"error", e.what()}}.dump(), "application/json"); return;
@@ -3354,12 +1901,12 @@ int main(int argc, char ** argv) {
         st.turn_query_exact = false;
         st.turn_last_user = cr.last_user;
         if (qbegin < 0 || qend < 0) {
-            derive_query_span(st, prompt, cr.last_user, toks, qbegin, qend);
+            llama_driver_query_span(st, prompt, cr.last_user, toks, qbegin, qend);
         }
         if (st.query_policy_user) {
             st.turn_query_exact = cr.query_begin >= 0 && cr.query_end > cr.query_begin && cr.query_end <= (int) toks.size();
             if (cr.query_begin < 0 && cr.query_end < 0) {
-                st.turn_query_exact = derive_native_query_span(st, prompt, inputs, *parsed_prompt, qbegin, qend);
+                st.turn_query_exact = llama_driver_native_query_span(st, prompt, inputs, *parsed_prompt, qbegin, qend);
             }
         }
         if (parsed_prompt->has_media() && cr.query_begin < 0 && !st.turn_query_exact) {
@@ -3369,7 +1916,7 @@ int main(int argc, char ** argv) {
             qend = (int) toks.size() - (st.spec.ok ? 1 : 0);
             qbegin = std::max(last_media_end, qend - st.query_max_tokens);
         }
-        clamp_query_span(st, qbegin, qend);
+        llama_driver_clamp_query(st, qbegin, qend);
         if (st.turn_query_exact && std::find(toks.begin() + qbegin, toks.begin() + qend, LLAMA_TOKEN_NULL) != toks.begin() + qend) {
             st.turn_query_exact = false;
             kvmem_diag("KVMEM_TRACE query_loc fallback=explicit_span_contains_media\n");
@@ -3555,6 +2102,7 @@ int main(int argc, char ** argv) {
                  spec_stream, ctx, vocab, make_emit_gen_wall, timings, is_responses](size_t, httplib::DataSink & sink) mutable {
                     kvmem_execution_scope execution(st.execution.get());
                     StreamIo io;
+                    io.on_prefill = [&st](int rows, int remaining) { st.log.prefilled(rows, remaining); };
                     io.sink = &sink;
                     io.req = &req;
                     auto send = [&](const std::string & payload) -> bool {
@@ -3592,19 +2140,19 @@ int main(int argc, char ** argv) {
                         // 中文：对齐上游流式首帧 delta——role=assistant 且 content=null，客户端按此初始化
                         : send(stream_choice_chunk(cid, st.model_name, created, json{{"role", "assistant"}, {"content", nullptr}}, nullptr).dump());
                     if (!stream_open) {
-                        multimodal_finish_request(st);
+                        llama_driver_finish(st);
                         slot->unlock();
                         sink.done();
                         return true;
                     }
                     const auto t_turn0 = std::chrono::steady_clock::now();
                     int n_cache_hit = 0;
-                    if (!run_prefill_retrieval(st, toks, &io, &n_cache_hit)) {
+                    if (!llama_driver_prepare(st, toks, &io, &n_cache_hit)) {
                         if (!io.aborted) {
                             send(json{{"error", st.mm_error.empty() ? "prefill/retrieval failed" : st.mm_error}}.dump());
                             sink.write("data: [DONE]\n\n", 14);
                         }
-                        multimodal_finish_request(st);
+                        llama_driver_finish(st);
                         slot->unlock();
                         sink.done();
                         return true;
@@ -3656,7 +2204,7 @@ int main(int argc, char ** argv) {
                             fprintf(stderr, "sampler init failed: %s\n", e.what());
                             send(json{{"error", std::string("sampler init failed: ") + e.what()}}.dump());
                             sink.write("data: [DONE]\n\n", 14);
-                            multimodal_finish_request(st);
+                            llama_driver_finish(st);
                             slot->unlock();
                             sink.done();
                             return true;
@@ -3664,7 +2212,7 @@ int main(int argc, char ** argv) {
                         if (!smpl) {
                             send(json{{"error", "sampler init failed"}}.dump());
                             sink.write("data: [DONE]\n\n", 14);
-                            multimodal_finish_request(st);
+                            llama_driver_finish(st);
                             slot->unlock();
                             sink.done();
                             return true;
@@ -3683,7 +2231,7 @@ int main(int argc, char ** argv) {
                                 break;
                             }
                             std::string piece = token_piece(vocab, id);
-                            if (multimodal_decode_generated(st, id, (int) toks.size() + (int) gen.size()) != 0) {
+                            if (llama_driver_decode_generated(st, id, (int) toks.size() + (int) gen.size()) != 0) {
                                 fprintf(stderr, "llama_decode(gen) failed\n");
                                 aborted = true;
                                 send(json{{"error", "decode failed"}}.dump());
@@ -3712,7 +2260,7 @@ int main(int argc, char ** argv) {
                         }
                         common_sampler_free(smpl);
                         if (aborted) {
-                            multimodal_finish_request(st);
+                            llama_driver_finish(st);
                             slot->unlock();
                             sink.done();
                             return true;
@@ -3727,7 +2275,7 @@ int main(int argc, char ** argv) {
                                 }
                             }
                             emit_gen_wall((int) gen.size());
-                            commit_cached(st, toks, gen);
+                            llama_driver_commit(st, toks, gen);
                             for (const std::string & ev : kvmem_responses_stream_done(
                                          responses->state, responses->prev, request_id, st.model_name,
                                          (int) toks.size(), (int) gen.size(), n_cache_hit)) {
@@ -3735,7 +2283,7 @@ int main(int argc, char ** argv) {
                                     break;
                                 }
                             }
-                            multimodal_finish_request(st);
+                            llama_driver_finish(st);
                             slot->unlock();
                             sink.done();
                             return true;
@@ -3753,19 +2301,19 @@ int main(int argc, char ** argv) {
                                 sco.prev.content.size(), sco.prev.reasoning_content.size());
                         llama_kvmem_decode_mean_flush();
                         emit_gen_wall((int) gen.size());
-                        commit_cached(st, toks, gen);
+                        llama_driver_commit(st, toks, gen);
                         send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
                         auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
                         usage["timings"] = *timings;
                         send(usage.dump());
                         sink.write("data: [DONE]\n\n", 14);
-                        multimodal_finish_request(st);
+                        llama_driver_finish(st);
                         slot->unlock();
                         sink.done();
                         return true;
                     }
                     if (aborted) {
-                        multimodal_finish_request(st);
+                        llama_driver_finish(st);
                         slot->unlock();
                         sink.done();
                         return true;
@@ -3780,7 +2328,7 @@ int main(int argc, char ** argv) {
                             }
                         }
                         emit_gen_wall((int) gen.size());
-                        commit_cached(st, toks, gen);
+                        llama_driver_commit(st, toks, gen);
                         for (const std::string & ev : kvmem_responses_stream_done(
                                      responses->state, responses->prev, request_id, st.model_name,
                                      (int) toks.size(), (int) gen.size(), n_cache_hit)) {
@@ -3788,7 +2336,7 @@ int main(int argc, char ** argv) {
                                 break;
                             }
                         }
-                        multimodal_finish_request(st);
+                        llama_driver_finish(st);
                         slot->unlock();
                         sink.done();
                         return true;
@@ -3805,13 +2353,13 @@ int main(int argc, char ** argv) {
                             sco.n_tc_delta, finish,
                             sco.prev.content.size(), sco.prev.reasoning_content.size());
                     emit_gen_wall((int) gen.size());
-                    commit_cached(st, toks, gen);
+                    llama_driver_commit(st, toks, gen);
                     send(stream_choice_chunk(cid, st.model_name, created, json::object(), finish).dump());
                     auto usage = stream_usage_chunk(cid, st.model_name, created, (int) toks.size(), (int) gen.size(), n_cache_hit);
                     usage["timings"] = *timings;
                     send(usage.dump());
                     sink.write("data: [DONE]\n\n", 14);
-                    multimodal_finish_request(st);
+                    llama_driver_finish(st);
                     slot->unlock();
                     sink.done();
                     return true;
@@ -3821,12 +2369,13 @@ int main(int argc, char ** argv) {
 
         struct request_guard {
             ServerState & st;
-            ~request_guard() { multimodal_finish_request(st); }
+            ~request_guard() { llama_driver_finish(st); }
         } guard {st};
         StreamIo io;
+        io.on_prefill = [&st](int rows, int remaining) { st.log.prefilled(rows, remaining); };
         io.req = &req;
         const auto t_turn0 = std::chrono::steady_clock::now();
-        if (!run_prefill_retrieval(st, toks, &io, &n_cache_hit)) {
+        if (!llama_driver_prepare(st, toks, &io, &n_cache_hit)) {
             if (io.aborted) {
                 kvmem_diag("KVMEM_TRACE stream_abort phase=prefill n_prompt=%d\n",
                         (int) toks.size());
@@ -3865,7 +2414,7 @@ int main(int argc, char ** argv) {
             st.mm_live_row = gst.n_past;
             if (io.aborted) return;
             emit_gen_wall((int) gen.size());
-            commit_cached(st, toks, gen);
+            llama_driver_commit(st, toks, gen);
             emit_json(content, (int) gen.size(), (int) gen.size() >= cr.max_tokens);
             return;
         }
@@ -3896,7 +2445,7 @@ int main(int argc, char ** argv) {
             }
             id_out = id;
             piece = token_piece(vocab, id);
-            if (multimodal_decode_generated(st, id, next_row++) != 0) {
+            if (llama_driver_decode_generated(st, id, next_row++) != 0) {
                 fprintf(stderr, "llama_decode(gen) failed\n");
                 return false;
             }
@@ -3932,7 +2481,7 @@ int main(int argc, char ** argv) {
         }
         llama_kvmem_decode_mean_flush();
         emit_gen_wall((int) gen.size());
-        commit_cached(st, toks, gen);
+        llama_driver_commit(st, toks, gen);
         common_sampler_free(smpl);
         emit_json(content, (int) gen.size(), !stopped && (int) gen.size() >= cr.max_tokens);
     };

@@ -289,6 +289,9 @@ public:
         if (!program.isolated_request_feasible(base)) {
             return {.readiness = Readiness::PermanentlyInfeasible};
         }
+        if (!program.temporary_request_feasible(base)) {
+            return {.readiness = Readiness::TemporarilyBlocked};
+        }
         std::optional<LaneId> destination;
         for (std::uint32_t lane = 0; lane < lane_count_; ++lane) {
             if (lanes_[lane] == LogicalLaneState::Free) {
