@@ -1,5 +1,7 @@
 #include "ninfer/engine.h"
 #include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 
@@ -41,6 +43,7 @@ int main(int argc, char** argv) {
         ninfer::Engine engine(options);
         ninfer::PromptInput input;
         input.options.enable_thinking = false;
+        input.options.preserve_thinking = true;
         input.context_cache.session_key = "disk-history";
         const auto add = [&](ninfer::ChatRole role, std::string text) {
             ninfer::ChatMessage message;
@@ -56,8 +59,25 @@ int main(int argc, char** argv) {
         }
         add(ninfer::ChatRole::User, "Start with the access code, then describe the observatory.");
         const std::string mode = argv[5];
+        const bool endpoint = mode.starts_with("endpoint-");
+        std::uint32_t endpoint_frontier = 0;
+        if (endpoint) {
+            std::string source = "Copy exactly, starting with ORCHID-9491:\n";
+            for (int i = 0; i < 80; ++i)
+                source += "Record " + std::to_string(i) + ": violet stars and distant galaxies.\n";
+            input.messages.back().parts[0].text = source;
+            endpoint_frontier = engine.prepare(input).summary().prompt_tokens + 95;
+            if (mode == "endpoint-hit") {
+                std::ifstream saved(std::filesystem::path(argv[4]) / "endpoint.txt", std::ios::binary);
+                require(bool(saved >> endpoint_frontier), "endpoint replay fixture missing");
+                saved.get();
+                std::string content((std::istreambuf_iterator<char>(saved)), {});
+                add(ninfer::ChatRole::Assistant, std::move(content));
+                add(ninfer::ChatRole::Tool, "Continue copying the next records.");
+            }
+        }
         ninfer::RequestOptions request;
-        request.execution.requested_output_tokens = mode == "cancel" ? 128 : 32;
+        request.execution.requested_output_tokens = mode == "cancel" ? 128 : mode == "endpoint-cold" ? 96 : 32;
         request.execution.sampling.temperature = 0;
         request.execution.allow_prefix_reuse = mode != "clear";
         request.stop.include_model_defaults = false;
@@ -66,15 +86,27 @@ int main(int argc, char** argv) {
             ninfer::OutputConsumerMode::Streaming, {.live_timings = true})
             .wait(&sink, ninfer::CancellationView([&] { return sink.cancelled.load(); }));
         const auto memory = engine.memory_summary().kvmem;
-        const bool hit = mode == "hit" || mode == "cancel";
+        const bool hit = mode == "hit" || mode == "cancel" || mode == "endpoint-hit";
         require((result.reused_prompt_tokens > 0) == hit, "wrong disk reuse decision");
         require((memory.disk_hits != 0) == hit, "disk hit counter does not match reuse");
         require(engine.is_available() && memory.resident_pages == 0 && memory.mtp_resident_pages == 0,
                 "snapshot path leaked active resources or failed the Engine");
         require(memory.host_payload_bytes <= options.kvmem.host_bytes, "snapshot import exceeded H");
         require(mode == "cancel" ? result.finish_reason == ninfer::FinishReason::Cancelled
-                                 : result.generated_token_ids.size() == 32, "wrong generation termination");
-        if (mode != "cancel") require(result.content.find("ORCHID-9491") != std::string::npos, "wrong recovered archive code");
+                                 : result.generated_token_ids.size() == request.execution.requested_output_tokens,
+                "wrong generation termination");
+        if (mode != "cancel" && mode != "endpoint-hit")
+            require(result.content.find("ORCHID-9491") != std::string::npos, "wrong recovered archive code");
+        if (mode == "endpoint-cold") {
+            std::ofstream saved(std::filesystem::path(argv[4]) / "endpoint.txt", std::ios::binary);
+            saved << endpoint_frontier << '\n' << result.content;
+            require(bool(saved), "endpoint fixture publication failed");
+        }
+        if (mode == "endpoint-hit") {
+            require(result.reused_prompt_tokens == endpoint_frontier &&
+                    result.prefix_reuse_path == ninfer::PrefixReusePath::PrivateEndpoint,
+                    "cold endpoint did not restore generated output with its frozen query");
+        }
         if (mode == "error") require(memory.disk_errors > 0, "snapshot failure was not reported");
         if (mode != "error" && mode != "clear") require(memory.disk_writes > 0, "trusted checkpoint was not persisted");
         if (mode == "clear") require(memory.disk_writes == 0, "explicit clear republished the discarded history");

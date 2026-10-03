@@ -456,6 +456,13 @@ struct KvmemPrefixCheckpoint {
     std::unique_ptr<PinnedHostBuffer> state;
 };
 
+enum class KvmemCheckpointKind : std::uint8_t { Base, Endpoint, Rewrite };
+struct KvmemHistoryMatch {
+    std::size_t history;
+    KvmemCheckpointKind kind;
+    std::uint32_t frontier;
+};
+
 using KvmemHostRecord = std::vector<std::byte>;
 
 struct KvmemWindowState {
@@ -482,6 +489,9 @@ struct KvmemWindowState {
     // Long prompts retain the pre-query boundary for selection/replay; short prompts
     // retain the input prefix before its final token for request-to-request reuse.
     std::unique_ptr<KvmemPrefixCheckpoint> prefix_checkpoint;
+    std::unique_ptr<KvmemPrefixCheckpoint> endpoint_checkpoint;
+    std::unique_ptr<KvmemPrefixCheckpoint> replay_checkpoint;
+    std::uint32_t reconstruction_frontier = 0;
     bool query_replayed = false;
 
 };
@@ -597,6 +607,7 @@ struct RequestControl {
         double elapsed_seconds              = 0.0;
         bool prepare_mtp                    = false;
         ReusePath reuse                     = ReusePath::Root;
+        PrefixReusePath reported_reuse_path  = PrefixReusePath::Root;
         MtpBridgeMode mtp_bridge            = MtpBridgeMode::None;
     };
 
@@ -1684,10 +1695,18 @@ private:
     [[nodiscard]] std::uint32_t memory_checkpoint_frontier(const SequenceState& sequence,
         std::uint32_t prompt_tokens, bool allow_reuse) const;
     void capture_memory_prefix(SequenceState& sequence, std::uint32_t chunk_tokens);
+    std::unique_ptr<KvmemPrefixCheckpoint> capture_memory_checkpoint(SequenceState& sequence);
+    void capture_memory_endpoint(SequenceState& sequence, const RequestControl& request) noexcept;
+    void capture_memory_replay(SequenceState& sequence) noexcept;
+    void capture_memory_replay_if_ready(SequenceState& sequence);
+    const KvmemPrefixCheckpoint* memory_checkpoint(const KvmemWindowState& window,
+                                                   KvmemCheckpointKind kind) const;
+    bool memory_same_query(const KvmemWindowState& window, const PreparedPromptData& prompt,
+                           std::uint32_t frontier) const;
     void rewind_memory_query(SequenceState& sequence);
     void restore_memory_prefix(SequenceState& sequence, const KvmemPrefixCheckpoint& checkpoint,
                                bool preserve_view = false);
-    std::optional<std::size_t> memory_restorable_history(const PreparedPromptData& prompt) const;
+    std::optional<KvmemHistoryMatch> memory_restorable_history(const PreparedPromptData& prompt) const;
     void reserve_memory_history(SequenceState& sequence, RequestControl& request,
                                 const PreparedPromptData& prompt);
     bool restore_memory_history(SequenceState& sequence, RequestControl::Prefill& staged);

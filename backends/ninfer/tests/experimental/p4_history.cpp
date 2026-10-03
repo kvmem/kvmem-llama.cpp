@@ -74,6 +74,10 @@ int main(int argc, char** argv) {
             o.speculative.backend = ninfer::SpeculativeBackend::Mtp;
             o.speculative.draft_tokens = static_cast<std::uint32_t>(std::stoul(argv[5]));
         }
+        if (argc == 7 && std::string(argv[6]) == "endpoint" && o.speculative.draft_tokens) {
+            o.speculative.ngram_draft_tokens = 31;
+            o.speculative.ngram_min_match = 4;
+        }
         ninfer::Engine engine(o);
         std::ofstream output(argv[4]);
         const auto run = [&](const char* name, const ninfer::PromptInput& p, bool reuse,
@@ -119,6 +123,105 @@ int main(int argc, char** argv) {
             }
             return result;
         };
+        if (argc == 7 && std::string(argv[6]) == "endpoint") {
+            ninfer::RequestOptions one;
+            one.execution.requested_output_tokens = 1;
+            one.execution.sampling.temperature = 0;
+            one.stop.include_model_defaults = false;
+            const auto single = engine.tokenize_text("x");
+            require(single.size() == 1, "one-token fixture changed");
+            const auto single_output = engine.generate(engine.prepare_tokens(single), one);
+            auto single_next = single;
+            single_next.push_back(single_output.generated_token_ids.at(0));
+            require(engine.generate(engine.prepare_tokens(single_next), one).reused_prompt_tokens == 1,
+                    "one-token input endpoint was not retained");
+            auto ids = engine.tokenize_text("Continue the following list of observatory records:\nRecord one: violet stars.\nRecord two:");
+            ninfer::RequestOptions request;
+            request.execution.requested_output_tokens = 96;
+            request.execution.sampling.temperature = 0;
+            request.execution.allow_prefix_reuse = true;
+            request.stop.include_model_defaults = false;
+            const auto first = engine.generate(engine.prepare_tokens(ids), request);
+            require(first.generated_token_ids.size() == 96, "raw endpoint output limit");
+            const auto prefix = ids.size();
+            ids.insert(ids.end(), first.generated_token_ids.begin(), first.generated_token_ids.end());
+            const auto next = engine.generate(engine.prepare_tokens(ids), request);
+            require(next.reused_prompt_tokens == prefix + 95, "generated raw prefix was not retained");
+            require(next.prefix_reuse_path == ninfer::PrefixReusePath::PrivateEndpoint, "endpoint path not reported");
+            std::cout << "ENDPOINT raw reused=" << next.reused_prompt_tokens << std::endl;
+
+            ninfer::PromptInput thinking;
+            thinking.options.enable_thinking = true;
+            thinking.options.preserve_thinking = true;
+            thinking.context_cache.session_key = "endpoint-thinking";
+            add(thinking, ninfer::ChatRole::User, "Reply with the single word violet.");
+            auto thinking_request = request;
+            thinking_request.execution.requested_output_tokens = 128;
+            thinking_request.execution.thinking.budget = 16;
+            thinking_request.stop.include_model_defaults = true;
+            const auto reasoned = engine.generate(engine.prepare(thinking), thinking_request);
+            require(!reasoned.content.empty(), "thinking control produced no answer");
+            const auto thinking_input = engine.prepare(thinking).summary().prompt_tokens;
+            add(thinking, ninfer::ChatRole::Assistant, reasoned.content);
+            thinking.messages.back().reasoning_content = reasoned.reasoning;
+            add(thinking, ninfer::ChatRole::Tool, "Repeat the answer.");
+            const auto reasoned_next = engine.generate(engine.prepare(thinking), thinking_request);
+            require(reasoned_next.reused_prompt_tokens > thinking_input,
+                    "canonical thinking reconstruction lost the generated reasoning prefix");
+            std::cout << "ENDPOINT thinking reused=" << reasoned_next.reused_prompt_tokens
+                      << " input=" << thinking_input << std::endl;
+
+            auto rewrite = thinking;
+            rewrite.messages.resize(1);
+            rewrite.context_cache.session_key = "endpoint-thinking-rewrite";
+            const auto rewrite_first = engine.generate(engine.prepare(rewrite), thinking_request);
+            add(rewrite, ninfer::ChatRole::Assistant, "amber");
+            rewrite.messages.back().reasoning_content = rewrite_first.reasoning;
+            add(rewrite, ninfer::ChatRole::Tool, "Repeat the answer.");
+            const auto rewritten = engine.generate(engine.prepare(rewrite), thinking_request);
+            require(rewritten.reused_prompt_tokens > thinking_input &&
+                    rewritten.prefix_reuse_path == ninfer::PrefixReusePath::PrivateTurnClosure,
+                    "edited answer did not fall back to its exact thinking-close state");
+            std::cout << "ENDPOINT thinking-rewrite reused=" << rewritten.reused_prompt_tokens << std::endl;
+
+            auto chat = archive();
+            chat.options.enable_thinking = false;
+            chat.options.preserve_thinking = true;
+            chat.context_cache.session_key = "endpoint-tools";
+            std::string source;
+            for (int i = 0; i < 100; ++i)
+                source += "Record " + std::to_string(i) + ": violet stars and distant galaxies.\n";
+            chat.messages.back().parts[0].text = "Copy exactly, without commentary or markdown:\n" + source;
+            const auto cold = run("endpoint-chat-cold", chat, true, false, 0, 0, 160);
+            const auto input = engine.prepare(chat).summary().prompt_tokens;
+            add(chat, ninfer::ChatRole::Assistant, cold.content);
+            add(chat, ninfer::ChatRole::Tool, "Continue copying the next records.");
+            const auto continued = run("endpoint-chat-tool", chat, true, true, 0, 0, 32);
+            require(continued.reused_prompt_tokens >= input + 120,
+                    "long same-query tool continuation recomputed the generated output");
+            const auto repeated = run("endpoint-chat-repeat", chat, true, true);
+            require(repeated.reused_prompt_tokens >= continued.reused_prompt_tokens &&
+                    repeated.reused_prompt_tokens < engine.prepare(chat).summary().prompt_tokens,
+                    "repeat did not use a valid earlier checkpoint");
+            auto new_user = chat;
+            add(new_user, ninfer::ChatRole::User, "What does the coastal office file?");
+            const auto changed = run("endpoint-new-query", new_user, true, true);
+            require(changed.reused_prompt_tokens > 0 &&
+                    changed.reused_prompt_tokens <= continued.reused_prompt_tokens,
+                    "new query did not choose a stable earlier checkpoint");
+            auto edited = chat;
+            edited.messages[1].parts[0].text = "Edited archive with amber stars.";
+            run("endpoint-edit", edited, true, false);
+            run("endpoint-restore-original", chat, true, false);
+            run("endpoint-cancel", chat, true, true, 0, 8);
+            run("endpoint-after-cancel", chat, true, true);
+            require(engine.is_available(), "endpoint retirement made Engine unavailable");
+            const auto memory = engine.memory_summary().kvmem;
+            require(memory.host_payload_bytes <= o.kvmem.host_bytes && memory.resident_pages == 0 &&
+                    memory.mtp_resident_pages == 0, "endpoint archive leaked budget or device pages");
+            std::cout << "ENDPOINT PASS" << std::endl;
+            return 0;
+        }
         if (argc == 7 && std::string(argv[6]) == "short") {
             ninfer::PromptInput p;
             p.options.enable_thinking = false;

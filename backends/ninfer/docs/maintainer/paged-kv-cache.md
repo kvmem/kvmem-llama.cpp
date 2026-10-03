@@ -829,7 +829,25 @@ when history reuse is enabled. This capture does not trigger Q probing or replay
 suffix token lets ordinary sampling and the MTP boundary bridge run normally on a repeated input.
 Its native KV payload is included in admission's Host reservation even without device page pressure.
 A short-prefix checkpoint past the incoming last-user boundary cannot seed a long-input query
-probe; that transition recomputes the prompt rather than skipping the query used for selection.
+probe with a different query; that transition uses an earlier legal checkpoint or recomputes.
+
+Each retained session shares one native Host archive among at most three complete checkpoints:
+the pre-query/input fallback, the normal finished execution endpoint, and one exact Frontend
+reconstruction boundary (generation opener or canonical thinking close). Each owns its StateImage,
+exact input identity, compact resident view and partial-page mean snapshot. The endpoint excludes
+the last output token when that token has not executed. MTP/recurrent state and persistent
+statistics cover the same frontier; unlicensed verification columns never enter a checkpoint.
+Speculative thinking-close capture folds only the licensed prefix, saves that complete state,
+then restores the base before the normal accepted-prefix fold. No output-text scanning is used.
+
+Reuse chooses the furthest exact token/position/execution-identity match. For a long same-query
+tool continuation, a complete matching last-user span also proves the frozen query attachment;
+restore retains Q and the captured selected view and appends only the new suffix. Ordinary B/R
+pressure may reselect with that Q. A changed query cannot reuse a post-query checkpoint and instead
+uses the pre-query probe/replay route. Restoring an earlier checkpoint revokes all later checkpoints
+before shared archive rows can be overwritten. Optional endpoint/reconstruction capture failure
+preserves the earlier complete fallback. Host admission reserves the entire legal execution
+history when endpoint reuse is enabled, including short inputs.
 
 The bounded Host directory (`retained_sessions`, default 4, maximum 16) can restore a checkpoint
 only when its session key, exact token prefix, backend/layout identity and execution stamp match.
@@ -874,9 +892,11 @@ payload, and MTP boundary rebuilding consumes the same multimodal bridge. Video,
 vision and concurrent vision are outside the supported KVMem combinations.
 
 Cold snapshots (`disk_path`, `disk_bytes`) require one text lane and `device_profile=off`.
-The single-owner `ninfer-kvmem-v3` directory contains bounded, checksummed records identified
+The single-owner `ninfer-kvmem-v4` directory contains bounded, checksummed records identified
 by exact artifact/session/profile/layout metadata. Payload includes original-position Main/MTP
-page bytes, recurrent StateImage, prefix identity and mean statistics. Atomic replacement
+page bytes shared through the latest checkpoint, all complete checkpoint slots, exact prefix
+identities, partial-page means, resident views and the frozen query attachment. v3 records are
+not imported as v4 sources. Atomic replacement
 charges old and temporary files together; failed writes preserve the previous published file.
 Import creates new process-local IDs, page allocations and graph resources. Corruption,
 truncation or incompatibility increments `disk_errors` and permits recomputation. No live

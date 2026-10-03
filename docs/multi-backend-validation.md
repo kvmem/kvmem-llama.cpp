@@ -23,6 +23,56 @@ workspace: `results/p789-followup-20261003/acceptance.json`,
 These paths identify local records; raw logs, models and personal configuration
 are deliberately not included in Git.
 
+## Generated-endpoint cache completion
+
+The ninfer adapter now retains the complete committed execution endpoint and an
+exact Frontend reconstruction boundary alongside its input/pre-query fallback.
+The three slots share one Host KV archive. Same-query tool continuations retain
+the frozen Q and selected view; changed queries use the existing probe/replay
+route. Rewinding revokes later checkpoints before shared rows are overwritten.
+Cold snapshots use v4 and persist all complete slots and the query attachment;
+v3 snapshots are recomputed. The llama.cpp adapter was not changed.
+
+Targeted validation used Windows VS2022/CUDA 13.2, RTX 5060 Ti 16GB and the
+Qwen3.8-27B-GSQ-RCO-IQ3_S MTP artifact. Ordinary and MTP4/ngram31 endpoint/rewrite
+cases, 32 short-history and 18 long-history cases, single-token initialization,
+new queries, edits, cancellation, append/window pressure, concurrency publication
+order, and cold save/restart/cancel/corruption fallback passed. StateImage and
+Main/MTP transfers were checked byte-for-byte. The independent token-sums oracle
+passed 600 cases on the available RTX 5050 Laptop. The final single-token and
+rewrite-marker adjustments were retested with the full MTP4 endpoint sequence
+and the HTTP/DSH cases below; the earlier full matrix was not rerun on the final
+binary.
+
+A matched continuation comparison used B36864/R16384/H6144MiB, RK8V4,
+MTP4/ngram31 and the same model, template and sampling settings on RTX 5060 Ti:
+
+| Worker | Input tokens | Reused tokens | Computed prefill | TTFT |
+|---|---:|---:|---:|---:|
+| Before endpoint completion | 41308 | 8498 | 32810 | 53.861s |
+| With endpoint completion | 41308 | 41266 | 42 | 1.810s |
+
+The fixture generated 32768 tokens with a schema-constrained array, then replayed
+a constructed tool transcript. The old worker seeded its original input
+checkpoint with one output token and processed the same continuation; it did not
+repeat the 32K generation. Appending to 64771 tokens, beyond the 53248-token
+physical window, retained 41339 tokens and computed only the 23432-token suffix.
+This comparison measures continuation work/TTFT, not generation throughput or
+model quality. Endpoint capture and Host transfer costs were not individually
+timed in this HTTP run.
+
+Separately, the installed DSH adapter passed a real streaming tool-call/result
+roundtrip through the Responses API with xhigh/preserve-thinking. The second
+input reused 8132/8164 tokens, computed 32 and had TTFT 0.570s. This sample emitted
+no model reasoning tokens; canonical thinking-close is covered by the native
+regression. The deployed service kept its existing B81920/R32768 configuration.
+This was an adapter roundtrip, not a full user Agent benchmark.
+
+Local evidence: `results/endpoint-cache-fix-20261003/report.md`, `acceptance.json`,
+`http-acceptance.json` and `dsh-endpoint-acceptance.json`. Existing build-tree
+sources were checked against the vendored changed files; this targeted fix does
+not qualify the full P6-P10/MTP4 combination matrix.
+
 ## Consolidated checkout checks
 
 - Fresh Windows VS2022 Release portable-core build: passed.

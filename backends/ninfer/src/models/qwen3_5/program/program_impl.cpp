@@ -833,9 +833,13 @@ MemorySummary ProgramImpl::memory_summary() const noexcept {
             memory.history_swaps += window.swaps;
             memory.history_spilled_bytes += window.spilled_bytes;
             memory.history_restored_bytes += window.restored_bytes;
-            if (window.prefix_checkpoint) {
-                memory.checkpoint_bytes += window.prefix_checkpoint->state->size();
-                memory.checkpoint_tokens = static_cast<std::uint32_t>(window.prefix_checkpoint->prefix.size());
+            for (const auto kind : {KvmemCheckpointKind::Base, KvmemCheckpointKind::Endpoint,
+                                    KvmemCheckpointKind::Rewrite}) {
+                if (const auto* checkpoint = memory_checkpoint(window, kind)) {
+                    memory.checkpoint_bytes += checkpoint->state->size();
+                    memory.checkpoint_tokens = std::max(memory.checkpoint_tokens,
+                        static_cast<std::uint32_t>(checkpoint->prefix.size()));
+                }
             }
         };
         for (const auto& sequence : continuation_states) collect(sequence.window);

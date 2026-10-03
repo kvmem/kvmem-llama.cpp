@@ -317,12 +317,10 @@ RequestBasePlan ProgramImpl::plan_request(const PreparedPromptData& prompt,
         // running out during prefill is not an unexpected worker/device failure.
         const auto frontier = base->summary.prompt_tokens +
             (base->summary.effective_output_tokens ? base->summary.effective_output_tokens - 1U : 0U);
-        const bool retain_short_prefix = options.allow_prefix_reuse && prompt.identity.reusable &&
-            base->summary.prompt_tokens > 1;
-        if (frontier > kvmem_window_tokens || retain_short_prefix) {
+        const bool retain_history = options.allow_prefix_reuse && prompt.identity.reusable;
+        if (frontier > kvmem_window_tokens || retain_history) {
             const auto host_layout = plan_host_kv_page_layout(text_kv_pages->physical_pool().geometry());
-            const auto pages = kv_pages_for_tokens(frontier > kvmem_window_tokens
-                ? frontier : base->summary.prompt_tokens - 1);
+            const auto pages = kv_pages_for_tokens(frontier);
             const auto page_bytes = host_layout.page_stride + (backend_kv_pages
                 ? plan_host_kv_page_layout(backend_kv_pages->physical_pool().geometry()).page_stride : 0);
             if (pages > kvmem_options.host_bytes / page_bytes) {
@@ -656,9 +654,9 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
         // This cold tier is C1-only: inspect_lane proves the sole active lane is
         // empty. Import never competes with an active request's H reservation.
         if (!memory_restorable_history(prompt)) load_memory_snapshot(prompt);
-        if (const auto index = memory_restorable_history(prompt)) {
-            const auto& history = *memory_histories[*index];
-            plan->memory_restore_frontier = static_cast<std::uint32_t>(history.prefix_checkpoint->prefix.size());
+        if (const auto match = memory_restorable_history(prompt)) {
+            const auto& history = *memory_histories[match->history];
+            plan->memory_restore_frontier = match->frontier;
             plan->memory_restore_generation = history.stamp.session.id;
             plan->reuse_base = plan->memory_restore_frontier;
         }
@@ -780,6 +778,13 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
     }
     plan->summary.reusable_prompt_tokens = plan->reuse_base;
     plan->summary.prefix_reuse_path      = plan->reuse;
+    if (plan->memory_restore_frontier) {
+        if (const auto match = memory_restorable_history(prompt)) {
+            plan->summary.prefix_reuse_path = match->kind == KvmemCheckpointKind::Endpoint
+                ? PrefixReusePath::PrivateEndpoint : match->kind == KvmemCheckpointKind::Rewrite
+                ? PrefixReusePath::PrivateTurnClosure : PrefixReusePath::PrivateResponseReplay;
+        }
+    }
     if (speculative_backend == SpeculativeBackend::Mtp) {
         if (plan->reuse == ReusePath::Root) {
             plan->prepare_mtp = true;

@@ -1119,6 +1119,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
     }
     trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
     if (terminal) { sequence.mtp_draft_count = 0; }
+    capture_memory_replay_if_ready(sequence);
     request.lifecycle = terminal ? Lifecycle::Finishable : Lifecycle::Active;
     request.pending   = {};
     return timing.finish();

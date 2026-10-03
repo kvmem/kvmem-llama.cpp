@@ -13,11 +13,11 @@
 namespace ninfer::models::qwen3_5::detail {
 namespace {
 namespace fs = std::filesystem;
-constexpr std::uint64_t magic = 0x33454d454d4b494eULL; // NIKMEME3; schema is deliberately closed.
+constexpr std::uint64_t magic = 0x34454d454d4b494eULL; // NIKMEME4; schema is deliberately closed.
 constexpr std::uint64_t header_bytes = 24;
 
 fs::path directory(const ProgramImpl& program) {
-    return program.kvmem_options.disk_path / "ninfer-kvmem-v3";
+    return program.kvmem_options.disk_path / "ninfer-kvmem-v4";
 }
 fs::path snapshot_path(const ProgramImpl& program, const PreparedSessionKey& key) {
     kvmem::SnapshotWriter digest([](const void*, std::size_t) {});
@@ -49,7 +49,7 @@ std::vector<std::uint8_t> compatibility(const ProgramImpl& p) {
         const auto* first = static_cast<const std::uint8_t*>(data);
         bytes.insert(bytes.end(), first, first + count);
     });
-    out.scalar(std::uint32_t(3));
+    out.scalar(std::uint32_t(4));
     out.write(p.parameters.model.info().artifact_id.data(), 16);
     out.scalar(std::uint32_t(std::endian::native == std::endian::little));
     out.scalar(p.capacity); out.scalar(p.prefill_chunk);
@@ -115,26 +115,41 @@ struct KvmemSnapshotCodec {
 };
 
 void ProgramImpl::save_memory_snapshot(KvmemWindowState& window) noexcept {
-    if (kvmem_options.disk_path.empty() || !window.session_key || !window.prefix_checkpoint) return;
+    if (kvmem_options.disk_path.empty() || !window.session_key ||
+        (!window.prefix_checkpoint && !window.endpoint_checkpoint && !window.replay_checkpoint)) return;
     fs::path temporary;
     try {
         const auto destination = snapshot_path(*this, *window.session_key);
         temporary = destination; temporary += ".tmp";
         fs::create_directories(directory(*this));
-        auto& checkpoint = *window.prefix_checkpoint;
-        const auto frontier = static_cast<std::uint32_t>(checkpoint.prefix.size());
+        const KvmemPrefixCheckpoint* latest = nullptr;
+        for (const auto kind : {KvmemCheckpointKind::Base, KvmemCheckpointKind::Endpoint,
+                                KvmemCheckpointKind::Rewrite})
+            if (const auto* checkpoint = memory_checkpoint(window, kind);
+                checkpoint && (!latest || checkpoint->prefix.size() > latest->prefix.size())) latest = checkpoint;
+        if (!latest) return;
+        const auto frontier = static_cast<std::uint32_t>(latest->prefix.size());
         window.statistics->truncate_to(frontier);
-        window.statistics->restore_mean_checkpoint(frontier, checkpoint.mean_tail);
+        window.statistics->restore_mean_checkpoint(frontier, latest->mean_tail);
         window.selector->truncate_to(frontier);
         window.statistics_frontier = frontier;
         const auto identity = compatibility(*this);
         const auto body = [&](kvmem::SnapshotWriter& out) {
             out.vector(identity);
             out.vector(std::vector<char>(window.session_key->view().begin(), window.session_key->view().end()));
-            out.vector(checkpoint.prefix);
-            KvmemSnapshotCodec::write(out, checkpoint.prefix_identity);
-            out.vector(checkpoint.resident_pages); out.vector(checkpoint.mean_tail);
-            out.write(checkpoint.state->data(), checkpoint.state->size());
+            out.scalar(frontier);
+            out.scalar(window.query_begin); out.scalar(window.query_end); out.scalar(window.query_tokens);
+            out.vector(window.query_sum);
+            for (const auto kind : {KvmemCheckpointKind::Base, KvmemCheckpointKind::Endpoint,
+                                    KvmemCheckpointKind::Rewrite}) {
+                const auto* checkpoint = memory_checkpoint(window, kind);
+                out.scalar(std::uint8_t(checkpoint != nullptr));
+                if (!checkpoint) continue;
+                out.vector(checkpoint->prefix);
+                KvmemSnapshotCodec::write(out, checkpoint->prefix_identity);
+                out.vector(checkpoint->resident_pages); out.vector(checkpoint->mean_tail);
+                out.write(checkpoint->state->data(), checkpoint->state->size());
+            }
             window.statistics->snapshot_write(out);
             for (const auto& page : window.archive) {
                 if (!page) throw std::logic_error("snapshot prefix has a missing page");
@@ -212,37 +227,68 @@ void ProgramImpl::load_memory_snapshot(const PreparedPromptData& prompt) noexcep
             throw kvmem::SnapshotCorrupt("snapshot session identity mismatch");
         SequenceState imported;
         auto& window = imported.window;
-        window.prefix_checkpoint = std::make_unique<KvmemPrefixCheckpoint>();
-        auto& checkpoint = *window.prefix_checkpoint;
-        checkpoint.prefix = in.vector<TokenId>(capacity);
-        const auto frontier = static_cast<std::uint32_t>(checkpoint.prefix.size());
-        if (!frontier || frontier >= prompt.token_ids.size() ||
-            (prompt.token_ids.size() > kvmem_window_tokens && prompt.memory_query &&
-             frontier > prompt.memory_query->begin) ||
-            !std::equal(checkpoint.prefix.begin(), checkpoint.prefix.end(), prompt.token_ids.begin())) return;
-        checkpoint.prefix_identity = KvmemSnapshotCodec::read(in, frontier);
-        if (!checkpoint.prefix_identity.matches(prompt, frontier)) return;
+        const auto frontier = in.scalar<std::uint32_t>();
+        if (!frontier || frontier > capacity) throw kvmem::SnapshotCorrupt("invalid history frontier");
         const auto pages = kv_pages_for_tokens(frontier);
-        checkpoint.resident_pages = in.vector<std::uint64_t>(kvmem_window_tokens / 64);
-        if (checkpoint.resident_pages.empty() ||
-            !std::is_sorted(checkpoint.resident_pages.begin(), checkpoint.resident_pages.end()) ||
-            std::adjacent_find(checkpoint.resident_pages.begin(), checkpoint.resident_pages.end()) != checkpoint.resident_pages.end() ||
-            checkpoint.resident_pages.back() >= pages ||
-            (frontier % 64 && checkpoint.resident_pages.back() != pages - 1))
-            throw kvmem::SnapshotCorrupt("snapshot compact view is invalid");
         const auto& config = parameters.model.config().text;
         const auto width = static_cast<std::uint32_t>(memory_statistics->key_sums.ne[0]);
-        // RawKvStore stores a token count followed by the key sums for each layer.
-        const auto mean_values = frontier % 64
-            ? (std::uint64_t(width) + 1) * config.full_attention_layers : 0;
-        checkpoint.mean_tail = in.vector<float>(mean_values);
-        if (checkpoint.mean_tail.size() != mean_values)
-            throw kvmem::SnapshotCorrupt("invalid partial-page mean checkpoint");
         const auto state_bytes = state_images->host_layout().image_bytes;
         const auto page_bytes = plan_host_kv_page_layout(text_kv_pages->physical_pool().geometry()).page_stride +
             (backend_kv_pages ? plan_host_kv_page_layout(backend_kv_pages->physical_pool().geometry()).page_stride : 0);
         if (pages > kvmem_options.host_bytes / page_bytes) throw kvmem::SnapshotCorrupt("snapshot exceeds Host quota");
         const auto required = pages * page_bytes;
+        window.query_begin = in.scalar<std::uint32_t>();
+        window.query_end = in.scalar<std::uint32_t>();
+        window.query_tokens = in.scalar<std::uint32_t>();
+        window.query_sum = in.vector<float>(memory_statistics->query_sums.numel());
+        if (window.query_begin > window.query_end || window.query_end > capacity ||
+            window.query_tokens > window.query_end - window.query_begin ||
+            window.query_sum.size() != memory_statistics->query_sums.numel())
+            throw kvmem::SnapshotCorrupt("invalid query attachment");
+        const auto read_checkpoint = [&]() -> std::unique_ptr<KvmemPrefixCheckpoint> {
+            const auto present = in.scalar<std::uint8_t>();
+            if (present > 1) throw kvmem::SnapshotCorrupt("invalid checkpoint tag");
+            if (!present) return {};
+            auto checkpoint = std::make_unique<KvmemPrefixCheckpoint>();
+            checkpoint->prefix = in.vector<TokenId>(frontier);
+            const auto end = static_cast<std::uint32_t>(checkpoint->prefix.size());
+            if (!end) throw kvmem::SnapshotCorrupt("empty checkpoint");
+            checkpoint->prefix_identity = KvmemSnapshotCodec::read(in, end);
+            checkpoint->resident_pages = in.vector<std::uint64_t>(kvmem_window_tokens / 64);
+            const auto count = kv_pages_for_tokens(end);
+            const auto& resident = checkpoint->resident_pages;
+            if (resident.empty() || !std::is_sorted(resident.begin(), resident.end()) ||
+                std::adjacent_find(resident.begin(), resident.end()) != resident.end() ||
+                resident.back() >= count || (end % 64 && resident.back() != count - 1))
+                throw kvmem::SnapshotCorrupt("snapshot compact view is invalid");
+            const auto mean_values = end % 64
+                ? (std::uint64_t(width) + 1) * config.full_attention_layers : 0;
+            checkpoint->mean_tail = in.vector<float>(mean_values);
+            if (checkpoint->mean_tail.size() != mean_values)
+                throw kvmem::SnapshotCorrupt("invalid partial-page mean checkpoint");
+            checkpoint->state = std::make_unique<PinnedHostBuffer>(state_bytes);
+            in.read(checkpoint->state->data(), state_bytes);
+            return checkpoint;
+        };
+        window.prefix_checkpoint = read_checkpoint();
+        window.endpoint_checkpoint = read_checkpoint();
+        window.replay_checkpoint = read_checkpoint();
+        const KvmemPrefixCheckpoint* latest = nullptr;
+        bool matching = false;
+        for (const auto kind : {KvmemCheckpointKind::Base, KvmemCheckpointKind::Endpoint,
+                                KvmemCheckpointKind::Rewrite}) {
+            const auto* checkpoint = memory_checkpoint(window, kind);
+            if (!checkpoint) continue;
+            const auto end = static_cast<std::uint32_t>(checkpoint->prefix.size());
+            if (!latest || end > latest->prefix.size()) latest = checkpoint;
+            if (end < prompt.token_ids.size() &&
+                std::equal(checkpoint->prefix.begin(), checkpoint->prefix.end(), prompt.token_ids.begin()) &&
+                checkpoint->prefix_identity.matches(prompt, end) &&
+                (prompt.token_ids.size() <= kvmem_window_tokens || !prompt.memory_query ||
+                 end <= prompt.memory_query->begin || memory_same_query(window, prompt, end))) matching = true;
+        }
+        if (!latest || latest->prefix.size() != frontier)
+            throw kvmem::SnapshotCorrupt("archive frontier has no complete checkpoint");
         // Free inactive records before importing payload; the hard H bound also
         // holds during import, including when later checksum verification fails.
         for (;;) {
@@ -255,12 +301,10 @@ void ProgramImpl::load_memory_snapshot(const PreparedPromptData& prompt) noexcep
             if (used <= kvmem_options.host_bytes - required) break;
             memory_histories[*oldest].reset(); ++memory_history_evictions;
         }
-        checkpoint.state = std::make_unique<PinnedHostBuffer>(state_bytes);
-        in.read(checkpoint.state->data(), state_bytes);
         window.statistics = std::make_unique<kvmem::RawKvStore>(kvmem::RawKvStoreConfig{
             .n_layer = config.full_attention_layers, .n_embd_k = width, .block_tokens = 64});
         window.statistics->snapshot_read(in, pages);
-        window.statistics->restore_mean_checkpoint(frontier, checkpoint.mean_tail);
+        window.statistics->restore_mean_checkpoint(frontier, latest->mean_tail);
         window.archive.resize(pages); window.host_versions.resize(pages);
         for (std::uint32_t i = 0; i < pages; ++i) {
             window.archive[i] = std::make_unique<KvmemHostRecord>(page_bytes);
@@ -268,12 +312,12 @@ void ProgramImpl::load_memory_snapshot(const PreparedPromptData& prompt) noexcep
             window.host_versions[i] = std::min(64U, frontier - i * 64);
         }
         if (in.remaining() || in.hash() != header[2]) throw kvmem::SnapshotCorrupt("snapshot checksum mismatch");
+        if (!matching) return;
         kvmem::KvMemStoreConfig selection;
         selection.block_tokens = 64; selection.select_budget = kvmem_options.selected_tokens;
         selection.sink_blocks = 1; selection.recent_blocks = 1;
         window.selector = std::make_unique<kvmem::KvMemStore>(selection);
         window.selector->register_append(frontier);
-        window.query_sum.assign(memory_statistics->query_sums.numel(), 0.0F);
         window.statistics_frontier = frontier; window.host_bytes = required;
         window.session_key = prompt.context_cache.session_key;
         imported.text_kv_valid = frontier;

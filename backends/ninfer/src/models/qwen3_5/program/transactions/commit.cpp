@@ -223,6 +223,11 @@ void ProgramImpl::commit_generated_prefix_identity(
                                               prefix_execution_split_after);
     sequence.prefix_digests.append_generated(accepted_tokens, sequence.rope_delta,
                                              prefix_execution_split_after);
+    if (kvmem_window_tokens && prefix_execution_split_after) {
+        const auto frontier = base_ledger_frontier + *prefix_execution_split_after;
+        if (!sequence.window.replay_checkpoint || sequence.window.replay_checkpoint->prefix.size() != frontier)
+            sequence.window.reconstruction_frontier = frontier;
+    }
     if (sequence.prefix_identity.size() != sequence.ledger.size() ||
         sequence.prefix_digests.size() != sequence.ledger.size()) {
         throw std::logic_error("committed generated-prefix identity changed the ledger shape");
@@ -332,6 +337,10 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             if (sequence.ledger.size() != static_cast<std::size_t>(end) + 1U) {
                 throw std::logic_error("forced-token continuation ledger has an invalid shape");
             }
+            if (kvmem_window_tokens) {
+                commit_generated_prefix_identity(sequence, base_ledger_frontier, forced,
+                                                 prefix_execution_splits[row]);
+            }
 
             if (is_masked_draft_backend(speculative_backend)) {
                 if (!dflash || !io.dflash_decode || !sequence.kv ||
@@ -343,7 +352,10 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
 
             std::uint32_t cursor = base;
             while (cursor < end) {
-                const std::uint32_t count           = std::min(prefill_chunk, end - cursor);
+                std::uint32_t count = std::min(prefill_chunk, end - cursor);
+                const auto reconstruction = sequence.window.reconstruction_frontier;
+                if (kvmem_window_tokens && reconstruction > cursor && reconstruction < cursor + count)
+                    count = reconstruction - cursor;
                 if (kvmem_window_tokens) prepare_window(sequence, cursor, cursor + count);
                 const StateImageSelectors selectors = state_selectors(sequence);
                 execution::PrefillContext schedule_state{
@@ -389,6 +401,9 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                 copy_tail(sequence,
                           prefill_hidden.slice(
                               1, static_cast<std::int32_t>(result.processed_tokens) - 1, 1));
+                if (kvmem_window_tokens && request.allow_memory_reuse && reconstruction == cursor) {
+                    capture_memory_replay(sequence);
+                }
             }
             timing.begin_wait();
             device.synchronize();
@@ -402,6 +417,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
             sequence.ledger_frontier    = end + 1U;
             sequence.mtp_draft_count    = 0;
             sequence.tail_hidden_valid  = true;
+            capture_memory_replay_if_ready(sequence);
             if (sequence.ledger.size() != sequence.ledger_frontier ||
                 sequence.prefix_identity.size() != sequence.ledger_frontier ||
                 sequence.prefix_digests.size() != sequence.ledger_frontier ||
@@ -606,6 +622,7 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
         return out;
     }
     if (!request.publish_continuation) {
+        capture_memory_endpoint(state, request);
         retain_memory_history(state, request);
         if (!clear_lane_strict(state, request)) { return out; }
         out.disposition = runtime::FinishDisposition::Released;
