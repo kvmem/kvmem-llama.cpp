@@ -41,8 +41,8 @@ $capabilities = @{
 }
 if ($Backend -eq 'ninfer') {
     $capabilities.supported_combinations = @{
-        text = @{ kv = @('bf16', 'int8'); max_concurrency = 4; mtp_drafts = @(0, 1, 2, 3, 4) }
-        images = @{ kv = @('bf16', 'int8'); max_concurrency = 1; residency = 'resident' }
+        text = @{ kv = @('bf16', 'int8', 'nvfp4'); max_concurrency = 4; mtp_drafts = @(0, 1, 2, 3, 4) }
+        images = @{ kv = @('bf16', 'int8', 'nvfp4'); max_concurrency = 1; residency = 'resident' }
         rk8v4 = @{ max_concurrency = 1; text_only = $true }
         cold_disk = @{ max_concurrency = 1; text_only = $true; device_profile = 'off' }
         ngram = @{ max_concurrency = 1; text_only = $true; requires_mtp = $true; max_drafts = 63 }
@@ -68,8 +68,8 @@ if (!$Gpu -or $Gpu.Trim() -eq '-1') { throw 'Select a GPU UUID with -Gpu or CUDA
 if (!$KvType) { $KvType = if ($Backend -eq 'ninfer') { 'int8' } else { 'q8_0' } }
 if ($Backend -eq 'ninfer') {
     if ($Budget % 64 -or $Reserve % 64 -or $Prefill % 128 -or $Prefill -gt $Reserve -or
-        ([long]$Budget + $Reserve) -gt $Context -or $KvType -notin @('int8', 'bf16', 'rk8v4')) {
-        throw 'ninfer requires B/R aligned to 64, prefill aligned to 128 and <= R, B+R <= Context, int8/bf16/rk8v4'
+        ([long]$Budget + $Reserve) -gt $Context -or $KvType -notin @('int8', 'bf16', 'nvfp4', 'rk8v4')) {
+        throw 'ninfer requires B/R aligned to 64, prefill aligned to 128 and <= R, B+R <= Context, int8/bf16/nvfp4/rk8v4'
     }
     if (($Vision -and $Concurrency -ne 1) -or
         ($KvType -eq 'rk8v4' -and ($Vision -or $Concurrency -ne 1)) -or

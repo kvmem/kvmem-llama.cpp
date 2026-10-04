@@ -26,7 +26,15 @@ llama.cpp 示例：
 
 ## ninfer 功能与组合
 
-当前源码正在完成 P6–P10 及 ngram 验收，冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。新组合包括固定 MTP1–4（MTP2/4 的完整组合矩阵尚未完成，MTP4 已通过部分真实模型回归）、多个 Host 会话、最多四条文本请求、单活动请求图像，以及单活动文本请求的 RK8V4 和冷快照。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
+当前源码正在完成 P6–P10 及 ngram 验收，冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。新组合包括固定 MTP1–4（各格式的实测范围见下文及随包报告）、多个 Host 会话、最多四条文本请求、单活动请求图像，以及单活动文本请求的 RK8V4 和冷快照。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
+
+双 NVFP4 已接入源码，5050 上的聚焦数值／页搬运测试及 Bonsai B128/R128 ordinary、MTP1 eager、MTP4 Graph 功能检查已通过。
+两个 MTP 用例使用现有 D3D12/WDDM 选项、FP16 GDN 和关闭的 ngram；默认 CUDA 预算下 Q8 MTP 装载仍被容量检查拒绝。
+5060 Ti＋IQ3S 已通过双 NVFP4 的 229 组数值／功能／质量／故障注入检查：ordinary/MTP1–4 × eager/Graph、Host 会话、2/4 路文本、resident 图像、冷快照和最高 128K 档检索。三次独立 B32768/R16384、MTP4 Graph 服务启动及越窗 HTTP 请求也通过，ngram/lookup 均关闭。[完整记录](nvfp4-kvmem-validation-20261004.md)保留失败尝试与测试修正；这是本地源码验收，现有运行包不因此获得该能力。
+`-KvType nvfp4` 对 K/V 都使用 group-16 e2m1 packed codes 与 E4M3 scale 字节，
+Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinary 或固定 MTP1–4、
+1–4 条文本请求或一条 resident 图像请求、Host 会话复用；冷快照仍要求单文本请求和
+`DeviceProfile off`。ngram 默认关闭，`k8v4` 不是双 NVFP4，仍不在 KVMem 格式范围内。
 
 ```powershell
 # 固定 MTP3，两个活动文本请求；B/R 是每请求预算，H 是全局预算。
@@ -43,13 +51,20 @@ llama.cpp 示例：
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
   -Model 'D:/models/model-mtp.ninfer' -Gpu 'GPU-your-device-uuid' `
   -MtpDrafts 3 -KvType rk8v4 -DiskPath 'D:/cache/kvmem' -DiskMiB 4096
+
+# NVFP4 本地源码验收配置示例，使用新编译的 worker；ngram 关闭。
+./scripts/windows/start-backend.ps1 -Backend ninfer `
+  -Worker 'D:/build/apps/ninfer-serve.exe' `
+  -Model 'D:/models/model-mtp.ninfer' -Gpu 'GPU-your-device-uuid' `
+  -MtpDrafts 2 -NgramDrafts 0 -KvType nvfp4 -Budget 32768 -Reserve 16384
 ```
 
-`-MtpDrafts` 默认 0，可选 1–4（固定草稿数；2/4 尚未完成完整组合矩阵）；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP 和单活动文本请求；`-NgramMinMatch` 默认 12，可选 4–64。例如 `-MtpDrafts 3 -NgramDrafts 31 -KvType rk8v4`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。自适应 MTP、超过 4 的 MTP 草稿宽度、MTP 独立 attention window、视频、并发图像和 RK8V4 并发尚不在本轮组合内，服务会拒绝。`-DeviceProfile auto` 可选原生设备配置；磁盘快照首版要求 `off`，以固定跨进程执行配置。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
+`-MtpDrafts` 默认 0，可选 1–4（固定草稿数；双 NVFP4 已完成下述本地矩阵，其他格式以各自报告为准）；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP 和单活动文本请求；`-NgramMinMatch` 默认 12，可选 4–64。例如 `-MtpDrafts 3 -NgramDrafts 31 -KvType rk8v4`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。自适应 MTP、超过 4 的 MTP 草稿宽度、MTP 独立 attention window、视频、并发图像和 RK8V4 并发尚不在本轮组合内，服务会拒绝。`-DeviceProfile auto` 可选原生设备配置；磁盘快照首版要求 `off`，以固定跨进程执行配置。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
 
 本次 ninfer 实测制品是 Qwen3.8-27B-GSQ-RCO-IQ3_S，设备为 RTX 5060 Ti 16GB、CUDA 13.2、`sm_120a`。8K/64K/128K/256K 档的早期口令检索和后续追问通过；这组人工构造用例不代表通用长文问答质量，也不表示其他 GPU 架构已验收。示例的 B=2048、R=512、H=12 GiB 是实际通过的配置。
 
 - B 是每请求选中历史的 GPU token 预算，R 是追加工作空间，两者按 64-token 页对齐；C 条活动请求的 Main 页池按 C×(B+R) 配置。MTP 另有原生草稿页池，Main/MTP 的 Host payload 都计入 H。
+- NVFP4 的 D256 K/V 每 token 每 KV head 共 288 字节（两份 128 字节 codes 与 16 字节 scales）；INT8 为 528 字节，RK8V4 为 408 字节。换页按原始字节传输，不重新量化；权重、GDN state、workspace 与 CUDA Graph 不随 KV 格式同比缩小。格式布局身份和冷快照执行配置区分 NVFP4 与其他 KV 格式。
 - prefill 是 128 的倍数且不超过 R。追加压力触发选页，逻辑历史保留原始位置。生成上限由请求输出预算和逻辑上下文上限共同决定。
 - H 只限制原生 KV payload。统计索引、每会话最多四个检查点的 GDN StateImage、模型和临时缓冲另计，H 不等于进程总内存上限。
 - 长期历史保存在普通 Host 内存，CUDA 搬运复用一个不超过 B+R 原生页大小的 pinned 缓冲区；其用量单独通过 `transfer_staging_bytes` 报告。

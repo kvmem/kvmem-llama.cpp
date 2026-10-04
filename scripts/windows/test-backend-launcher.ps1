@@ -41,6 +41,27 @@ try {
         -WorkerArgs @('--spec-type', 'draft-mtp') | ConvertFrom-Json
     if ($llama.argv -notcontains 'draft-mtp' -or !$llama.capabilities.speculative_decoding -or
         $llama.argv -contains '--kvmem-host-mib') { throw 'llama native options changed' }
+    foreach ($drafts in 0..4) {
+        foreach ($lanes in 1..4) {
+            $nvfp4 = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                -KvType nvfp4 -MtpDrafts $drafts -Concurrency $lanes | ConvertFrom-Json
+            if ($nvfp4.argv[[array]::IndexOf($nvfp4.argv, '--kv-dtype') + 1] -ne 'nvfp4' -or
+                $nvfp4.capabilities.supported_combinations.text.kv -notcontains 'nvfp4' -or
+                ($drafts -and $nvfp4.argv[[array]::IndexOf($nvfp4.argv, '--ngram-draft-tokens') + 1] -ne '0')) {
+                throw 'NVFP4 text/MTP mapping or disabled ngram settings failed'
+            }
+        }
+        $image = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+            -KvType nvfp4 -MtpDrafts $drafts -Vision | ConvertFrom-Json
+        if ($image.argv -notcontains '--vision' -or $image.capabilities.supported_combinations.images.kv -notcontains 'nvfp4') {
+            throw 'NVFP4 resident-image mapping failed'
+        }
+        $snapshot = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+            -KvType nvfp4 -MtpDrafts $drafts -DiskPath 'nvfp4 cache with spaces' | ConvertFrom-Json
+        if ($snapshot.argv -notcontains 'nvfp4 cache with spaces' -or $snapshot.argv -notcontains '--derive-session-keys') {
+            throw 'NVFP4 cold snapshot mapping failed'
+        }
+    }
     $bad = @(
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=5},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=-1},
@@ -49,6 +70,10 @@ try {
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); Reserve=64},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); Vision=$true; Concurrency=2},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='rk8v4'; Concurrency=2},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='nvfp4'; Vision=$true; Concurrency=2},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='nvfp4'; NgramDrafts=31},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='k8v4'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='nvpf4'},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); DiskPath='cache'; DeviceProfile='auto'},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); NgramDrafts=31},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=3; NgramDrafts=15; Concurrency=2},
