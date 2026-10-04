@@ -18,10 +18,10 @@ index b069b95b0af235266c98216420e05be256a1cd06..e2555ed074fec663fca98f0ce2f67759
  add_subdirectory(src)
  if(NINFER_BUILD_APPS)
 diff --git a/docs/maintainer/paged-kv-cache.md b/docs/maintainer/paged-kv-cache.md
-index a01799072a309140c8e58aebdc5a45234a2d19fb..89c6de830df2d4b073d9ec8564661fe2f3a3007e 100644
+index a01799072a309140c8e58aebdc5a45234a2d19fb..5aa46b63ab1a15fc27b7c7a2d7fb02ee6582fe40 100644
 --- a/docs/maintainer/paged-kv-cache.md
 +++ b/docs/maintainer/paged-kv-cache.md
-@@ -778,3 +778,150 @@ Exact model state 和 backend mathematics 见
+@@ -778,3 +778,165 @@ Exact model state 和 backend mathematics 见
  [Qwen3.5 model](qwen3_5-model.md)与 [DFlash](dflash.md)；persistent KV codec 和 causal consumer
  numerical contract 由上表中的 growing-cache Ops 定义。路径用于定位当前实现，不把文件或类名本身提升为
  外部接口。
@@ -61,7 +61,7 @@ index a01799072a309140c8e58aebdc5a45234a2d19fb..89c6de830df2d4b073d9ec8564661fe2
 +diagnostic readbacks remain separately bounded pinned allocations. This archive is separate
 +from the native prefix cache's HostKVArena described above.
 +
-+The integration has single-device ordinary and fixed MTP1..4 text paths, BF16, INT8 or NVFP4,
++The integration has single-device ordinary and fixed MTP1..4 text paths, BF16, INT8, NVFP4 or K8V4,
 +and a single-active-text-request RK8V4 path (native rotated K8/V4 planes and scales),
 +with the native prefix catalog disabled. Multi-request qualification covers startup concurrency
 +2 and 4 separately; unqualified combinations are not release capability claims. Post-RMS/pre-RoPE
@@ -92,6 +92,21 @@ index a01799072a309140c8e58aebdc5a45234a2d19fb..89c6de830df2d4b073d9ec8564661fe2
 +BF16 pre-RoPE mean-K/Q statistics and accepted-prefix folding are unchanged. NVFP4
 +uses INT8's ordinary/fixed-MTP, text-concurrency and resident-vision restrictions;
 +it does not enable adaptive MTP, concurrent images or a separate MTP attention window.
++
++K8V4 uses the existing `Fp8KeyNvfp4Value` codec for both Main and MTP. K has
++256 FP8_E4M3FN code bytes and one FP16 row scale (2 bytes); V has 128 packed
++NVFP4 code bytes and sixteen raw E4M3 group-16 scales. The 402-byte D256 payload
++has asymmetric scale extents and dtypes, so page transfers derive each plane
++independently. Both K and V use the native normalized D256 Hadamard. Its layout
++identity is `ninfer.k8v4-fp8-nvfp4.page.v1`; the existing execution identity
++also records the storage enum, isolating cold records from NVFP4 and INT8.
++It follows the same ordinary/fixed-MTP, concurrency and resident-vision gates
++as INT8. The compact 26-run IQ3S/5060 Ti qualification covers MTP0 eager/Graph,
++MTP1..3 Graph, MTP4 eager/Graph, C4 pressure, vision, cold faults/format isolation,
++8K/32K retrieval and one B32768/R16384 MTP4 Graph serving start. Ngram/lookup
++were disabled; this is functional qualification, not a complete Cartesian
++matrix or performance comparison. See the
++[K8V4 report](../../../../docs/k8v4-kvmem-validation-20261004.md).
 +
 +An input that fits B+R instead captures a reusable prefix immediately before its final input token
 +when history reuse is enabled. This capture does not trigger Q probing or replay. Keeping one
@@ -2198,10 +2213,10 @@ index e57cc085b0f2a3b8904a995ed94208b3fbe44f2c..7311f0cd50db1f123edc7cf8f485e671
      sequence.dflash_context_frontier = 0;
 diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..fc867afaabf2c772af3239e6c71d1647b73f89a0
+index 0000000000000000000000000000000000000000..1d68492f014ca133d35c3461bd7a27705c435460
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
-@@ -0,0 +1,954 @@
+@@ -0,0 +1,955 @@
 +#include "models/qwen3_5/program/program_impl.h"
 +#include "models/qwen3_5/program/context.h"
 +#include "models/qwen3_5/program/context_work.h"
@@ -2264,6 +2279,7 @@ index 0000000000000000000000000000000000000000..fc867afaabf2c772af3239e6c71d1647
 +        case KvCacheStorage::BFloat16: layout_name = "ninfer.bf16.page.v1"; break;
 +        case KvCacheStorage::Int8Group64: layout_name = "ninfer.int8-g64.page.v1"; break;
 +        case KvCacheStorage::Nvfp4Group16: layout_name = "ninfer.nvfp4-g16.page.v1"; break;
++        case KvCacheStorage::Fp8KeyNvfp4Value: layout_name = "ninfer.k8v4-fp8-nvfp4.page.v1"; break;
 +        case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
 +            layout_name = "ninfer.rk8v4-k64-v32.page.v1";
 +            break;
@@ -3962,10 +3978,10 @@ index 3a0d9157ffdec290e1ea5f19fea7fd6405edc0d3..f60aa2e99bc0a6d96b0ebe733e3f0159
      const bool recover_invariant_failures_;
      const bool kv_lease_growth_;
 diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
-index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..ba941a90e83ecccc9fe0007e6ddf8e9fbc60dadf 100644
+index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..72ec646b07c096771bddd097439e6d43c34554f5 100644
 --- a/src/runtime/engine/model_instance.cpp
 +++ b/src/runtime/engine/model_instance.cpp
-@@ -239,6 +239,57 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
+@@ -239,6 +239,58 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
  } // namespace
  
  EngineOptions normalize_engine_options(EngineOptions options) {
@@ -4012,11 +4028,12 @@ index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..ba941a90e83ecccc9fe0007e6ddf8e9f
 +            options.context_cache.enabled || options.fast_prefill_kernel ||
 +            (options.kv_cache != KvCacheStorage::BFloat16 && options.kv_cache != KvCacheStorage::Int8Group64 &&
 +             options.kv_cache != KvCacheStorage::Nvfp4Group16 &&
++             options.kv_cache != KvCacheStorage::Fp8KeyNvfp4Value &&
 +             options.kv_cache != KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) ||
 +            (options.kv_cache == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 &&
 +             (options.max_concurrency != 1 || options.enable_vision))) {
 +            throw std::invalid_argument("KVMem requires explicit B+R page-aligned "
-+                "capacity per lane, nonzero global H, aligned prefill <= R, BF16/INT8/NVFP4 or single-lane text RK8V4, 1..4 text lanes or one resident-vision lane, ordinary/MTP1..4, "
++                "capacity per lane, nonzero global H, aligned prefill <= R, BF16/INT8/NVFP4/K8V4 or single-lane text RK8V4, 1..4 text lanes or one resident-vision lane, ordinary/MTP1..4, "
 +                "and disabled prefix cache");
 +        }
 +    }
@@ -4130,7 +4147,7 @@ index ff590ace14997c8506fc03497b15f31a181a03e2..cb71e1b64bc5265a6682281739c6d954
  }
  
 diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
-index 97d9974961de55594564cdd901affed648e20529..3df2c945704a1642f90415600b78711f6180d970 100644
+index 97d9974961de55594564cdd901affed648e20529..f32be4f492a0ef1a6bd618765ed1b158c13d6672 100644
 --- a/src/serve/serve_options.cpp
 +++ b/src/serve/serve_options.cpp
 @@ -85,6 +85,17 @@ std::string serve_usage_text(const char* argv0) {
@@ -4144,7 +4161,7 @@ index 97d9974961de55594564cdd901affed648e20529..3df2c945704a1642f90415600b78711f
 +           "  --kvmem-disk-path PATH        cold text session snapshots (C1, device-profile off)\n"
 +           "  --kvmem-disk-mib N            hard disk quota including temporary replacements\n"
 +           "                                KVMem uses B+R device tokens and its own\n"
-+           "                                verified history reuse; BF16/INT8/NVFP4,\n"
++           "                                verified history reuse; BF16/INT8/NVFP4/K8V4,\n"
 +           "                                1..4 text lanes or one resident-vision lane,\n"
 +           "                                ordinary or fixed MTP1..4; RK8V4 text C1\n"
 +           "  --kvmem-verify-transfers      check restored KV/GDN bytes (diagnostic)\n"
@@ -4182,7 +4199,7 @@ index 97d9974961de55594564cdd901affed648e20529..3df2c945704a1642f90415600b78711f
          } else if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
              // --vram-headroom-mib is the Wallawalla47 fork's name for the same headroom.
              const std::uint64_t mib = parse_u64(require_value(arg.c_str()), arg.c_str() + 2);
-@@ -1202,6 +1237,63 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1202,6 +1237,64 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              throw std::invalid_argument("--default-max-tokens must be positive");
          }
      }
@@ -4216,10 +4233,11 @@ index 97d9974961de55594564cdd901affed648e20529..3df2c945704a1642f90415600b78711f
 +            options.fast_prefill_kernel || options.cuda_memory_policy != CudaMemoryPolicy::DriverDefault ||
 +            (options.kv_cache != KvCacheStorage::BFloat16 && options.kv_cache != KvCacheStorage::Int8Group64 &&
 +             options.kv_cache != KvCacheStorage::Nvfp4Group16 &&
++             options.kv_cache != KvCacheStorage::Fp8KeyNvfp4Value &&
 +             options.kv_cache != KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) ||
 +            (options.kv_cache == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64 &&
 +             (options.max_concurrency != 1 || options.enable_vision))) {
-+            throw std::invalid_argument("KVMem requires ordinary or fixed MTP1..4 single-GPU generation, BF16/INT8/NVFP4 or single-lane text RK8V4, images on one resident-vision lane, "
++            throw std::invalid_argument("KVMem requires ordinary or fixed MTP1..4 single-GPU generation, BF16/INT8/NVFP4/K8V4 or single-lane text RK8V4, images on one resident-vision lane, "
 +                "and exclusive ownership of history caching");
 +        }
 +        if (options.kvmem.selected_tokens < 128 || options.kvmem.selected_tokens % 64 ||
@@ -4337,7 +4355,7 @@ index f9971c923e2de8063bf69c16a581df94f568ddc1..6083e81581a4c386bdb91b5f85d5cc32
 +ninfer_finalize_bundle(ninfer_kvmem_nvfp4_tests)
 +ninfer_stage_runtime_dlls(ninfer_kvmem_nvfp4_tests)
 diff --git a/tests/README.md b/tests/README.md
-index 41c93343d778334dc0bca7213e9342f913572b70..26fdacc052a2819cd984ce8959dddb8c3d6826d4 100644
+index 41c93343d778334dc0bca7213e9342f913572b70..16200733411f4cfa179b18df08930f6a469846e2 100644
 --- a/tests/README.md
 +++ b/tests/README.md
 @@ -298,6 +298,99 @@ The old/new Qwen3.8 binding matrix uses `out/qwen3_8_27b_old.ninfer` and
@@ -4440,12 +4458,38 @@ index 41c93343d778334dc0bca7213e9342f913572b70..26fdacc052a2819cd984ce8959dddb8c
  ## Container build cache
  
  Check the Dockerfile's incremental-build and configuration-invalidation behavior without compiling
+@@ -313,3 +406,25 @@ timestamps, non-code edits, and one-file incremental compilation. Docker BuildKi
+ `podman` can be passed instead to check that builder. Logs and the fixture remain in an ignored
+ `build-cache-test.*` directory; the test image and its small build caches remain in the builder.
+ The check needs the Dockerfile's build dependencies but no GPU or model weights.
++
++## KVMem K8V4 compact qualification
++
++K8V4 reuses native FP8 K / NVFP4 V CUDA kernels. The independent payload oracle
++checks three Main layers plus one MTP layer in both page orders, including the
++FP16 row K scale and raw E4M3 group V scales. Sparse Attention uses FP8-quantized
++rotated Q, represented K/V cast boundaries and inverse Hadamard; future K FP16
++and V E4M3 scales are poisoned with NaNs under causal/tile masks.
++
++The existing focused bundle supports `ninfer_kv_cache_append_test --k8v4-only`
++and `ninfer_softmax_attention_test --k8v4-only`; use `ninfer_p1_sparse k8v4` for
++fragmented/reordered pages, widths 1..5, 13, 53, 63..65 and eager/Graph masking.
++The options and Windows launcher checks cover ordinary/MTP1..4, lane budgets,
++vision/cold settings and rejected combinations for both NVFP4 and K8V4.
++
++The 2026-10-04 real IQ3S/5060 Ti qualification deliberately uses 26 processes:
++12 history, sessions, C4 normal/pressure, resident vision, five cold-disk runs
++(including an NVFP4 mismatch seed), two fallback cold runs, 8K/32K quality and
++one 32K/16K MTP4 Graph serving start. All ngram/lookup paths are disabled. Each
++process can issue several requests; foundational numerical cases are counted
++separately and no unrelated suite is repeated. Commands, scope and timings are
++in the [report](../../../docs/k8v4-kvmem-validation-20261004.md).
 diff --git a/tests/experimental/kvmem_test_options.h b/tests/experimental/kvmem_test_options.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4ab26695bef3018268ec711b6e80bc157808dd1a
+index 0000000000000000000000000000000000000000..e29cd0e383488754390957ddc20d7260a829d33f
 --- /dev/null
 +++ b/tests/experimental/kvmem_test_options.h
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,35 @@
 +#pragma once
 +
 +#include "core/paged_kv_storage.h"
@@ -4461,6 +4505,7 @@ index 0000000000000000000000000000000000000000..4ab26695bef3018268ec711b6e80bc15
 +    if (name == "bf16") return KvCacheStorage::BFloat16;
 +    if (name == "int8") return KvCacheStorage::Int8Group64;
 +    if (name == "nvfp4") return KvCacheStorage::Nvfp4Group16;
++    if (name == "k8v4") return KvCacheStorage::Fp8KeyNvfp4Value;
 +    if (name == "rk8v4") return KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
 +    throw std::invalid_argument("unknown KVMem test KV format: " + std::string(name));
 +}
@@ -4482,7 +4527,7 @@ index 0000000000000000000000000000000000000000..4ab26695bef3018268ec711b6e80bc15
 +} // namespace ninfer::test
 diff --git a/tests/experimental/memory_concurrency.cpp b/tests/experimental/memory_concurrency.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..e6d34fb414b527bad00de0baef1cbe83191c1807
+index 0000000000000000000000000000000000000000..d8ea0b91912195ee4167bebbb1d3a32a6fbd89be
 --- /dev/null
 +++ b/tests/experimental/memory_concurrency.cpp
 @@ -0,0 +1,187 @@
@@ -4550,7 +4595,7 @@ index 0000000000000000000000000000000000000000..e6d34fb414b527bad00de0baef1cbe83
 +int main(int argc, char** argv) {
 +    try {
 +        require(argc >= 5 && argc <= 7,
-+                "artifact draft-count(0..4) concurrency(2|4) host-MiB [bf16|int8|nvfp4|rk8v4] [eager|graph]");
++                "artifact draft-count(0..4) concurrency(2|4) host-MiB [bf16|int8|nvfp4|k8v4|rk8v4] [eager|graph]");
 +        const auto drafts = static_cast<std::uint32_t>(std::stoul(argv[2]));
 +        const auto concurrency = static_cast<std::uint32_t>(std::stoul(argv[3]));
 +        ninfer::EngineOptions options;
@@ -4675,7 +4720,7 @@ index 0000000000000000000000000000000000000000..e6d34fb414b527bad00de0baef1cbe83
 +}
 diff --git a/tests/experimental/memory_disk.cpp b/tests/experimental/memory_disk.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..6c5540e262187624c6e0421eea7de66d387cab83
+index 0000000000000000000000000000000000000000..73b49262984bc360fbb0062682fcdfd515601931
 --- /dev/null
 +++ b/tests/experimental/memory_disk.cpp
 @@ -0,0 +1,123 @@
@@ -4704,7 +4749,7 @@ index 0000000000000000000000000000000000000000..6c5540e262187624c6e0421eea7de66d
 +}
 +int main(int argc, char** argv) {
 +    try {
-+        require(argc >= 7 && argc <= 10, "artifact drafts(0..4) bf16|int8|nvfp4|rk8v4 cache-dir cold|hit|error|cancel|clear quota-MiB [ngram-width] [short|long] [eager|graph]");
++        require(argc >= 7 && argc <= 10, "artifact drafts(0..4) bf16|int8|nvfp4|k8v4|rk8v4 cache-dir cold|hit|error|cancel|clear quota-MiB [ngram-width] [short|long] [eager|graph]");
 +        ninfer::EngineOptions options;
 +        options.artifact_path = argv[1];
 +        options.device_profile = "off";
@@ -4804,7 +4849,7 @@ index 0000000000000000000000000000000000000000..6c5540e262187624c6e0421eea7de66d
 +}
 diff --git a/tests/experimental/memory_ngram.cpp b/tests/experimental/memory_ngram.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b467a2e36c0451cdaddcd75d1315b452389ee2fa
+index 0000000000000000000000000000000000000000..cad680ad280d4c1053d7a3acb2b10221b8918988
 --- /dev/null
 +++ b/tests/experimental/memory_ngram.cpp
 @@ -0,0 +1,120 @@
@@ -4837,7 +4882,7 @@ index 0000000000000000000000000000000000000000..b467a2e36c0451cdaddcd75d1315b452
 +}
 +int main(int argc, char** argv) {
 +    try {
-+        require(argc == 5 || argc == 6, "artifact bf16|int8|nvfp4|rk8v4 eager|graph ngram-width [mtp-drafts]");
++        require(argc == 5 || argc == 6, "artifact bf16|int8|nvfp4|k8v4|rk8v4 eager|graph ngram-width [mtp-drafts]");
 +        ninfer::EngineOptions options;
 +        options.artifact_path = argv[1];
 +        options.device_profile = "off"; options.max_context = 8192; options.prefill_chunk = 128;
@@ -4930,7 +4975,7 @@ index 0000000000000000000000000000000000000000..b467a2e36c0451cdaddcd75d1315b452
 +}
 diff --git a/tests/experimental/memory_sessions.cpp b/tests/experimental/memory_sessions.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..29a680774fb6a498f709cc68cacfc7bb8d54bf10
+index 0000000000000000000000000000000000000000..d6f0a0f9a5ab988adfc6cae0abdeb3f59faa4e38
 --- /dev/null
 +++ b/tests/experimental/memory_sessions.cpp
 @@ -0,0 +1,123 @@
@@ -4980,7 +5025,7 @@ index 0000000000000000000000000000000000000000..29a680774fb6a498f709cc68cacfc7bb
 +
 +int main(int argc, char** argv) {
 +    try {
-+        require(argc >= 3 && argc <= 5, "artifact draft-count(0..4) [bf16|int8|nvfp4|rk8v4] [eager|graph]");
++        require(argc >= 3 && argc <= 5, "artifact draft-count(0..4) [bf16|int8|nvfp4|k8v4|rk8v4] [eager|graph]");
 +        ninfer::EngineOptions options;
 +        options.artifact_path = argv[1];
 +        options.device_profile = "off";
@@ -5059,7 +5104,7 @@ index 0000000000000000000000000000000000000000..29a680774fb6a498f709cc68cacfc7bb
 +}
 diff --git a/tests/experimental/memory_vision.cpp b/tests/experimental/memory_vision.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..19edaa0b6230e5fc9635c3e55febaf1c12634523
+index 0000000000000000000000000000000000000000..a1e52d8ec195051a1c581ae9afc38c430e9639b0
 --- /dev/null
 +++ b/tests/experimental/memory_vision.cpp
 @@ -0,0 +1,163 @@
@@ -5120,7 +5165,7 @@ index 0000000000000000000000000000000000000000..19edaa0b6230e5fc9635c3e55febaf1c
 +int main(int argc, char** argv) {
 +    try {
 +        require(argc >= 6 && argc <= 8,
-+                "artifact draft-count(0..4) native|kvmem red.png blue.png [bf16|int8|nvfp4|rk8v4] [eager|graph]");
++                "artifact draft-count(0..4) native|kvmem red.png blue.png [bf16|int8|nvfp4|k8v4|rk8v4] [eager|graph]");
 +        const auto red = media(argv[4]), blue = media(argv[5]);
 +        const bool memory = std::string(argv[3]) == "kvmem";
 +        const auto drafts = static_cast<std::uint32_t>(std::stoul(argv[2]));
@@ -5228,7 +5273,7 @@ index 0000000000000000000000000000000000000000..19edaa0b6230e5fc9635c3e55febaf1c
 +}
 diff --git a/tests/experimental/p1_engine.cpp b/tests/experimental/p1_engine.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4cee3b3561404465425a5da2e38b2d90c70b2073
+index 0000000000000000000000000000000000000000..6db740714534e255c1def58fa40db5dba17a3bd3
 --- /dev/null
 +++ b/tests/experimental/p1_engine.cpp
 @@ -0,0 +1,97 @@
@@ -5246,7 +5291,7 @@ index 0000000000000000000000000000000000000000..4cee3b3561404465425a5da2e38b2d90
 +int main(int argc, char** argv) {
 +    try {
 +        if (argc != 6 && argc != 7) {
-+            std::cerr << "artifact bf16|int8|nvfp4|rk8v4 native|window graph|eager output-file [host-failure|long]\n";
++            std::cerr << "artifact bf16|int8|nvfp4|k8v4|rk8v4 native|window graph|eager output-file [host-failure|long]\n";
 +            return 2;
 +        }
 +        ninfer::EngineOptions o;
@@ -5331,10 +5376,10 @@ index 0000000000000000000000000000000000000000..4cee3b3561404465425a5da2e38b2d90
 +}
 diff --git a/tests/experimental/p1_options.cpp b/tests/experimental/p1_options.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..3a82edd8509e05387dfc1e6998394e4785d4683d
+index 0000000000000000000000000000000000000000..4157045a2ede5a9fb7ce176d5ad5f5a305794c07
 --- /dev/null
 +++ b/tests/experimental/p1_options.cpp
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,155 @@
 +#include "runtime/engine/model_instance.h"
 +#include <functional>
 +#include <iostream>
@@ -5393,35 +5438,38 @@ index 0000000000000000000000000000000000000000..3a82edd8509e05387dfc1e6998394e47
 +        disk.kvmem.disk_path = "snapshot-test";
 +        disk.kvmem.disk_bytes = 1ULL << 30;
 +        (void)ninfer::runtime::normalize_engine_options(disk);
-+        for (const auto drafts : {0U, 1U, 2U, 3U, 4U}) {
-+            auto nvfp4 = base;
-+            nvfp4.kv_cache = ninfer::KvCacheStorage::Nvfp4Group16;
-+            if (drafts) {
-+                nvfp4.speculative.backend = ninfer::SpeculativeBackend::Mtp;
-+                nvfp4.speculative.draft_tokens = drafts;
-+            }
-+            for (const auto lanes : {1U, 2U, 3U, 4U}) {
-+                auto concurrent = nvfp4;
-+                concurrent.max_concurrency = lanes;
-+                concurrent.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(256 * lanes);
-+                const auto normalized = ninfer::runtime::normalize_engine_options(concurrent);
-+                if (normalized.kv_cache != ninfer::KvCacheStorage::Nvfp4Group16 ||
-+                    normalized.max_concurrency != lanes || normalized.kvmem.device_tokens() != 256 ||
-+                    normalized.speculative.backend != nvfp4.speculative.backend ||
-+                    (drafts && normalized.speculative.draft_tokens != drafts) ||
-+                    normalized.speculative.ngram_draft_tokens != 0 || normalized.speculative.lookup_ngram != 0) {
-+                    throw std::runtime_error("KVMem NVFP4 normalization changed the requested execution");
++        for (const auto storage : {ninfer::KvCacheStorage::Nvfp4Group16,
++                                   ninfer::KvCacheStorage::Fp8KeyNvfp4Value}) {
++            for (const auto drafts : {0U, 1U, 2U, 3U, 4U}) {
++                auto quantized = base;
++                quantized.kv_cache = storage;
++                if (drafts) {
++                    quantized.speculative.backend = ninfer::SpeculativeBackend::Mtp;
++                    quantized.speculative.draft_tokens = drafts;
 +                }
++                for (const auto lanes : {1U, 2U, 3U, 4U}) {
++                    auto concurrent = quantized;
++                    concurrent.max_concurrency = lanes;
++                    concurrent.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(256 * lanes);
++                    const auto normalized = ninfer::runtime::normalize_engine_options(concurrent);
++                    if (normalized.kv_cache != storage ||
++                        normalized.max_concurrency != lanes || normalized.kvmem.device_tokens() != 256 ||
++                        normalized.speculative.backend != quantized.speculative.backend ||
++                        (drafts && normalized.speculative.draft_tokens != drafts) ||
++                        normalized.speculative.ngram_draft_tokens != 0 || normalized.speculative.lookup_ngram != 0) {
++                        throw std::runtime_error("KVMem NVFP4/K8V4 normalization changed the requested execution");
++                    }
++                }
++                auto image = quantized;
++                image.enable_vision = true;
++                image.vision_residency = ninfer::VisionResidency::Resident;
++                (void)ninfer::runtime::normalize_engine_options(image);
++                auto cold = quantized;
++                cold.device_profile = "off";
++                cold.kvmem.disk_path = "quantized-snapshot-test";
++                cold.kvmem.disk_bytes = 1ULL << 30;
++                (void)ninfer::runtime::normalize_engine_options(cold);
 +            }
-+            auto image = nvfp4;
-+            image.enable_vision = true;
-+            image.vision_residency = ninfer::VisionResidency::Resident;
-+            (void)ninfer::runtime::normalize_engine_options(image);
-+            auto cold = nvfp4;
-+            cold.device_profile = "off";
-+            cold.kvmem.disk_path = "nvfp4-snapshot-test";
-+            cold.kvmem.disk_bytes = 1ULL << 30;
-+            (void)ninfer::runtime::normalize_engine_options(cold);
 +        }
 +        const std::vector<std::function<void(ninfer::EngineOptions&)>> invalid{
 +            [](auto& o) { o.max_concurrency = 2; },
@@ -5447,7 +5495,6 @@ index 0000000000000000000000000000000000000000..3a82edd8509e05387dfc1e6998394e47
 +            [](auto& o) { o.devices = {0, 1}; },
 +            [](auto& o) { o.purpose = ninfer::EnginePurpose::CausalScoring; },
 +            [](auto& o) { o.kv_cache = ninfer::KvCacheStorage::Fp8E4M3Row256; },
-+            [](auto& o) { o.kv_cache = ninfer::KvCacheStorage::Fp8KeyNvfp4Value; },
 +            [](auto& o) { o.cuda_memory_policy = ninfer::CudaMemoryPolicy::Mixed; },
 +            [](auto& o) { o.speculative.backend = ninfer::SpeculativeBackend::Mtp;
 +                         o.speculative.draft_tokens = 5; },
@@ -5469,7 +5516,8 @@ index 0000000000000000000000000000000000000000..3a82edd8509e05387dfc1e6998394e47
 +                         o.speculative.draft_tokens = 3; o.speculative.mtp_attention_window = 128; },
 +        };
 +        for (const auto& change : invalid) {
-+            for (const auto storage : {ninfer::KvCacheStorage::BFloat16, ninfer::KvCacheStorage::Nvfp4Group16}) {
++            for (const auto storage : {ninfer::KvCacheStorage::BFloat16, ninfer::KvCacheStorage::Nvfp4Group16,
++                                       ninfer::KvCacheStorage::Fp8KeyNvfp4Value}) {
 +                auto bad = base;
 +                bad.kv_cache = storage;
 +                change(bad);
@@ -5479,7 +5527,7 @@ index 0000000000000000000000000000000000000000..3a82edd8509e05387dfc1e6998394e47
 +                if (!rejected) { throw std::runtime_error("unsupported KVMem combination accepted"); }
 +            }
 +        }
-+        std::cout << "P1_OPTIONS PASS: NVFP4 ordinary/MTP1..4, text lanes/vision/disk and " << invalid.size() * 2
++        std::cout << "P1_OPTIONS PASS: NVFP4/K8V4 ordinary/MTP1..4, text lanes/vision/disk and " << invalid.size() * 3
 +                  << " rejected combinations\n";
 +        return 0;
 +    } catch (const std::exception& e) {
@@ -5489,10 +5537,10 @@ index 0000000000000000000000000000000000000000..3a82edd8509e05387dfc1e6998394e47
 +}
 diff --git a/tests/experimental/p1_payload.cpp b/tests/experimental/p1_payload.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..034da31c35d89401bb18ab2ce49ababd73395386
+index 0000000000000000000000000000000000000000..dc95daae2461662d2c5118c45f8e873b3c2dbd54
 --- /dev/null
 +++ b/tests/experimental/p1_payload.cpp
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,72 @@
 +// The existing independent byte-layout oracle also checks stale generations,
 +// fragmented physical mappings, transfer groups, and split-plane restoration.
 +#define main existing_paged_kv_test_main
@@ -5542,6 +5590,22 @@ index 0000000000000000000000000000000000000000..034da31c35d89401bb18ab2ce49ababd
 +                order == ninfer::PagedKVPlaneOrder::PageMajor
 +                    ? "NVFP4 Main+MTP page-major codes/scales" : "NVFP4 Main+MTP head-major codes/scales");
 +        }
++        for (const auto order : {ninfer::PagedKVPlaneOrder::PageMajor, ninfer::PagedKVPlaneOrder::HeadMajor}) {
++            ninfer::KVPageGeometry k8v4;
++            k8v4.device_plane_order = order;
++            // Independent mixed schema: three Main layers and one MTP layer.
++            // K has FP8 codes and one FP16 row scale; V has NVFP4 packed codes
++            // and sixteen raw E4M3 group scales. Never assume equal scale planes.
++            for (int layer = 0; layer < 4; ++layer) {
++                k8v4.planes.push_back({ninfer::DType::FP8_E4M3FN, 256, 4, 256});
++                k8v4.planes.push_back({ninfer::DType::U8, 128, 4, 256});
++                k8v4.planes.push_back({ninfer::DType::FP16, 1, 4, 256});
++                k8v4.planes.push_back({ninfer::DType::U8, 16, 4, 256});
++            }
++            failures += exercise_layout_and_transfer(context, k8v4,
++                order == ninfer::PagedKVPlaneOrder::PageMajor
++                    ? "K8V4 Main+MTP page-major codes/scales" : "K8V4 Main+MTP head-major codes/scales");
++        }
 +        std::cout << (failures ? "P1_PAYLOAD FAIL\n" : "P1_PAYLOAD PASS\n");
 +        return failures ? 1 : 0;
 +    } catch (const std::exception& e) {
@@ -5575,10 +5639,10 @@ index 0000000000000000000000000000000000000000..0edc7e07a8e1cf86aa4747e2d4ce2767
 +}
 diff --git a/tests/experimental/p1_sparse.cpp b/tests/experimental/p1_sparse.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7d296f2d9e8fca34f5df679bd84839cb4edd0a17
+index 0000000000000000000000000000000000000000..184609658106bec46545b973e086ff58d51bc3bb
 --- /dev/null
 +++ b/tests/experimental/p1_sparse.cpp
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,150 @@
 +// Reuse the maintained represented-value codecs and guarded buffers, but select
 +// original logical keys independently of the production compact page table.
 +#include "ops/softmax_attention/causal_cache.cpp"
@@ -5592,16 +5656,19 @@ index 0000000000000000000000000000000000000000..7d296f2d9e8fca34f5df679bd84839cb
 +    std::vector<int> selected = prefix;
 +    selected.insert(selected.end(), {6, 7, 8});
 +    auto initial = make_cache(geometry, storage, 640, 7103);
-+    if (storage == KvCacheStorage::Nvfp4Group16) {
++    if (storage == KvCacheStorage::Nvfp4Group16 || storage == KvCacheStorage::Fp8KeyNvfp4Value) {
 +        // Unwritten future cache bytes have no value contract. Poison their
 +        // E4M3 scales with NaNs: causal/tile masks must keep them out of both
 +        // QK and PV, even when a zero probability would otherwise multiply NaN.
 +        for (int position = original_base + width; position < initial.logical_capacity; ++position) {
 +            for (int head = 0; head < geometry.kv_heads; ++head) {
++                if (storage == KvCacheStorage::Fp8KeyNvfp4Value) {
++                    initial.k_scale.at(fp8_scale_index(geometry, initial.logical_capacity, head, position)) = 0x7e00;
++                }
 +                for (int group = 0; group < kNvfp4QuantGroups; ++group) {
 +                    const auto index = logical_plane_index(kNvfp4QuantGroups, geometry,
 +                        initial.logical_capacity, head, position, group);
-+                    initial.k_nvfp4_scale.at(index) = 0x7f;
++                    if (storage == KvCacheStorage::Nvfp4Group16) initial.k_nvfp4_scale.at(index) = 0x7f;
 +                    initial.v_nvfp4_scale.at(index) = 0xff;
 +                }
 +            }
@@ -5621,12 +5688,16 @@ index 0000000000000000000000000000000000000000..7d296f2d9e8fca34f5df679bd84839cb
 +    const int keys = compact_base + width;
 +    const auto logical_key = [&](int key) { return selected.at(key / 64) * 64 + key % 64; };
 +    const bool nvfp4 = storage == KvCacheStorage::Nvfp4Group16;
-+    const auto represented_q = nvfp4 ? represent_f16_rotated_queries(q, geometry, width) : q;
++    const bool k8v4 = storage == KvCacheStorage::Fp8KeyNvfp4Value;
++    const bool rotated_nvfp4 = nvfp4 || k8v4;
++    const auto represented_q = k8v4 ? quantize_fp8_rotated_queries(q, geometry, width)
++        : nvfp4 ? represent_f16_rotated_queries(q, geometry, width) : q;
 +    const auto represented_cache = [&](bool key, int d, int h, int j) {
-+        if (!nvfp4) return cache_value(expected, key, h, logical_key(j), d);
++        if (!rotated_nvfp4) return cache_value(expected, key, h, logical_key(j), d);
 +        const auto index = cache_index(geometry, expected.logical_capacity, h, logical_key(j), d);
-+        return double(round_to_f16(key ? expected.rotated_k_quantized.at(index)
-+                                      : expected.rotated_v_quantized.at(index)));
++        const auto represented = key ? expected.rotated_k_quantized.at(index)
++                                     : expected.rotated_v_quantized.at(index);
++        return (key && k8v4) ? double(represented) : double(round_to_f16(represented));
 +    };
 +    naive_dense_softmax_attention(op_geometry(geometry), width, keys, 0.0625,
 +        [&](int d, int h, int t) { return double(represented_q.at(q_index(geometry, h, d, t))); },
@@ -5634,7 +5705,7 @@ index 0000000000000000000000000000000000000000..7d296f2d9e8fca34f5df679bd84839cb
 +        [&](int d, int h, int j) { return represented_cache(false, d, h, j); },
 +        [&](int t, int j) { return logical_key(j) <= original_positions[t]; },
 +        [&](int d, int h, int t, double x) { reference[q_index(geometry, h, d, t)] = x; });
-+    if (nvfp4) {
++    if (rotated_nvfp4) {
 +        for (int t = 0; t < width; ++t) {
 +            for (int h = 0; h < geometry.q_heads; ++h) {
 +                std::array<double, kHeadDim> row{};
@@ -5685,7 +5756,7 @@ index 0000000000000000000000000000000000000000..7d296f2d9e8fca34f5df679bd84839cb
 +        " prefix=" + std::to_string(prefix.size()) + " offset=" + std::to_string(offset) +
 +        " width=" + std::to_string(width) + " graph=" + std::to_string(graph);
 +    int failures = verify_attention(label, actual, reference, attention_criterion(storage));
-+    failures += verify_cache(label, cache.snapshot(), expected, storage == KvCacheStorage::BFloat16 || nvfp4);
++    failures += verify_cache(label, cache.snapshot(), expected, storage == KvCacheStorage::BFloat16 || rotated_nvfp4);
 +    failures += cache.verify_guards(label);
 +    failures += table.verify_guards("compact table");
 +    failures += scratch.verify_guards("workspace");
@@ -5697,10 +5768,11 @@ index 0000000000000000000000000000000000000000..7d296f2d9e8fca34f5df679bd84839cb
 +int main(int argc, char** argv) {
 +    try {
 +        int failures = 0;
-+        if (argc > 2) throw std::invalid_argument("[bf16|int8|nvfp4|rk8v4]");
++        if (argc > 2) throw std::invalid_argument("[bf16|int8|nvfp4|k8v4|rk8v4]");
 +        const auto storages = argc == 2
 +            ? std::vector{ninfer::test::kvmem_test_storage(argv[1])}
-+            : std::vector{KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Nvfp4Group16};
++            : std::vector{KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Nvfp4Group16,
++                          KvCacheStorage::Fp8KeyNvfp4Value};
 +        for (const auto storage : storages) {
 +            for (const std::vector<int> pages : {std::vector<int>{0,1,2,3,4,5},
 +                                               std::vector<int>{0,2,4},
@@ -5723,7 +5795,7 @@ index 0000000000000000000000000000000000000000..7d296f2d9e8fca34f5df679bd84839cb
 +}
 diff --git a/tests/experimental/p4_history.cpp b/tests/experimental/p4_history.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..30557fb323aabe8db94894de2a2c508d3f9f1401
+index 0000000000000000000000000000000000000000..7c13d7beea75d5841939db9afefafb9f7ca4c701
 --- /dev/null
 +++ b/tests/experimental/p4_history.cpp
 @@ -0,0 +1,422 @@
@@ -5787,7 +5859,7 @@ index 0000000000000000000000000000000000000000..30557fb323aabe8db94894de2a2c508d
 +int main(int argc, char** argv) {
 +    try {
 +        if (argc < 5 || argc > 9) throw std::invalid_argument(
-+            "artifact bf16|int8|nvfp4|rk8v4 eager|graph output [drafts] [mode] [ngram-width] [wddm]");
++            "artifact bf16|int8|nvfp4|k8v4|rk8v4 eager|graph output [drafts] [mode] [ngram-width] [wddm]");
 +        ninfer::EngineOptions o;
 +        o.artifact_path = argv[1]; o.max_context = 16384; o.device = 0;
 +        o.max_concurrency = 1; o.prefill_chunk = 128;
@@ -6151,7 +6223,7 @@ index 0000000000000000000000000000000000000000..30557fb323aabe8db94894de2a2c508d
 +}
 diff --git a/tests/experimental/p4_quality.cpp b/tests/experimental/p4_quality.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a9ee17b4e785b9f26f53a0b2945c70e496ef0a05
+index 0000000000000000000000000000000000000000..d0cda6f2ebfdfd70f19c20a6a917d2a4fe5dd96c
 --- /dev/null
 +++ b/tests/experimental/p4_quality.cpp
 @@ -0,0 +1,155 @@
@@ -6188,7 +6260,7 @@ index 0000000000000000000000000000000000000000..a9ee17b4e785b9f26f53a0b2945c70e4
 +}
 +int main(int argc, char** argv) {
 +    try {
-+        if (argc < 4 || argc > 6) throw std::invalid_argument("artifact context-target output [drafts] [bf16|int8|nvfp4|rk8v4]");
++        if (argc < 4 || argc > 6) throw std::invalid_argument("artifact context-target output [drafts] [bf16|int8|nvfp4|k8v4|rk8v4]");
 +        const auto drafts = argc > 4 ? static_cast<std::uint32_t>(std::stoul(argv[4])) : 0U;
 +        const auto target = static_cast<std::uint32_t>(std::stoul(argv[2]));
 +        require(target >= 8192 && target <= 262144, "unsupported context target");
@@ -6312,7 +6384,7 @@ index 0000000000000000000000000000000000000000..a9ee17b4e785b9f26f53a0b2945c70e4
 +}
 diff --git a/tests/experimental/p4_retrieval.cpp b/tests/experimental/p4_retrieval.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7737a17d6c48066160ecae7d7efb66b1e6898bb6
+index 0000000000000000000000000000000000000000..f9a2b11d55c4b417900186dd89cf521377180311
 --- /dev/null
 +++ b/tests/experimental/p4_retrieval.cpp
 @@ -0,0 +1,67 @@
@@ -6325,7 +6397,7 @@ index 0000000000000000000000000000000000000000..7737a17d6c48066160ecae7d7efb66b1
 +
 +int main(int argc, char** argv) {
 +    try {
-+        if (argc != 5) throw std::invalid_argument("artifact bf16|int8|nvfp4|rk8v4 eager|graph output");
++        if (argc != 5) throw std::invalid_argument("artifact bf16|int8|nvfp4|k8v4|rk8v4 eager|graph output");
 +        ninfer::EngineOptions o;
 +        o.artifact_path = argv[1];
 +        o.max_context = 16384;
@@ -6613,10 +6685,10 @@ index 9def7c0df5e6c80d24c3684e7d7d5667a3436426..00a825c73f4fac16e520eb7946cdaad7
      run_test("session publication order", test_session_publication_order_controls_tied_source);
      run_test("canonical pressure", test_canonical_pressure_starts_with_disposable_owner);
 diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
-index a2a85784b4cfb969b48d3c3bfc116400f8bda693..47bd50e8412a8b6c95dbb164075bdf41df6f1cf3 100644
+index a2a85784b4cfb969b48d3c3bfc116400f8bda693..78497110182cc8e9e6a935f463ba722972c6b5b9 100644
 --- a/tests/test_serve_options.cpp
 +++ b/tests/test_serve_options.cpp
-@@ -24,14 +24,136 @@ ServeOptions parse(std::vector<std::string> arguments) {
+@@ -24,14 +24,140 @@ ServeOptions parse(std::vector<std::string> arguments) {
      std::vector<char*> argv;
      argv.reserve(arguments.size());
      for (std::string& argument : arguments) { argv.push_back(argument.data()); }
@@ -6699,63 +6771,67 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..47bd50e8412a8b6c95dbb164075bdf41
 +        }
 +    }
      const auto memory_defaults = parse({"ninfer-serve", "model.ninfer"});
-+    for (const auto drafts : {0U, 1U, 2U, 3U, 4U}) {
-+        for (const auto lanes : {1U, 2U, 3U, 4U}) {
-+            auto args = memory_args;
-+            args.insert(args.end(), {"--kv-dtype", "nvfp4", "--max-concurrency",
-+                                    std::to_string(lanes), "--ngram-draft-tokens", "0",
-+                                    "--lookup-ngram", "0"});
-+            if (drafts) args.insert(args.end(), {"--spec", "mtp", "--draft-tokens",
-+                                               std::to_string(drafts)});
-+            const auto options = make_engine_options(parse(args));
-+            failures += check(options.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16 &&
-+                options.max_concurrency == lanes && options.kv_capacity.explicit_tokens == lanes * 512 &&
-+                options.speculative.backend == (drafts ? ninfer::SpeculativeBackend::Mtp
-+                                                       : ninfer::SpeculativeBackend::None) &&
-+                (!drafts || options.speculative.draft_tokens == drafts) &&
-+                options.speculative.ngram_draft_tokens == 0 && options.speculative.lookup_ngram == 0,
-+                "KVMem NVFP4/MTP mapping changed storage, lane budgets or disabled ngram settings");
++    for (const auto* format : {"nvfp4", "k8v4"}) {
++        const auto storage = std::string_view(format) == "nvfp4"
++            ? ninfer::KvCacheStorage::Nvfp4Group16 : ninfer::KvCacheStorage::Fp8KeyNvfp4Value;
++        for (const auto drafts : {0U, 1U, 2U, 3U, 4U}) {
++            for (const auto lanes : {1U, 2U, 3U, 4U}) {
++                auto args = memory_args;
++                args.insert(args.end(), {"--kv-dtype", format, "--max-concurrency",
++                                        std::to_string(lanes), "--ngram-draft-tokens", "0",
++                                        "--lookup-ngram", "0"});
++                if (drafts) args.insert(args.end(), {"--spec", "mtp", "--draft-tokens",
++                                                   std::to_string(drafts)});
++                const auto options = make_engine_options(parse(args));
++                failures += check(options.kv_cache == storage &&
++                    options.max_concurrency == lanes && options.kv_capacity.explicit_tokens == lanes * 512 &&
++                    options.speculative.backend == (drafts ? ninfer::SpeculativeBackend::Mtp
++                                                           : ninfer::SpeculativeBackend::None) &&
++                    (!drafts || options.speculative.draft_tokens == drafts) &&
++                    options.speculative.ngram_draft_tokens == 0 && options.speculative.lookup_ngram == 0,
++                    "KVMem NVFP4/K8V4/MTP mapping changed storage, lane budgets or disabled ngram settings");
++            }
++            auto image_args = memory_args;
++            image_args.insert(image_args.end(), {"--kv-dtype", format, "--vision",
++                                                "--vision-residency", "resident",
++                                                "--ngram-draft-tokens", "0", "--lookup-ngram", "0"});
++            if (drafts) image_args.insert(image_args.end(), {"--spec", "mtp", "--draft-tokens",
++                                                           std::to_string(drafts)});
++            const auto image = make_engine_options(parse(image_args));
++            failures += check(image.enable_vision && image.max_concurrency == 1 &&
++                image.kv_cache == storage &&
++                image.speculative.ngram_draft_tokens == 0 && image.speculative.lookup_ngram == 0,
++                "KVMem NVFP4/K8V4 resident-image settings were not preserved");
++            auto disk_args = memory_args;
++            disk_args.insert(disk_args.end(), {"--kv-dtype", format, "--device-profile", "off",
++                                              "--kvmem-disk-path", "quantized-kv-cache", "--kvmem-disk-mib", "1024",
++                                              "--ngram-draft-tokens", "0", "--lookup-ngram", "0"});
++            if (drafts) disk_args.insert(disk_args.end(), {"--spec", "mtp", "--draft-tokens",
++                                                         std::to_string(drafts)});
++            const auto disk = make_engine_options(parse(disk_args));
++            failures += check(disk.kv_cache == storage &&
++                disk.kvmem.disk_path == std::filesystem::path("quantized-kv-cache") && disk.kvmem.disk_bytes == (1ULL << 30) &&
++                disk.speculative.ngram_draft_tokens == 0 && disk.speculative.lookup_ngram == 0,
++                "KVMem NVFP4/K8V4 cold snapshot settings were not preserved");
 +        }
-+        auto image_args = memory_args;
-+        image_args.insert(image_args.end(), {"--kv-dtype", "nvfp4", "--vision",
-+                                            "--vision-residency", "resident",
-+                                            "--ngram-draft-tokens", "0", "--lookup-ngram", "0"});
-+        if (drafts) image_args.insert(image_args.end(), {"--spec", "mtp", "--draft-tokens",
-+                                                       std::to_string(drafts)});
-+        const auto image = make_engine_options(parse(image_args));
-+        failures += check(image.enable_vision && image.max_concurrency == 1 &&
-+            image.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16 &&
-+            image.speculative.ngram_draft_tokens == 0 && image.speculative.lookup_ngram == 0,
-+            "KVMem NVFP4 resident-image settings were not preserved");
-+        auto disk_args = memory_args;
-+        disk_args.insert(disk_args.end(), {"--kv-dtype", "nvfp4", "--device-profile", "off",
-+                                          "--kvmem-disk-path", "nvfp4-cache", "--kvmem-disk-mib", "1024",
-+                                          "--ngram-draft-tokens", "0", "--lookup-ngram", "0"});
-+        if (drafts) disk_args.insert(disk_args.end(), {"--spec", "mtp", "--draft-tokens",
-+                                                     std::to_string(drafts)});
-+        const auto disk = make_engine_options(parse(disk_args));
-+        failures += check(disk.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16 &&
-+            disk.kvmem.disk_path == std::filesystem::path("nvfp4-cache") && disk.kvmem.disk_bytes == (1ULL << 30) &&
-+            disk.speculative.ngram_draft_tokens == 0 && disk.speculative.lookup_ngram == 0,
-+            "KVMem NVFP4 cold snapshot settings were not preserved");
-+    }
-+    for (const auto& extra : std::vector<std::vector<std::string>>{
-+             {"--max-concurrency", "5"}, {"--vision", "--max-concurrency", "2"},
-+             {"--spec", "mtp", "--draft-tokens", "5"},
-+             {"--spec", "mtp", "--draft-tokens", "4", "--adaptive-mtp"},
-+             {"--spec", "mtp", "--draft-tokens", "3", "--lookup-ngram", "1"},
-+             {"--kv-dtype", "k8v4"}, {"--kv-dtype", "nvpf4"}}) {
-+        auto args = memory_args;
-+        args.insert(args.end(), {"--kv-dtype", "nvfp4"});
-+        args.insert(args.end(), extra.begin(), extra.end());
-+        bool rejected = false;
-+        try { (void)parse(args); } catch (const std::invalid_argument&) { rejected = true; }
-+        failures += check(rejected, "NVFP4 unexpectedly enabled an unsupported KVMem combination");
++        for (const auto& extra : std::vector<std::vector<std::string>>{
++                 {"--max-concurrency", "5"}, {"--vision", "--max-concurrency", "2"},
++                 {"--spec", "mtp", "--draft-tokens", "5"},
++                 {"--spec", "mtp", "--draft-tokens", "4", "--adaptive-mtp"},
++                 {"--spec", "mtp", "--draft-tokens", "3", "--lookup-ngram", "1"},
++                 {"--kv-dtype", "fp8"}, {"--kv-dtype", "nvpf4"}}) {
++            auto args = memory_args;
++            args.insert(args.end(), {"--kv-dtype", format});
++            args.insert(args.end(), extra.begin(), extra.end());
++            bool rejected = false;
++            try { (void)parse(args); } catch (const std::invalid_argument&) { rejected = true; }
++            failures += check(rejected, "NVFP4/K8V4 unexpectedly enabled an unsupported KVMem combination");
++        }
 +    }
      failures += check(memory_defaults.cuda_memory_policy == ninfer::CudaMemoryPolicy::DriverDefault &&
                            memory_defaults.cuda_vram_reserve_bytes == 0 &&
                            memory_defaults.cuda_memory_probe_step_bytes == 0 &&
-@@ -1526,3 +1648,11 @@ int main() {
+@@ -1526,3 +1652,11 @@ int main() {
  
      return failures == 0 ? 0 : 1;
  }

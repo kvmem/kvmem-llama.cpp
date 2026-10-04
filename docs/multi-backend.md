@@ -34,7 +34,9 @@ llama.cpp 示例：
 `-KvType nvfp4` 对 K/V 都使用 group-16 e2m1 packed codes 与 E4M3 scale 字节，
 Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinary 或固定 MTP1–4、
 1–4 条文本请求或一条 resident 图像请求、Host 会话复用；冷快照仍要求单文本请求和
-`DeviceProfile off`。ngram 默认关闭，`k8v4` 不是双 NVFP4，仍不在 KVMem 格式范围内。
+`DeviceProfile off`。ngram 默认关闭。
+
+`-KvType k8v4` 已接入 Main/MTP、Host 会话、文本并发、resident 图像和冷快照。K 使用 FP8_E4M3FN codes 与一份 FP16 row scale，V 使用 NVFP4 codes 与 raw E4M3 group-16 scales；两者均沿用原生 D256 归一化 Hadamard。5060 Ti＋IQ3S 通过了精简的 26 次真实模型实验和 8 项基础检查，包括 MTP0 eager/Graph、MTP1–3 Graph、MTP4 eager/Graph、C4、图像、磁盘格式隔离、8K/32K 检索，以及 B32768/R16384 MTP4 Graph 服务。ngram/lookup 均关闭；本轮没有性能对比和全排列验收。[清单、配置与结果](k8v4-kvmem-validation-20261004.md)。
 
 ```powershell
 # 固定 MTP3，两个活动文本请求；B/R 是每请求预算，H 是全局预算。
@@ -64,7 +66,7 @@ Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinar
 本次 ninfer 实测制品是 Qwen3.8-27B-GSQ-RCO-IQ3_S，设备为 RTX 5060 Ti 16GB、CUDA 13.2、`sm_120a`。8K/64K/128K/256K 档的早期口令检索和后续追问通过；这组人工构造用例不代表通用长文问答质量，也不表示其他 GPU 架构已验收。示例的 B=2048、R=512、H=12 GiB 是实际通过的配置。
 
 - B 是每请求选中历史的 GPU token 预算，R 是追加工作空间，两者按 64-token 页对齐；C 条活动请求的 Main 页池按 C×(B+R) 配置。MTP 另有原生草稿页池，Main/MTP 的 Host payload 都计入 H。
-- NVFP4 的 D256 K/V 每 token 每 KV head 共 288 字节（两份 128 字节 codes 与 16 字节 scales）；INT8 为 528 字节，RK8V4 为 408 字节。换页按原始字节传输，不重新量化；权重、GDN state、workspace 与 CUDA Graph 不随 KV 格式同比缩小。格式布局身份和冷快照执行配置区分 NVFP4 与其他 KV 格式。
+- NVFP4 的 D256 K/V 每 token 每 KV head 共 288 字节（两份 128 字节 codes 与 16 字节 scales）；K8V4 为 402 字节（256+128+2+16），INT8 为 528 字节，RK8V4 为 408 字节。换页按原始字节传输，不重新量化；权重、GDN state、workspace 与 CUDA Graph 不随 KV 格式同比缩小。格式布局身份和冷快照执行配置区分 NVFP4 与其他 KV 格式。
 - prefill 是 128 的倍数且不超过 R。追加压力触发选页，逻辑历史保留原始位置。生成上限由请求输出预算和逻辑上下文上限共同决定。
 - H 只限制原生 KV payload。统计索引、每会话最多四个检查点的 GDN StateImage、模型和临时缓冲另计，H 不等于进程总内存上限。
 - 长期历史保存在普通 Host 内存，CUDA 搬运复用一个不超过 B+R 原生页大小的 pinned 缓冲区；其用量单独通过 `transfer_staging_bytes` 报告。
