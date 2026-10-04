@@ -26,17 +26,19 @@ llama.cpp 示例：
 
 ## ninfer 功能与组合
 
-当前源码正在完成 P6–P10 及 ngram 验收，冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。新组合包括固定 MTP1–4（各格式的实测范围见下文及随包报告）、多个 Host 会话、最多四条文本请求、单活动请求图像，以及单活动文本请求的 RK8V4 和冷快照。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
+当前源码支持固定 MTP1–15、多个 Host 会话、最多四条文本请求，以及一条 resident/CPU 图像请求；BF16/INT8/NVFP4/K8V4/RK8V4 沿用相同的请求预算规则。冷快照仍限制单文本请求。自适应 MTP 仅允许单路文本且关闭 ngram/冷快照，快速 prefill 仅允许 INT8/RK8V4 文本且关闭冷快照。冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
 
 双 NVFP4 已接入源码，5050 上的聚焦数值／页搬运测试及 Bonsai B128/R128 ordinary、MTP1 eager、MTP4 Graph 功能检查已通过。
 两个 MTP 用例使用现有 D3D12/WDDM 选项、FP16 GDN 和关闭的 ngram；默认 CUDA 预算下 Q8 MTP 装载仍被容量检查拒绝。
 5060 Ti＋IQ3S 已通过双 NVFP4 的 229 组数值／功能／质量／故障注入检查：ordinary/MTP1–4 × eager/Graph、Host 会话、2/4 路文本、resident 图像、冷快照和最高 128K 档检索。三次独立 B32768/R16384、MTP4 Graph 服务启动及越窗 HTTP 请求也通过，ngram/lookup 均关闭。[完整记录](nvfp4-kvmem-validation-20261004.md)保留失败尝试与测试修正；这是本地源码验收，现有运行包不因此获得该能力。
 `-KvType nvfp4` 对 K/V 都使用 group-16 e2m1 packed codes 与 E4M3 scale 字节，
-Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinary 或固定 MTP1–4、
-1–4 条文本请求或一条 resident 图像请求、Host 会话复用；冷快照仍要求单文本请求和
+Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinary 或固定 MTP1–15、
+1–4 条文本请求或一条 resident/CPU 图像请求、Host 会话复用；冷快照仍要求单文本请求和
 `DeviceProfile off`。ngram 默认关闭。
 
 `-KvType k8v4` 已接入 Main/MTP、Host 会话、文本并发、resident 图像和冷快照。K 使用 FP8_E4M3FN codes 与一份 FP16 row scale，V 使用 NVFP4 codes 与 raw E4M3 group-16 scales；两者均沿用原生 D256 归一化 Hadamard。5060 Ti＋IQ3S 通过了精简的 26 次真实模型实验和 8 项基础检查，包括 MTP0 eager/Graph、MTP1–3 Graph、MTP4 eager/Graph、C4、图像、磁盘格式隔离、8K/32K 检索，以及 B32768/R16384 MTP4 Graph 服务。ngram/lookup 均关闭；本轮没有性能对比和全排列验收。[清单、配置与结果](k8v4-kvmem-validation-20261004.md)。
+
+新增参数采用 12 个组合的定向补测，另加原生视觉边界诊断，累计 18 次模型启动，使用 5060 Ti＋IQ3S，ngram/lookup 关闭。启动器增加 `-AdaptiveMtp`、`-FastPrefill`、`-VisionResidency cpu`，并将 `-MtpDrafts` 扩至 0–15。数值检查、失败尝试与最小重跑证据见 [参数补测记录](parameter-admission-validation-20261004.md)。这次没有性能对比或全排列验收。
 
 ```powershell
 # 固定 MTP3，两个活动文本请求；B/R 是每请求预算，H 是全局预算。
@@ -61,7 +63,7 @@ Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinar
   -MtpDrafts 2 -NgramDrafts 0 -KvType nvfp4 -Budget 32768 -Reserve 16384
 ```
 
-`-MtpDrafts` 默认 0，可选 1–4（固定草稿数；双 NVFP4 已完成下述本地矩阵，其他格式以各自报告为准）；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP 和单活动文本请求；`-NgramMinMatch` 默认 12，可选 4–64。例如 `-MtpDrafts 3 -NgramDrafts 31 -KvType rk8v4`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。自适应 MTP、超过 4 的 MTP 草稿宽度、MTP 独立 attention window、视频、并发图像和 RK8V4 并发尚不在本轮组合内，服务会拒绝。`-DeviceProfile auto` 可选原生设备配置；磁盘快照首版要求 `off`，以固定跨进程执行配置。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
+`-MtpDrafts` 默认 0，可选固定 1–15；`-AdaptiveMtp` 要求 MTP、单路文本且关闭 ngram/冷快照；`-FastPrefill` 仅允许 INT8/RK8V4 文本且关闭冷快照；`-VisionResidency cpu` 要求 `-Vision` 和一条活动请求；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP 和单活动文本请求；`-NgramMinMatch` 默认 12，可选 4–64。例如 `-MtpDrafts 3 -NgramDrafts 31 -KvType rk8v4`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。MTP 独立 attention window、视频、overlay Vision、并发图像、自适应多路/图片和快速图片/冷快照仍被拒绝。`-DeviceProfile auto` 可选原生设备配置；磁盘快照首版要求 `off`，以固定跨进程执行配置。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
 
 本次 ninfer 实测制品是 Qwen3.8-27B-GSQ-RCO-IQ3_S，设备为 RTX 5060 Ti 16GB、CUDA 13.2、`sm_120a`。8K/64K/128K/256K 档的早期口令检索和后续追问通过；这组人工构造用例不代表通用长文问答质量，也不表示其他 GPU 架构已验收。示例的 B=2048、R=512、H=12 GiB 是实际通过的配置。
 

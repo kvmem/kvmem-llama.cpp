@@ -14,12 +14,15 @@ param(
     [ValidateRange(128, 2147483647)][int]$Prefill = 128,
     [ValidateRange(1, 2147483647)][int]$MaxTokens = 1024,
     [string]$KvType,
-    [ValidateSet(0, 1, 2, 3, 4)][int]$MtpDrafts = 0,
+    [ValidateRange(0, 15)][int]$MtpDrafts = 0,
+    [switch]$AdaptiveMtp,
+    [switch]$FastPrefill,
     [ValidateRange(0, 63)][int]$NgramDrafts = 0,
     [ValidateRange(4, 64)][int]$NgramMinMatch = 12,
     [ValidateRange(1, 4)][int]$Concurrency = 1,
     [ValidateRange(1, 16)][int]$RetainedSessions = 4,
     [switch]$Vision,
+    [ValidateSet('resident', 'cpu')][string]$VisionResidency = 'resident',
     [ValidateRange(1, 16384)][int]$VisionTokens = 256,
     [ValidateSet('off', 'auto')][string]$DeviceProfile = 'off',
     [string]$DiskPath,
@@ -41,12 +44,14 @@ $capabilities = @{
 }
 if ($Backend -eq 'ninfer') {
     $capabilities.supported_combinations = @{
-        text = @{ kv = @('bf16', 'int8', 'nvfp4', 'k8v4'); max_concurrency = 4; mtp_drafts = @(0, 1, 2, 3, 4) }
-        images = @{ kv = @('bf16', 'int8', 'nvfp4', 'k8v4'); max_concurrency = 1; residency = 'resident' }
-        rk8v4 = @{ max_concurrency = 1; text_only = $true }
+        text = @{ kv = @('bf16', 'int8', 'nvfp4', 'k8v4', 'rk8v4'); max_concurrency = 4; mtp_drafts = @(0..15) }
+        images = @{ kv = @('bf16', 'int8', 'nvfp4', 'k8v4', 'rk8v4'); max_concurrency = 1; residency = @('resident', 'cpu') }
+        rk8v4 = @{ max_concurrency = 4; text_only = $false }
         cold_disk = @{ max_concurrency = 1; text_only = $true; device_profile = 'off' }
         ngram = @{ max_concurrency = 1; text_only = $true; requires_mtp = $true; max_drafts = 63 }
-        adaptive_mtp = $false; video = $false
+        adaptive_mtp = @{ max_concurrency = 1; text_only = $true; ngram = $false; cold_disk = $false }
+        fast_prefill = @{ kv = @('int8', 'rk8v4'); text_only = $true; cold_disk = $false }
+        video = $false
     }
 }
 if ($Describe) { $capabilities | ConvertTo-Json -Depth 4; return }
@@ -72,10 +77,16 @@ if ($Backend -eq 'ninfer') {
         throw 'ninfer requires B/R aligned to 64, prefill aligned to 128 and <= R, B+R <= Context, int8/bf16/nvfp4/k8v4/rk8v4'
     }
     if (($Vision -and $Concurrency -ne 1) -or
-        ($KvType -eq 'rk8v4' -and ($Vision -or $Concurrency -ne 1)) -or
         ($DiskPath -and ($Vision -or $Concurrency -ne 1 -or $DeviceProfile -ne 'off'))) {
-        throw 'Images require one lane; RK8V4 and cold disk require one text lane; cold disk also requires DeviceProfile off'
+        throw 'Images require one lane; cold disk requires one text lane and DeviceProfile off'
     }
+    if ($AdaptiveMtp -and (!$MtpDrafts -or $Vision -or $Concurrency -ne 1 -or $NgramDrafts -or $DiskPath)) {
+        throw 'Adaptive MTP requires MTP, one text lane, and disabled ngram/disk'
+    }
+    if ($FastPrefill -and ($KvType -notin @('int8', 'rk8v4') -or $Vision -or $DiskPath)) {
+        throw 'Fast prefill requires INT8/RK8V4 text without cold disk'
+    }
+    if ($VisionResidency -ne 'resident' -and !$Vision) { throw 'CPU Vision requires -Vision' }
     if ($NgramDrafts -and (!$MtpDrafts -or $Vision -or $Concurrency -ne 1 -or
         ([Math]::Max($MtpDrafts, $NgramDrafts) + $MtpDrafts) -gt $Reserve)) {
         throw 'ngram requires MTP, one text lane, and reserve >= max(MTP drafts, ngram drafts) + MTP drafts'
@@ -86,10 +97,12 @@ if ($Backend -eq 'ninfer') {
         '--kvmem-sessions', "$RetainedSessions", '--kv-dtype', $KvType, '--device', '0', '--device-profile', $DeviceProfile)
     if ($MtpDrafts) { $nativeArgs += @('--spec', 'mtp', '--draft-tokens', "$MtpDrafts",
         '--ngram-draft-tokens', "$NgramDrafts", '--ngram-min-match', "$NgramMinMatch") }
-    if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', 'resident', '--vision-max-merged', "$VisionTokens") }
+    if ($AdaptiveMtp) { $nativeArgs += '--adaptive-mtp' }
+    if ($FastPrefill) { $nativeArgs += '--fast-prefill-kernel' }
+    if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', $VisionResidency, '--vision-max-merged', "$VisionTokens") }
     if ($DiskPath) { $nativeArgs += @('--kvmem-disk-path', $DiskPath, '--kvmem-disk-mib', "$DiskMiB", '--derive-session-keys') }
 } else {
-    foreach ($name in @('MtpDrafts', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions', 'Vision', 'VisionTokens', 'DeviceProfile', 'DiskPath', 'DiskMiB')) {
+    foreach ($name in @('MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'DiskPath', 'DiskMiB')) {
         if ($PSBoundParameters.ContainsKey($name)) { throw "-$name configures ninfer; use llama native options in -WorkerArgs" }
     }
     if ($PSBoundParameters.ContainsKey('HostMiB')) {
