@@ -695,7 +695,7 @@ index 444f32942aa2e050d5c04dc88fdf0276187bcb81..107a033a334fe644ff9492fe2e8c3e75
  
  struct OrdinaryBatchContext {
 diff --git a/src/models/qwen3_5/program/decode.cpp b/src/models/qwen3_5/program/decode.cpp
-index e38a21ec93322ebd43976dfadab1a45c88a3884d..b21d803d150fc8a3d4238f8e5bf3756cd148c8c2 100644
+index e38a21ec93322ebd43976dfadab1a45c88a3884d..d00ee72e8e7fbc481213198579b2633bfed81207 100644
 --- a/src/models/qwen3_5/program/decode.cpp
 +++ b/src/models/qwen3_5/program/decode.cpp
 @@ -41,6 +41,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
@@ -850,7 +850,7 @@ index e38a21ec93322ebd43976dfadab1a45c88a3884d..b21d803d150fc8a3d4238f8e5bf3756c
      }
      trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
      if (terminal) { sequence.mtp_draft_count = 0; }
-+    capture_memory_replay_if_ready(sequence);
++    capture_memory_reconstruction_if_ready(sequence);
      request.lifecycle = terminal ? Lifecycle::Finishable : Lifecycle::Active;
      request.pending   = {};
      return timing.finish();
@@ -979,7 +979,7 @@ index 2e7de63e9fc41fe7b2b352cf7c1af599409315b7..e9c4c3b63e1a11c72d4385da50cf5b74
  bool ProgramImpl::persistent_backfill_safe(
      const RequestBasePlan& blocked_head, const AdmissionCandidate& candidate,
 diff --git a/src/models/qwen3_5/program/planning/request_plan.cpp b/src/models/qwen3_5/program/planning/request_plan.cpp
-index 59598d15d2831fa23d5025d02a298a0343e1ede1..e3785a61920b44f5d3546d478f8748ab79d700c2 100644
+index 59598d15d2831fa23d5025d02a298a0343e1ede1..90bba81b5525d945b30f9fe5e948023d8e098c1c 100644
 --- a/src/models/qwen3_5/program/planning/request_plan.cpp
 +++ b/src/models/qwen3_5/program/planning/request_plan.cpp
 @@ -84,7 +84,7 @@ runtime::PrefillWork scheduled_prefill_work(std::uint32_t begin, std::uint32_t e
@@ -1081,21 +1081,22 @@ index 59598d15d2831fa23d5025d02a298a0343e1ede1..e3785a61920b44f5d3546d478f8748ab
      const std::optional<RewriteCheckpointSpec>& desired = base.rewrite_checkpoint;
      const bool can_retain_rewrite =
          desired && source != nullptr &&
-@@ -723,6 +778,13 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
+@@ -723,6 +778,14 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
      }
      plan->summary.reusable_prompt_tokens = plan->reuse_base;
      plan->summary.prefix_reuse_path      = plan->reuse;
 +    if (plan->memory_restore_frontier) {
 +        if (const auto match = memory_restorable_history(prompt)) {
 +            plan->summary.prefix_reuse_path = match->kind == KvmemCheckpointKind::Endpoint
-+                ? PrefixReusePath::PrivateEndpoint : match->kind == KvmemCheckpointKind::Rewrite
++                ? PrefixReusePath::PrivateEndpoint : (match->kind == KvmemCheckpointKind::InputFallback ||
++                                                       match->kind == KvmemCheckpointKind::Reconstruction)
 +                ? PrefixReusePath::PrivateTurnClosure : PrefixReusePath::PrivateResponseReplay;
 +        }
 +    }
      if (speculative_backend == SpeculativeBackend::Mtp) {
          if (plan->reuse == ReusePath::Root) {
              plan->prepare_mtp = true;
-@@ -770,6 +832,8 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
+@@ -770,6 +833,8 @@ std::optional<AdmissionCandidate> ProgramImpl::inspect_lane(
          projected_service_work(plan->summary, service_work_base(*plan), prefill_chunk,
                                 prefill_splits, plan->capture_groups,
                                 prompt.identity.rewrite_execution_frontiers);
@@ -1104,7 +1105,7 @@ index 59598d15d2831fa23d5025d02a298a0343e1ede1..e3785a61920b44f5d3546d478f8748ab
      std::uint64_t remaining_vision_items   = 0;
      std::uint64_t remaining_vision_patches = 0;
      if (plan->vision) {
-@@ -1325,6 +1389,8 @@ void ProgramImpl::select_shared_captures(AdmissionCandidate& candidate,
+@@ -1325,6 +1390,8 @@ void ProgramImpl::select_shared_captures(AdmissionCandidate& candidate,
          projected_service_work(plan.summary, service_work_base(plan), prefill_chunk,
                                 prefill_splits, plan.capture_groups,
                                 prompt.identity.rewrite_execution_frontiers);
@@ -1277,7 +1278,7 @@ index aa08175b1156096c37ab29faa81aee9ce10b3190..6cf0c8d4dc869de3e82b840902adab70
      std::uint32_t main_page_groups          = 0;
      std::uint32_t max_concurrency           = 1;
 diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
-index daecda3fb0048ce992b9af0449ab5d2f53cc4ba4..7a8ee752db496495d3eb3f191a8e0bf64789ae53 100644
+index daecda3fb0048ce992b9af0449ab5d2f53cc4ba4..3b8a55ba2b7df5a7a1d92ed65efbf1a77526ebc4 100644
 --- a/src/models/qwen3_5/program/prefill.cpp
 +++ b/src/models/qwen3_5/program/prefill.cpp
 @@ -47,6 +47,7 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
@@ -1429,7 +1430,7 @@ index daecda3fb0048ce992b9af0449ab5d2f53cc4ba4..7a8ee752db496495d3eb3f191a8e0bf6
 +                        .slice(1, static_cast<std::int32_t>(columns) - 1, 1)
 +                        .view({dimension(parameters.model.config().text.hidden_size), 1});
 +                    copy_tail(sequence, hidden);
-+                    capture_memory_replay(sequence);
++                    capture_memory_rewrite(sequence, KvmemCheckpointKind::Reconstruction);
 +                    restore_base();
 +                } catch (...) {
 +                    restore_base();
@@ -1466,7 +1467,7 @@ index daecda3fb0048ce992b9af0449ab5d2f53cc4ba4..7a8ee752db496495d3eb3f191a8e0bf6
  
              commit_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
              trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
-+            capture_memory_replay_if_ready(sequence);
++            capture_memory_reconstruction_if_ready(sequence);
              if (terminal[row]) {
                  request.lifecycle = Lifecycle::Finishable;
              } else {
@@ -1583,13 +1584,13 @@ index daecda3fb0048ce992b9af0449ab5d2f53cc4ba4..7a8ee752db496495d3eb3f191a8e0bf6
 +                    capture_memory_prefix(sequence, result.processed_tokens);
 +                }
 +                if (memory_rewrite_frontier && staged.cursor == memory_rewrite_frontier &&
-+                    (!sequence.window.replay_checkpoint ||
-+                     sequence.window.replay_checkpoint->prefix.size() != memory_rewrite_frontier) &&
++                    (!sequence.window.input_checkpoint ||
++                     sequence.window.input_checkpoint->prefix.size() != memory_rewrite_frontier) &&
 +                    (!sequence.window.prefix_checkpoint ||
 +                     sequence.window.prefix_checkpoint->prefix.size() != memory_rewrite_frontier)) {
 +                    copy_tail(sequence, prefill_hidden.slice(1,
 +                        static_cast<std::int32_t>(result.processed_tokens) - 1, 1));
-+                    capture_memory_replay(sequence);
++                    capture_memory_rewrite(sequence, KvmemCheckpointKind::InputFallback);
 +                }
                  if (hybrid_lane != nullptr && !result.finalized) {
                      hybrid_after_prefill_chunk(sequence, staged.cursor, staged.prompt_tokens);
@@ -1652,7 +1653,7 @@ index f1979f897aafb77fe61484e01f25849d0dfd7b83..172b3179a31bf5f8203e4c73c707198b
      // Hybrid prefix cache mode (ContextCacheMode::Hybrid). Admission runs as the same context
      // transaction the Engine drives for Legacy materialization: quote, reserve, then
 diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
-index 0307cceaeec60983f6e8917527d36d81567a5ef6..9950324430f5d153a2521434625c5aa9cdcf10c4 100644
+index 0307cceaeec60983f6e8917527d36d81567a5ef6..ec65d0c023689e6b9354dd597646d1f166186cf2 100644
 --- a/src/models/qwen3_5/program/program_impl.cpp
 +++ b/src/models/qwen3_5/program/program_impl.cpp
 @@ -143,7 +143,10 @@ std::vector<DeviceArena> make_rank_workspaces(DeviceContext& device,
@@ -1696,7 +1697,7 @@ index 0307cceaeec60983f6e8917527d36d81567a5ef6..9950324430f5d153a2521434625c5aa9
      if (plan.persistent.score_hidden) {
          score_hidden = plan.persistent.score_hidden->bind(backing);
      }
-@@ -778,6 +803,52 @@ runtime::ContextTransferObservation ProgramImpl::context_transfer_observation(
+@@ -778,6 +803,51 @@ runtime::ContextTransferObservation ProgramImpl::context_transfer_observation(
  
  MemorySummary ProgramImpl::memory_summary() const noexcept {
      MemorySummary out;
@@ -1730,8 +1731,7 @@ index 0307cceaeec60983f6e8917527d36d81567a5ef6..9950324430f5d153a2521434625c5aa9
 +            memory.history_swaps += window.swaps;
 +            memory.history_spilled_bytes += window.spilled_bytes;
 +            memory.history_restored_bytes += window.restored_bytes;
-+            for (const auto kind : {KvmemCheckpointKind::Base, KvmemCheckpointKind::Endpoint,
-+                                    KvmemCheckpointKind::Rewrite}) {
++            for (const auto kind : kKvmemCheckpointKinds) {
 +                if (const auto* checkpoint = memory_checkpoint(window, kind)) {
 +                    memory.checkpoint_bytes += checkpoint->state->size();
 +                    memory.checkpoint_tokens = std::max(memory.checkpoint_tokens,
@@ -1750,7 +1750,7 @@ index 0307cceaeec60983f6e8917527d36d81567a5ef6..9950324430f5d153a2521434625c5aa9
      out.max_context     = capacity;
      out.kv_capacity     = kv_capacity;
 diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
-index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294baaada0e22 100644
+index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..13f4babcbd15a9573b91eebbe87b388b0c1e5398 100644
 --- a/src/models/qwen3_5/program/program_impl.h
 +++ b/src/models/qwen3_5/program/program_impl.h
 @@ -3,6 +3,10 @@
@@ -1798,7 +1798,7 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
      bool text_retained_tail_release       = false;
      bool backend_retained_tail_release    = false;
  };
-@@ -437,6 +447,55 @@ struct DecodeGraphFamily {
+@@ -437,6 +447,62 @@ struct DecodeGraphFamily {
  // Target model continuation for one logical sequence. This state remains meaningful after the
  // request which produced it has finished, so it is deliberately separate from request lifecycle,
  // output, sampling, and round-control state.
@@ -1811,7 +1811,11 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
 +    std::unique_ptr<PinnedHostBuffer> state;
 +};
 +
-+enum class KvmemCheckpointKind : std::uint8_t { Base, Endpoint, Rewrite };
++enum class KvmemCheckpointKind : std::uint8_t { Base, Endpoint, InputFallback, Reconstruction };
++// Lookup priority for equal frontiers; also the fixed v5 snapshot slot order.
++inline constexpr std::array kKvmemCheckpointKinds{
++    KvmemCheckpointKind::Endpoint, KvmemCheckpointKind::Reconstruction,
++    KvmemCheckpointKind::InputFallback, KvmemCheckpointKind::Base};
 +struct KvmemHistoryMatch {
 +    std::size_t history;
 +    KvmemCheckpointKind kind;
@@ -1845,7 +1849,10 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
 +    // retain the input prefix before its final token for request-to-request reuse.
 +    std::unique_ptr<KvmemPrefixCheckpoint> prefix_checkpoint;
 +    std::unique_ptr<KvmemPrefixCheckpoint> endpoint_checkpoint;
-+    std::unique_ptr<KvmemPrefixCheckpoint> replay_checkpoint;
++    // An input fallback survives generated reconstruction captures: a caller may
++    // discard/replace the output while appending to the exact earlier input.
++    std::unique_ptr<KvmemPrefixCheckpoint> input_checkpoint;
++    std::unique_ptr<KvmemPrefixCheckpoint> reconstruction_checkpoint;
 +    std::uint32_t reconstruction_frontier = 0;
 +    bool query_replayed = false;
 +
@@ -1854,7 +1861,7 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
  struct SequenceState {
      std::optional<SequenceKVBundle> kv;
      ActiveStateBinding state;
-@@ -452,6 +511,7 @@ struct SequenceState {
+@@ -452,6 +518,7 @@ struct SequenceState {
      qwen3_5::detail::ResidentPrefixIdentity prefix_identity;
      qwen3_5::detail::PrefixShortlistDigests prefix_digests;
      std::int32_t rope_delta               = 0;
@@ -1862,7 +1869,7 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
      std::uint32_t text_kv_valid           = 0;
      std::uint32_t mtp_kv_valid            = 0;
      std::uint32_t dflash_context_frontier = 0;
-@@ -511,6 +571,9 @@ struct RequestControl {
+@@ -511,6 +578,9 @@ struct RequestControl {
      detail::PhysicalResources active_resources;
      detail::PhysicalResources optional_resources;
      bool publish_continuation = true;
@@ -1872,7 +1879,7 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
      // The sequence's own output ceiling: the largest frontier its lease may ever cover, so
      // on-demand growth never leases pages the request cannot reach.
      std::uint32_t lease_ceiling = 0;
-@@ -536,12 +599,15 @@ struct RequestControl {
+@@ -536,12 +606,15 @@ struct RequestControl {
          // not the restore succeeds; after a failed restore the prefill recomputes [0, frontier)
          // and keeps those tokens out of its reports, so the admitted suffix stays exact.
          std::uint32_t disk_restore_frontier = 0;
@@ -1888,7 +1895,7 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
          MtpBridgeMode mtp_bridge            = MtpBridgeMode::None;
      };
  
-@@ -555,6 +621,9 @@ struct RequestControl {
+@@ -555,6 +628,9 @@ struct RequestControl {
          active_resources     = {};
          optional_resources   = {};
          publish_continuation = true;
@@ -1898,7 +1905,7 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
          lease_settled        = false;
          lease_space_limited  = false;
          lease_minimum_target = {};
-@@ -690,6 +759,7 @@ public:
+@@ -690,6 +766,7 @@ public:
      [[nodiscard]] bool rebuild_context_stores() noexcept;
      [[nodiscard]] detail::PhysicalResources admission_capacity() const noexcept;
      [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
@@ -1906,7 +1913,7 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
  
      [[nodiscard]] bool hybrid_prefix_cache() const noexcept { return hybrid_ != nullptr; }
  
-@@ -741,11 +811,15 @@ public:
+@@ -741,11 +818,15 @@ public:
      void reset_memory_peaks() noexcept;
  
      friend struct qwen3_5::detail::PressurePlanningSessionImpl;
@@ -1922,7 +1929,7 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
      const std::uint32_t max_concurrency;
      // Frozen context-cache shape: an engaged host budget has already resolved host_state_slots,
      // host_kv_capacity_bytes and the long-anchor count on the plan this Program was built from.
-@@ -837,6 +911,27 @@ public:
+@@ -837,6 +918,27 @@ public:
      std::optional<DFlashPersistentState> dflash;
      qwen3_5::RoundState io;
      Tensor prefill_hidden;
@@ -1950,7 +1957,7 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
      std::optional<Tensor> score_hidden;
      Tensor sampling_config;
      Tensor token_counts;
-@@ -1593,6 +1688,50 @@ private:
+@@ -1593,6 +1695,52 @@ private:
                                          std::uint32_t backend_pages);
      void bind_sequence_kv(SequenceState& sequence);
      void unbind_sequence_kv(SequenceState& sequence) noexcept;
@@ -1963,8 +1970,10 @@ index f53f5cf0223e411ade3b1faca0712b5db94f9fd3..2e60152c60ace86e64538ab7237294ba
 +    void capture_memory_prefix(SequenceState& sequence, std::uint32_t chunk_tokens);
 +    std::unique_ptr<KvmemPrefixCheckpoint> capture_memory_checkpoint(SequenceState& sequence);
 +    void capture_memory_endpoint(SequenceState& sequence, const RequestControl& request) noexcept;
-+    void capture_memory_replay(SequenceState& sequence) noexcept;
-+    void capture_memory_replay_if_ready(SequenceState& sequence);
++    void capture_memory_rewrite(SequenceState& sequence, KvmemCheckpointKind kind) noexcept;
++    void capture_memory_reconstruction_if_ready(SequenceState& sequence);
++    std::unique_ptr<KvmemPrefixCheckpoint>& memory_checkpoint_slot(KvmemWindowState& window,
++                                                                KvmemCheckpointKind kind);
 +    const KvmemPrefixCheckpoint* memory_checkpoint(const KvmemWindowState& window,
 +                                                   KvmemCheckpointKind kind) const;
 +    bool memory_same_query(const KvmemWindowState& window, const PreparedPromptData& prompt,
@@ -2167,10 +2176,10 @@ index e57cc085b0f2a3b8904a995ed94208b3fbe44f2c..7311f0cd50db1f123edc7cf8f485e671
      sequence.dflash_context_frontier = 0;
 diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4c5b47884
+index 0000000000000000000000000000000000000000..4b4a10c5209824b0f1ec761f27c4d7ccfb69d423
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
-@@ -0,0 +1,932 @@
+@@ -0,0 +1,947 @@
 +#include "models/qwen3_5/program/program_impl.h"
 +#include "models/qwen3_5/program/context.h"
 +#include "models/qwen3_5/program/context_work.h"
@@ -2693,12 +2702,24 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +    return checkpoint;
 +}
 +
++std::unique_ptr<KvmemPrefixCheckpoint>& ProgramImpl::memory_checkpoint_slot(KvmemWindowState& window,
++                                                                          KvmemCheckpointKind kind) {
++    switch (kind) {
++    case KvmemCheckpointKind::Base: return window.prefix_checkpoint;
++    case KvmemCheckpointKind::Endpoint: return window.endpoint_checkpoint;
++    case KvmemCheckpointKind::InputFallback: return window.input_checkpoint;
++    case KvmemCheckpointKind::Reconstruction: return window.reconstruction_checkpoint;
++    }
++    throw std::logic_error("invalid KVMem checkpoint kind");
++}
++
 +const KvmemPrefixCheckpoint* ProgramImpl::memory_checkpoint(const KvmemWindowState& window,
 +                                                           KvmemCheckpointKind kind) const {
 +    switch (kind) {
 +    case KvmemCheckpointKind::Base: return window.prefix_checkpoint.get();
 +    case KvmemCheckpointKind::Endpoint: return window.endpoint_checkpoint.get();
-+    case KvmemCheckpointKind::Rewrite: return window.replay_checkpoint.get();
++    case KvmemCheckpointKind::InputFallback: return window.input_checkpoint.get();
++    case KvmemCheckpointKind::Reconstruction: return window.reconstruction_checkpoint.get();
 +    }
 +    return nullptr;
 +}
@@ -2709,8 +2730,9 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +    const auto frontier = sequence.execution_frontier;
 +    if (sequence.text_kv_valid != frontier || !sequence.tail_hidden_valid ||
 +        sequence.state.fork_pending || (backend_kv_pages && sequence.mtp_kv_valid != frontier)) return;
-+    if (sequence.window.prefix_checkpoint && sequence.window.prefix_checkpoint->prefix.size() == frontier) return;
-+    if (sequence.window.replay_checkpoint && sequence.window.replay_checkpoint->prefix.size() == frontier) return;
++    for (const auto kind : kKvmemCheckpointKinds)
++        if (const auto* checkpoint = memory_checkpoint(sequence.window, kind);
++            checkpoint && checkpoint->prefix.size() == frontier) return;
 +    try {
 +        const auto started = Clock::now();
 +        sequence.window.endpoint_checkpoint = capture_memory_checkpoint(sequence);
@@ -2731,27 +2753,31 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +    return query.begin == window.query_begin && query.count == window.query_tokens;
 +}
 +
-+void ProgramImpl::capture_memory_replay(SequenceState& sequence) noexcept {
++void ProgramImpl::capture_memory_rewrite(SequenceState& sequence, KvmemCheckpointKind kind) noexcept {
 +    auto& window = sequence.window;
++    const auto* purpose = kind == KvmemCheckpointKind::InputFallback ? "input" : "reconstruction";
 +    try {
++        if (kind != KvmemCheckpointKind::InputFallback && kind != KvmemCheckpointKind::Reconstruction)
++            throw std::logic_error("invalid KVMem rewrite checkpoint purpose");
 +        if (!window.prefix_checkpoint || window.prefix_checkpoint->prefix.size() != sequence.text_kv_valid)
-+            window.replay_checkpoint = capture_memory_checkpoint(sequence);
++            memory_checkpoint_slot(window, kind) = capture_memory_checkpoint(sequence);
 +        if (kvmem_options.verify_transfers)
-+            std::fprintf(stderr, "KVMEM_REWRITE frontier=%u canonical=1\n", sequence.text_kv_valid);
++            std::fprintf(stderr, "KVMEM_REWRITE purpose=%s frontier=%u canonical=1\n",
++                         purpose, sequence.text_kv_valid);
 +    } catch (const std::exception& error) {
-+        std::fprintf(stderr, "KVMEM_REWRITE capture skipped: %s\n", error.what());
++        std::fprintf(stderr, "KVMEM_REWRITE purpose=%s capture skipped: %s\n", purpose, error.what());
 +    }
-+    window.reconstruction_frontier = 0;
++    if (kind == KvmemCheckpointKind::Reconstruction) window.reconstruction_frontier = 0;
 +}
 +
-+void ProgramImpl::capture_memory_replay_if_ready(SequenceState& sequence) {
++void ProgramImpl::capture_memory_reconstruction_if_ready(SequenceState& sequence) {
 +    auto& window = sequence.window;
 +    if (window.reconstruction_frontier < sequence.text_kv_valid) window.reconstruction_frontier = 0;
 +    if (!kvmem_window_tokens || !requests[sequence.lane].allow_memory_reuse ||
 +        !window.reconstruction_frontier || window.reconstruction_frontier != sequence.text_kv_valid ||
 +        sequence.execution_frontier != sequence.text_kv_valid ||
 +        (backend_kv_pages && sequence.mtp_kv_valid != sequence.text_kv_valid)) return;
-+    capture_memory_replay(sequence);
++    capture_memory_rewrite(sequence, KvmemCheckpointKind::Reconstruction);
 +}
 +
 +void ProgramImpl::rewind_memory_query(SequenceState& sequence) {
@@ -2808,12 +2834,10 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +    if (frontier % page_tokens) window.host_versions.back() = frontier % page_tokens;
 +    // A consumed history has one archive. Rewinding explicitly revokes later states
 +    // before their payload/statistics can be overwritten; no full-history COW is needed.
-+    if (window.prefix_checkpoint && window.prefix_checkpoint->prefix.size() > frontier)
-+        window.prefix_checkpoint.reset();
-+    if (window.endpoint_checkpoint && window.endpoint_checkpoint->prefix.size() > frontier)
-+        window.endpoint_checkpoint.reset();
-+    if (window.replay_checkpoint && window.replay_checkpoint->prefix.size() > frontier)
-+        window.replay_checkpoint.reset();
++    for (const auto kind : kKvmemCheckpointKinds) {
++        auto& slot = memory_checkpoint_slot(window, kind);
++        if (slot && slot->prefix.size() > frontier) slot.reset();
++    }
 +    sequence.text_kv_valid = frontier;
 +    if (backend_kv_pages) { sequence.mtp_kv_valid = frontier; sequence.mtp_draft_count = 0; }
 +    ++window.stamp.execution_history;
@@ -2858,8 +2882,7 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +        const auto& history = memory_histories[index];
 +        if (!history || !history->stamp.valid ||
 +            history->session_key != prompt.context_cache.session_key) continue;
-+        for (const auto kind : {KvmemCheckpointKind::Endpoint, KvmemCheckpointKind::Rewrite,
-+                                KvmemCheckpointKind::Base}) {
++        for (const auto kind : kKvmemCheckpointKinds) {
 +            const auto* candidate = memory_checkpoint(*history, kind);
 +            if (!candidate) continue;
 +            const auto& checkpoint = *candidate;
@@ -2907,9 +2930,7 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +    history.reset();
 +    auto& window = sequence.window;
 +    const bool same_query = memory_same_query(window, staged.prompt, *frontier);
-+    auto checkpoint = match->kind == KvmemCheckpointKind::Endpoint
-+        ? std::move(window.endpoint_checkpoint) : match->kind == KvmemCheckpointKind::Rewrite
-+        ? std::move(window.replay_checkpoint) : std::move(window.prefix_checkpoint);
++    auto checkpoint = std::move(memory_checkpoint_slot(window, match->kind));
 +    // The previous Program address-space lease has been released. These IDs
 +    // must never be treated as resident in the new native address space.
 +    window.pages.clear();
@@ -2973,6 +2994,11 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +    }
 +    if (*frontier == memory_checkpoint_frontier(sequence, staged.prompt_tokens, true))
 +        window.prefix_checkpoint = std::move(checkpoint);
++    else
++        // An exact replay can start at the input capture boundary, so prefill
++        // will not cross it again. Keep the restored complete state for repeats
++        // and cancellation recovery; restoring does not consume its payload.
++        memory_checkpoint_slot(window, match->kind) = std::move(checkpoint);
 +    staged.base = *frontier;
 +    staged.cursor = *frontier;
 +    ++memory_history_hits;
@@ -3043,7 +3069,7 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +void ProgramImpl::retain_memory_history(SequenceState& sequence, const RequestControl& request) noexcept {
 +    if (!kvmem_window_tokens || !request.allow_memory_reuse || !sequence.window.stamp.valid ||
 +        (!sequence.window.prefix_checkpoint && !sequence.window.endpoint_checkpoint &&
-+         !sequence.window.replay_checkpoint)) return;
++         !sequence.window.input_checkpoint && !sequence.window.reconstruction_checkpoint)) return;
 +    auto& window = sequence.window;
 +    if (window.session_key && !window.update_session_index) return;
 +    if (window.session_key) {
@@ -3052,8 +3078,7 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +        }
 +    }
 +    std::uint32_t frontier = 0;
-+    for (const auto kind : {KvmemCheckpointKind::Base, KvmemCheckpointKind::Endpoint,
-+                            KvmemCheckpointKind::Rewrite})
++    for (const auto kind : kKvmemCheckpointKinds)
 +        if (const auto* checkpoint = memory_checkpoint(window, kind))
 +            frontier = std::max(frontier, static_cast<std::uint32_t>(checkpoint->prefix.size()));
 +    const auto pages = kv_pages_for_tokens(frontier);
@@ -3093,9 +3118,8 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +void ProgramImpl::bind_memory_snapshot(SequenceState& sequence) {
 +    WindowMemoryBackend backend(*this, sequence, sequence.text_kv_valid);
 +    const auto descriptor = backend.descriptor();
-+    for (auto* checkpoint : {sequence.window.prefix_checkpoint.get(),
-+                             sequence.window.endpoint_checkpoint.get(),
-+                             sequence.window.replay_checkpoint.get()}) {
++    for (const auto kind : kKvmemCheckpointKinds) {
++        auto* checkpoint = memory_checkpoint_slot(sequence.window, kind).get();
 +        if (!checkpoint) continue;
 +        auto stamp = backend.stamp();
 +        stamp.frontier = static_cast<std::uint32_t>(checkpoint->prefix.size());
@@ -3105,10 +3129,10 @@ index 0000000000000000000000000000000000000000..9b9e42806cda26f986e13b2b6d27b0c4
 +} // namespace ninfer::models::qwen3_5::detail
 diff --git a/src/models/qwen3_5/program/storage/memory_snapshot.cpp b/src/models/qwen3_5/program/storage/memory_snapshot.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..5c19cb7b516d66934a39fa77fd3f61edbafd9cc7
+index 0000000000000000000000000000000000000000..0aa3a7a319f5e47d6f502d03d2496c16ae0bb8ea
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/memory_snapshot.cpp
-@@ -0,0 +1,352 @@
+@@ -0,0 +1,349 @@
 +#include "models/qwen3_5/program/program_impl.h"
 +#include "kvmem/snapshot.hpp"
 +#include <bit>
@@ -3124,11 +3148,11 @@ index 0000000000000000000000000000000000000000..5c19cb7b516d66934a39fa77fd3f61ed
 +namespace ninfer::models::qwen3_5::detail {
 +namespace {
 +namespace fs = std::filesystem;
-+constexpr std::uint64_t magic = 0x34454d454d4b494eULL; // NIKMEME4; schema is deliberately closed.
++constexpr std::uint64_t magic = 0x35454d454d4b494eULL; // NIKMEME5; schema is deliberately closed.
 +constexpr std::uint64_t header_bytes = 24;
 +
 +fs::path directory(const ProgramImpl& program) {
-+    return program.kvmem_options.disk_path / "ninfer-kvmem-v4";
++    return program.kvmem_options.disk_path / "ninfer-kvmem-v5";
 +}
 +fs::path snapshot_path(const ProgramImpl& program, const PreparedSessionKey& key) {
 +    kvmem::SnapshotWriter digest([](const void*, std::size_t) {});
@@ -3160,7 +3184,7 @@ index 0000000000000000000000000000000000000000..5c19cb7b516d66934a39fa77fd3f61ed
 +        const auto* first = static_cast<const std::uint8_t*>(data);
 +        bytes.insert(bytes.end(), first, first + count);
 +    });
-+    out.scalar(std::uint32_t(4));
++    out.scalar(std::uint32_t(5));
 +    out.write(p.parameters.model.info().artifact_id.data(), 16);
 +    out.scalar(std::uint32_t(std::endian::native == std::endian::little));
 +    out.scalar(p.capacity); out.scalar(p.prefill_chunk);
@@ -3227,15 +3251,15 @@ index 0000000000000000000000000000000000000000..5c19cb7b516d66934a39fa77fd3f61ed
 +
 +void ProgramImpl::save_memory_snapshot(KvmemWindowState& window) noexcept {
 +    if (kvmem_options.disk_path.empty() || !window.session_key ||
-+        (!window.prefix_checkpoint && !window.endpoint_checkpoint && !window.replay_checkpoint)) return;
++        (!window.prefix_checkpoint && !window.endpoint_checkpoint && !window.input_checkpoint &&
++         !window.reconstruction_checkpoint)) return;
 +    fs::path temporary;
 +    try {
 +        const auto destination = snapshot_path(*this, *window.session_key);
 +        temporary = destination; temporary += ".tmp";
 +        fs::create_directories(directory(*this));
 +        const KvmemPrefixCheckpoint* latest = nullptr;
-+        for (const auto kind : {KvmemCheckpointKind::Base, KvmemCheckpointKind::Endpoint,
-+                                KvmemCheckpointKind::Rewrite})
++        for (const auto kind : kKvmemCheckpointKinds)
 +            if (const auto* checkpoint = memory_checkpoint(window, kind);
 +                checkpoint && (!latest || checkpoint->prefix.size() > latest->prefix.size())) latest = checkpoint;
 +        if (!latest) return;
@@ -3251,8 +3275,7 @@ index 0000000000000000000000000000000000000000..5c19cb7b516d66934a39fa77fd3f61ed
 +            out.scalar(frontier);
 +            out.scalar(window.query_begin); out.scalar(window.query_end); out.scalar(window.query_tokens);
 +            out.vector(window.query_sum);
-+            for (const auto kind : {KvmemCheckpointKind::Base, KvmemCheckpointKind::Endpoint,
-+                                    KvmemCheckpointKind::Rewrite}) {
++            for (const auto kind : kKvmemCheckpointKinds) {
 +                const auto* checkpoint = memory_checkpoint(window, kind);
 +                out.scalar(std::uint8_t(checkpoint != nullptr));
 +                if (!checkpoint) continue;
@@ -3381,13 +3404,11 @@ index 0000000000000000000000000000000000000000..5c19cb7b516d66934a39fa77fd3f61ed
 +            in.read(checkpoint->state->data(), state_bytes);
 +            return checkpoint;
 +        };
-+        window.prefix_checkpoint = read_checkpoint();
-+        window.endpoint_checkpoint = read_checkpoint();
-+        window.replay_checkpoint = read_checkpoint();
++        for (const auto kind : kKvmemCheckpointKinds)
++            memory_checkpoint_slot(window, kind) = read_checkpoint();
 +        const KvmemPrefixCheckpoint* latest = nullptr;
 +        bool matching = false;
-+        for (const auto kind : {KvmemCheckpointKind::Base, KvmemCheckpointKind::Endpoint,
-+                                KvmemCheckpointKind::Rewrite}) {
++        for (const auto kind : kKvmemCheckpointKinds) {
 +            const auto* checkpoint = memory_checkpoint(window, kind);
 +            if (!checkpoint) continue;
 +            const auto end = static_cast<std::uint32_t>(checkpoint->prefix.size());
@@ -3617,22 +3638,23 @@ index 4730c4d9d1119fe75cb86358fe1b149ad83aefbd..74bd8352433915743621fdb97c0551e4
          Object& object       = require_copied_destination(handle);
          object.content_epoch = next_epoch();
 diff --git a/src/models/qwen3_5/program/transactions/commit.cpp b/src/models/qwen3_5/program/transactions/commit.cpp
-index 0104a6993c3c29f9eff43d831485b9427f863c6f..ba71f34b225813e86cba6118e6ff6b60183eb9fa 100644
+index 0104a6993c3c29f9eff43d831485b9427f863c6f..6f9bc4cf6902d0e57930941fb6f53648a7f64414 100644
 --- a/src/models/qwen3_5/program/transactions/commit.cpp
 +++ b/src/models/qwen3_5/program/transactions/commit.cpp
-@@ -223,6 +223,11 @@ void ProgramImpl::commit_generated_prefix_identity(
+@@ -223,6 +223,12 @@ void ProgramImpl::commit_generated_prefix_identity(
                                                prefix_execution_split_after);
      sequence.prefix_digests.append_generated(accepted_tokens, sequence.rope_delta,
                                               prefix_execution_split_after);
 +    if (kvmem_window_tokens && prefix_execution_split_after) {
 +        const auto frontier = base_ledger_frontier + *prefix_execution_split_after;
-+        if (!sequence.window.replay_checkpoint || sequence.window.replay_checkpoint->prefix.size() != frontier)
++        if (!sequence.window.reconstruction_checkpoint ||
++            sequence.window.reconstruction_checkpoint->prefix.size() != frontier)
 +            sequence.window.reconstruction_frontier = frontier;
 +    }
      if (sequence.prefix_identity.size() != sequence.ledger.size() ||
          sequence.prefix_digests.size() != sequence.ledger.size()) {
          throw std::logic_error("committed generated-prefix identity changed the ledger shape");
-@@ -324,7 +329,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
+@@ -324,7 +330,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                  timing.resume_submit();
              }
  
@@ -3641,7 +3663,7 @@ index 0104a6993c3c29f9eff43d831485b9427f863c6f..ba71f34b225813e86cba6118e6ff6b60
              // Forced tokens run through Prefill, which reads the shared step table-row scalars.
              bind_sequence_kv(sequence);
  
-@@ -332,6 +337,10 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
+@@ -332,6 +338,10 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
              if (sequence.ledger.size() != static_cast<std::size_t>(end) + 1U) {
                  throw std::logic_error("forced-token continuation ledger has an invalid shape");
              }
@@ -3652,7 +3674,7 @@ index 0104a6993c3c29f9eff43d831485b9427f863c6f..ba71f34b225813e86cba6118e6ff6b60
  
              if (is_masked_draft_backend(speculative_backend)) {
                  if (!dflash || !io.dflash_decode || !sequence.kv ||
-@@ -343,7 +352,11 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
+@@ -343,7 +353,11 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
  
              std::uint32_t cursor = base;
              while (cursor < end) {
@@ -3665,7 +3687,7 @@ index 0104a6993c3c29f9eff43d831485b9427f863c6f..ba71f34b225813e86cba6118e6ff6b60
                  const StateImageSelectors selectors = state_selectors(sequence);
                  execution::PrefillContext schedule_state{
                      {device, parameters, work, state_images->linear(0),
-@@ -361,6 +374,8 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
+@@ -361,6 +375,8 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                      selectors.destination,
                      0,
                      dflash_host_ingress};
@@ -3674,7 +3696,7 @@ index 0104a6993c3c29f9eff43d831485b9427f863c6f..ba71f34b225813e86cba6118e6ff6b60
                  mark_workspace_usage(speculative_backend == SpeculativeBackend::Mtp
                                           ? workspace_plan.mtp_prefill
                                           : workspace_plan.text_prefill);
-@@ -373,6 +388,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
+@@ -373,6 +389,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                      result.processed_tokens > count) {
                      throw std::logic_error("forced-token prefill made invalid progress");
                  }
@@ -3682,25 +3704,25 @@ index 0104a6993c3c29f9eff43d831485b9427f863c6f..ba71f34b225813e86cba6118e6ff6b60
                  cursor += result.processed_tokens;
                  sequence.text_kv_valid = cursor;
                  if (speculative_backend == SpeculativeBackend::Mtp) {
-@@ -385,6 +401,9 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
+@@ -385,6 +402,9 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
                  copy_tail(sequence,
                            prefill_hidden.slice(
                                1, static_cast<std::int32_t>(result.processed_tokens) - 1, 1));
 +                if (kvmem_window_tokens && request.allow_memory_reuse && reconstruction == cursor) {
-+                    capture_memory_replay(sequence);
++                    capture_memory_rewrite(sequence, KvmemCheckpointKind::Reconstruction);
 +                }
              }
              timing.begin_wait();
              device.synchronize();
-@@ -398,6 +417,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
+@@ -398,6 +418,7 @@ runtime::ExecutionTiming ProgramImpl::append_forced_tokens(
              sequence.ledger_frontier    = end + 1U;
              sequence.mtp_draft_count    = 0;
              sequence.tail_hidden_valid  = true;
-+            capture_memory_replay_if_ready(sequence);
++            capture_memory_reconstruction_if_ready(sequence);
              if (sequence.ledger.size() != sequence.ledger_frontier ||
                  sequence.prefix_identity.size() != sequence.ledger_frontier ||
                  sequence.prefix_digests.size() != sequence.ledger_frontier ||
-@@ -602,6 +622,8 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
+@@ -602,6 +623,8 @@ FinishResult ProgramImpl::finish(SequenceHandle sequence) noexcept {
          return out;
      }
      if (!request.publish_continuation) {
@@ -3709,7 +3731,7 @@ index 0104a6993c3c29f9eff43d831485b9427f863c6f..ba71f34b225813e86cba6118e6ff6b60
          if (!clear_lane_strict(state, request)) { return out; }
          out.disposition = runtime::FinishDisposition::Released;
          out.timings     = request.timings;
-@@ -785,6 +807,7 @@ AbortResult ProgramImpl::abort(SequenceHandle sequence) noexcept {
+@@ -785,6 +808,7 @@ AbortResult ProgramImpl::abort(SequenceHandle sequence) noexcept {
          out.status = runtime::ConsumeStatus::Consumed;
          return out;
      }
@@ -4273,6 +4295,38 @@ index f9971c923e2de8063bf69c16a581df94f568ddc1..9c955094e5a03e9f357fe57c1bc8c7fe
 +  ninfer_resource_manager_test)
 +ninfer_finalize_bundle(ninfer_kvmem_product_tests)
 +ninfer_stage_runtime_dlls(ninfer_kvmem_product_tests)
+diff --git a/tests/README.md b/tests/README.md
+index 41c93343d778334dc0bca7213e9342f913572b70..86e97f36e3dadea504809894ae31682e9e297d23 100644
+--- a/tests/README.md
++++ b/tests/README.md
+@@ -298,6 +298,27 @@ The old/new Qwen3.8 binding matrix uses `out/qwen3_8_27b_old.ninfer` and
+ for the companion artifacts. The legacy paths may be overridden with
+ `NINFER_QWEN3_8_27B_OLD_WEIGHTS` and `NINFER_QWEN3_8_27B_NVFP4_OLD_WEIGHTS`.
+ 
++## KVMem canonical-input fallback
++
++`ninfer_p4_history` accepts the `input-fallback` mode with the usual artifact,
++KV format, execution mode, output file and MTP width arguments:
++
++```powershell
++./build/tests/ninfer_p4_history.exe C:/models/model.ninfer rk8v4 graph C:/work/fallback.tokens 4 input-fallback
++```
++
++The fixture exceeds the physical window, crosses a controlled thinking-close
++boundary, then discards generated answers and appends synthetic tool records.
++It checks input-prefix reuse on successive turns, repeated input and cancellation
++recovery, with exact native transfers and bounded Host/device occupancy. Width 0
++checks ordinary generation; width 4 also enables ngram proposals.
++
++`input-fallback-disk-write` and `input-fallback-disk-read` use separate processes
++with output files in the same directory; the disk cache is its `disk` subdirectory.
++The read case must restore the earlier input after a generated reconstruction
++was saved. `input-fallback-disk-corrupt` expects a damaged snapshot to be rejected
++and recomputed before exercising subsequent reuse.
++
+ ## Container build cache
+ 
+ Check the Dockerfile's incremental-build and configuration-invalidation behavior without compiling
 diff --git a/tests/experimental/memory_concurrency.cpp b/tests/experimental/memory_concurrency.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..bbdb6195034e99a9f378603601eae8dfa4481d00
@@ -5414,10 +5468,10 @@ index 0000000000000000000000000000000000000000..3e8050c56a27c4e816a82b4e5e170def
 +}
 diff --git a/tests/experimental/p4_history.cpp b/tests/experimental/p4_history.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f001900e9ceb2a0ad61c48c8f50754a4ac7d2bd9
+index 0000000000000000000000000000000000000000..6263f9ee1d1ab759ea3ce2884ed56c0efa05da9e
 --- /dev/null
 +++ b/tests/experimental/p4_history.cpp
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,419 @@
 +#include "ninfer/engine.h"
 +#include <atomic>
 +#include <fstream>
@@ -5494,9 +5548,18 @@ index 0000000000000000000000000000000000000000..f001900e9ceb2a0ad61c48c8f50754a4
 +            o.speculative.backend = ninfer::SpeculativeBackend::Mtp;
 +            o.speculative.draft_tokens = static_cast<std::uint32_t>(std::stoul(argv[5]));
 +        }
-+        if (argc == 7 && std::string(argv[6]) == "endpoint" && o.speculative.draft_tokens) {
++        const std::string mode = argc == 7 ? argv[6] : "";
++        const bool input_fallback = mode == "input-fallback" ||
++            mode == "input-fallback-disk-write" || mode == "input-fallback-disk-read" ||
++            mode == "input-fallback-disk-corrupt";
++        if ((mode == "endpoint" || input_fallback) && o.speculative.draft_tokens) {
 +            o.speculative.ngram_draft_tokens = 31;
 +            o.speculative.ngram_min_match = 4;
++        }
++        if (input_fallback) o.gdn_state_fp16 = true;
++        if (input_fallback && mode != "input-fallback") {
++            o.kvmem.disk_path = std::filesystem::path(argv[4]).parent_path() / "disk";
++            o.kvmem.disk_bytes = 2ULL << 30;
 +        }
 +        ninfer::Engine engine(o);
 +        std::ofstream output(argv[4]);
@@ -5543,6 +5606,86 @@ index 0000000000000000000000000000000000000000..f001900e9ceb2a0ad61c48c8f50754a4
 +            }
 +            return result;
 +        };
++        if (input_fallback) {
++            ninfer::PromptInput chat;
++            chat.options.enable_thinking = true;
++            chat.options.preserve_thinking = true;
++            chat.context_cache.session_key = "discarded-answer-history";
++            add(chat, ninfer::ChatRole::System, "Read the archive and reply with the single word violet.");
++            add(chat, ninfer::ChatRole::User, "What is the observatory's color? Use the tool records.");
++            add(chat, ninfer::ChatRole::Assistant, "I will read the archive.");
++            std::string records;
++            for (int i = 0; i < 100; ++i)
++                records += "Record " + std::to_string(i) + ": the violet observatory studies pulsars.\n";
++            add(chat, ninfer::ChatRole::Tool, records);
++            ninfer::RequestOptions request;
++            request.execution.requested_output_tokens = 96;
++            request.execution.sampling.temperature = 0;
++            request.execution.sampling.seed = 42;
++            request.execution.thinking.budget = 16;
++            const auto check = [&](const char* name, const ninfer::PromptInput& prompt,
++                                   std::uint32_t expected_prefix, std::uint32_t cancel_output = 0) {
++                Sink sink; sink.cancel_output = cancel_output;
++                const auto input = engine.prepare(prompt).summary().prompt_tokens;
++                const auto result = engine.submit(engine.prepare(prompt), request,
++                    ninfer::OutputConsumerMode::Streaming,
++                    {.phase_timings = true, .live_timings = true, .prompt_progress = true})
++                    .wait(&sink, ninfer::CancellationView([&] { return sink.cancel.load(); }));
++                std::cout << "INPUT_FALLBACK case=" << name << " input=" << input
++                          << " reused=" << result.reused_prompt_tokens
++                          << " reasoning=" << result.reasoning.size()
++                          << " content=" << result.content.size() << std::endl;
++                output << name << ' ' << input << ' ' << result.reused_prompt_tokens << '\n';
++                output.flush();
++                require(engine.is_available() && sink.starts == 1, "fallback request admission failed");
++                require(result.reused_prompt_tokens == sink.reused, "fallback reuse accounting mismatch");
++                require(expected_prefix ? result.reused_prompt_tokens >= expected_prefix - 8
++                                        : result.reused_prompt_tokens == 0,
++                        "generation overwrote the reusable canonical input checkpoint");
++                if (cancel_output) {
++                    require(result.finish_reason == ninfer::FinishReason::Cancelled,
++                            "fallback cancellation did not terminate");
++                } else {
++                    require(!result.reasoning.empty() && !result.content.empty(),
++                            "fallback fixture did not cross the thinking-close boundary");
++                    require(sink.processed == sink.total, "fallback prompt progress incomplete");
++                }
++                const auto memory = engine.memory_summary().kvmem;
++                require(memory.host_payload_bytes <= o.kvmem.host_bytes &&
++                        memory.resident_pages == 0 && memory.mtp_resident_pages == 0,
++                        "fallback retirement leaked Host budget or device pages");
++                return input;
++            };
++            auto previous = engine.prepare(chat).summary().prompt_tokens;
++            require(previous > 512, "fallback fixture does not exercise sparse history");
++            if (mode != "input-fallback-disk-read" && mode != "input-fallback-disk-corrupt")
++                check("cold", chat, 0);
++            if (mode == "input-fallback-disk-write") {
++                require(engine.memory_summary().kvmem.disk_writes == 1,
++                        "fallback history was not published to disk");
++                std::cout << "INPUT_FALLBACK DISK_WRITE PASS" << std::endl;
++                return 0;
++            }
++            for (int turn = 0; turn < 3; ++turn) {
++                // The benchmark keeps a synthetic tool history and discards the actual
++                // generated reasoning/answer. Its exact earlier input remains reusable.
++                add(chat, ninfer::ChatRole::Assistant, "The tool record is saved.");
++                add(chat, ninfer::ChatRole::Tool, "Additional archive fragment.\n" + records.substr(0, 600));
++                const bool corrupt = turn == 0 && mode == "input-fallback-disk-corrupt";
++                previous = check("discard-and-append", chat, corrupt ? 0 : previous);
++                if (turn == 0 && mode == "input-fallback-disk-read")
++                    require(engine.memory_summary().kvmem.disk_hits == 1,
++                            "canonical input checkpoint was not restored after restart");
++                if (corrupt)
++                    require(engine.memory_summary().kvmem.disk_errors == 1,
++                            "corrupt snapshot was not rejected before reuse");
++            }
++            check("repeat", chat, previous);
++            check("cancel-output", chat, previous, 8);
++            check("after-cancel", chat, previous);
++            std::cout << "INPUT_FALLBACK PASS" << std::endl;
++            return 0;
++        }
 +        if (argc == 7 && std::string(argv[6]) == "endpoint") {
 +            ninfer::RequestOptions one;
 +            one.execution.requested_output_tokens = 1;
@@ -5627,8 +5770,8 @@ index 0000000000000000000000000000000000000000..f001900e9ceb2a0ad61c48c8f50754a4
 +            add(new_user, ninfer::ChatRole::User, "What does the coastal office file?");
 +            const auto changed = run("endpoint-new-query", new_user, true, true);
 +            require(changed.reused_prompt_tokens > 0 &&
-+                    changed.reused_prompt_tokens <= continued.reused_prompt_tokens,
-+                    "new query did not choose a stable earlier checkpoint");
++                    changed.reused_prompt_tokens <= engine.prepare(chat).summary().prompt_tokens,
++                    "new query restored past the preceding history");
 +            auto edited = chat;
 +            edited.messages[1].parts[0].text = "Edited archive with amber stars.";
 +            run("endpoint-edit", edited, true, false);
