@@ -1,5 +1,23 @@
 # KVMem + llama.cpp
 
+## NInfer prerelease for NVIDIA RTX 30 40 50
+
+**NVIDIA RTX 30/40/50 users on Windows are encouraged to try [NInfer + KVMem v0.18.0-ninfer-rc1](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0-ninfer-rc1). 推荐 NVIDIA RTX 30／40／50 系 Windows 用户尝试此预发布版。**
+
+**Before starting / 启动前：Use English paths for the package and model. 运行包和模型的完整路径不能含中文，包括用户名、上级目录和文件名。**
+
+| GPU / 显卡 | Windows ZIP |
+|---|---|
+| RTX 30 series / 30 系 | [Download / 下载 · sm_86](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0-ninfer-rc1/ninfer-server-rtx30-sm86-ui.zip) |
+| RTX 40 series / 40 系 | [Download / 下载 · sm_89](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0-ninfer-rc1/ninfer-server-rtx40-sm89-ui.zip) |
+| RTX 50 series / 50 系 | [Download / 下载 · sm_120a](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0-ninfer-rc1/ninfer-server-rtx50-sm120a-ui.zip) |
+
+Includes the server, embedded Web UI, and default startup script; models are separate. Choose a model and KV budget that fit your VRAM. 包含服务端、内嵌 UI 和默认启动脚本；模型另备，请按显存选择模型和 KV 预算。
+
+Tested on RTX 5060 Ti 16GB; RTX 30/40 hardware validation is pending. 已在 RTX 5060 Ti 16GB 实测，30/40 系尚待对应硬件验证。
+
+[English conversion and startup guide](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0-ninfer-rc1#english) · [中文转换与启动说明](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0-ninfer-rc1#简体中文) · [SHA256SUMS.txt](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0-ninfer-rc1/SHA256SUMS.txt)
+
 **Prebuilt downloads:** [Windows x64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Linux / WSL2 x86_64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Windows / Linux ROCm (beta 2)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2)
 
 **QQ community / QQ 交流群：1040777853**
