@@ -48,8 +48,8 @@ if ($Backend -eq 'ninfer') {
         images = @{ kv = @('bf16', 'int8', 'nvfp4', 'k8v4', 'rk8v4'); max_concurrency = 1; residency = @('resident', 'cpu') }
         rk8v4 = @{ max_concurrency = 4; text_only = $false }
         cold_disk = @{ max_concurrency = 1; text_only = $true; device_profile = 'off' }
-        ngram = @{ max_concurrency = 1; text_only = $true; requires_mtp = $true; max_drafts = 63 }
-        adaptive_mtp = @{ max_concurrency = 1; text_only = $true; ngram = $false; cold_disk = $false }
+        ngram = @{ max_concurrency = 1; text_only = $false; image_kv = @('int8', 'nvfp4'); requires_mtp = $true; max_drafts = 63 }
+        adaptive_mtp = @{ max_concurrency = 4; text_only = $false; ngram = $true; ngram_max_concurrency = 1; cold_disk = $true }
         fast_prefill = @{ kv = @('int8', 'rk8v4'); text_only = $true; cold_disk = $false }
         video = $false
     }
@@ -80,16 +80,17 @@ if ($Backend -eq 'ninfer') {
         ($DiskPath -and ($Vision -or $Concurrency -ne 1 -or $DeviceProfile -ne 'off'))) {
         throw 'Images require one lane; cold disk requires one text lane and DeviceProfile off'
     }
-    if ($AdaptiveMtp -and (!$MtpDrafts -or $Vision -or $Concurrency -ne 1 -or $NgramDrafts -or $DiskPath)) {
-        throw 'Adaptive MTP requires MTP, one text lane, and disabled ngram/disk'
+    if ($AdaptiveMtp -and !$MtpDrafts) {
+        throw 'Adaptive MTP requires MTP; image, ngram and disk limits still apply'
     }
     if ($FastPrefill -and ($KvType -notin @('int8', 'rk8v4') -or $Vision -or $DiskPath)) {
         throw 'Fast prefill requires INT8/RK8V4 text without cold disk'
     }
     if ($VisionResidency -ne 'resident' -and !$Vision) { throw 'CPU Vision requires -Vision' }
-    if ($NgramDrafts -and (!$MtpDrafts -or $Vision -or $Concurrency -ne 1 -or
+    if ($NgramDrafts -and (!$MtpDrafts -or $Concurrency -ne 1 -or
+        ($Vision -and $KvType -notin @('int8', 'nvfp4')) -or
         ([Math]::Max($MtpDrafts, $NgramDrafts) + $MtpDrafts) -gt $Reserve)) {
-        throw 'ngram requires MTP, one text lane, and reserve >= max(MTP drafts, ngram drafts) + MTP drafts'
+        throw 'ngram requires MTP, one lane, INT8/NVFP4 for images, and reserve >= max(MTP drafts, ngram drafts) + MTP drafts'
     }
     $nativeArgs = @($Model, '--host', $ListenHost, '--port', "$Port", '--max-context', "$Context",
         '--max-concurrency', "$Concurrency", '--prefill-chunk', "$Prefill", '--default-max-tokens', "$MaxTokens",

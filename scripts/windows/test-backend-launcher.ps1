@@ -33,13 +33,13 @@ try {
         -MtpDrafts 15 -AdaptiveMtp | ConvertFrom-Json
     if ($adaptive.argv -notcontains '--adaptive-mtp') { throw 'Adaptive MTP mapping failed' }
     $fast = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
-        -KvType rk8v4 -Concurrency 4 -FastPrefill | ConvertFrom-Json
+        -KvType rk8v4 -Concurrency 4 -FastPrefill -MtpDrafts 15 -AdaptiveMtp | ConvertFrom-Json
     if ($fast.argv -notcontains '--fast-prefill-kernel') { throw 'Fast RK8V4 concurrency mapping failed' }
     $cpu = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
-        -KvType rk8v4 -Vision -VisionResidency cpu | ConvertFrom-Json
+        -KvType rk8v4 -Vision -VisionResidency cpu -MtpDrafts 15 -AdaptiveMtp | ConvertFrom-Json
     if ($cpu.argv[[array]::IndexOf($cpu.argv, '--vision-residency') + 1] -ne 'cpu') { throw 'CPU Vision mapping failed' }
     $cold = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
-        -KvType rk8v4 -DiskPath 'cache with spaces' -DiskMiB 1024 | ConvertFrom-Json
+        -KvType rk8v4 -DiskPath 'cache with spaces' -DiskMiB 1024 -MtpDrafts 15 -AdaptiveMtp | ConvertFrom-Json
     if ($cold.argv -notcontains 'cache with spaces' -or $cold.argv -notcontains 'rk8v4') { throw 'Cold cache/format mapping failed' }
     $copy = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
         -MtpDrafts 3 -NgramDrafts 31 -KvType rk8v4 | ConvertFrom-Json
@@ -50,6 +50,20 @@ try {
         -WorkerArgs @('--spec-type', 'draft-mtp') | ConvertFrom-Json
     if ($llama.argv -notcontains 'draft-mtp' -or !$llama.capabilities.speculative_decoding -or
         $llama.argv -contains '--kvmem-host-mib') { throw 'llama native options changed' }
+    foreach ($residency in 'resident', 'cpu') {
+        foreach ($adaptive in $false, $true) {
+            $imageCopy = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                -MtpDrafts 4 -AdaptiveMtp:$adaptive -NgramDrafts 31 -Vision -VisionResidency $residency | ConvertFrom-Json
+            if ($imageCopy.argv -notcontains '--vision' -or
+                $imageCopy.capabilities.supported_combinations.ngram.text_only -or
+                $imageCopy.capabilities.supported_combinations.ngram.image_kv -contains 'k8v4' -or
+                $imageCopy.capabilities.supported_combinations.ngram.image_kv -notcontains 'int8' -or
+                $imageCopy.capabilities.supported_combinations.ngram.image_kv -notcontains 'nvfp4' -or
+                $imageCopy.argv[[array]::IndexOf($imageCopy.argv, '--vision-residency') + 1] -ne $residency -or
+                $imageCopy.argv[[array]::IndexOf($imageCopy.argv, '--ngram-draft-tokens') + 1] -ne '31' -or
+                (($imageCopy.argv -contains '--adaptive-mtp') -ne $adaptive)) { throw 'Image/ngram mapping failed' }
+        }
+    }
     foreach ($format in 'nvfp4', 'k8v4') {
         foreach ($drafts in 0..4) {
             foreach ($lanes in 1..4) {
@@ -80,8 +94,8 @@ try {
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); Budget=385},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); Reserve=64},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); Vision=$true; Concurrency=2},
-        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); AdaptiveMtp=$true; MtpDrafts=15; Concurrency=2},
-        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); AdaptiveMtp=$true; MtpDrafts=15; DiskPath='cache'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); AdaptiveMtp=$true; MtpDrafts=15; Concurrency=2; NgramDrafts=31},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); AdaptiveMtp=$true; MtpDrafts=0},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; KvType='k8v4'},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; Vision=$true},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; DiskPath='cache'},
@@ -92,7 +106,9 @@ try {
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); DiskPath='cache'; DeviceProfile='auto'},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); NgramDrafts=31},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=3; NgramDrafts=15; Concurrency=2},
-        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=3; NgramDrafts=15; Vision=$true},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=3; NgramDrafts=31; Vision=$true; KvType='k8v4'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=3; NgramDrafts=31; Vision=$true; KvType='bf16'},
+        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=3; NgramDrafts=31; Vision=$true; KvType='rk8v4'},
         @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); HostMiB=1024}
     )
     foreach ($argsCase in $bad) {

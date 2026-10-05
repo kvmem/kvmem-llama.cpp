@@ -235,7 +235,7 @@ comparison on RTX 5060 Ti. Include fixed MTP2/4 in qualification rather than
 assuming parameter acceptance proves every combination. Produce the final report
 and release package only after these checks pass.
 
-Adaptive MTP, video, concurrent RK8V4, concurrent ngram, image+ngram, live NVMe
+Video, concurrent ngram, live NVMe
 and cross-backend KV migration are not supported by the current integration.
 See [the capability documentation](multi-backend.md) for constraints.
 
@@ -244,3 +244,5 @@ comparison) remains an unresolved performance finding, not a confirmed logic bug
 The original mandatory_trim sink-page logging discrepancy was approved for a
 logging-only fix; the selection algorithm was preserved. Detailed provenance and
 other legacy findings remain in the experiment workspace's `legacy-findings.md`.
+
+图片＋MTP＋ngram 已放行 INT8/NVFP4；K8V4换行差异待定位，BF16/RK8V4组合未验收。范围与实际复制/replay证据见 [图片ngram补测](vision-ngram-validation-20261005.md)。

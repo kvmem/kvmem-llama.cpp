@@ -75,7 +75,7 @@ foreach ($entry in @(@('llamacpp', $LlamaWorker, 'llama-kvmem-server.exe'),
     $workerInfo[$backend] = @{ sha256=(Get-FileHash -LiteralPath $executable).Hash.ToLowerInvariant();
         path="workers/$backend/$($entry[2])"; clean_path_help_passed=$true }
 }
-foreach ($script in 'start-backend.ps1', 'native-process.ps1') {
+foreach ($script in 'start-backend.ps1', 'start-ninfer.ps1', 'native-process.ps1') {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $OutputDir 'scripts/windows')
 }
 Copy-Item -LiteralPath (Join-Path $source 'docs/multi-backend.md') -Destination (Join-Path $OutputDir 'README.md')

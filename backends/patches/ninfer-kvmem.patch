@@ -18,10 +18,10 @@ index b069b95b0af235266c98216420e05be256a1cd06..e2555ed074fec663fca98f0ce2f67759
  add_subdirectory(src)
  if(NINFER_BUILD_APPS)
 diff --git a/docs/maintainer/paged-kv-cache.md b/docs/maintainer/paged-kv-cache.md
-index a01799072a309140c8e58aebdc5a45234a2d19fb..269c3b50a5f693bd8d6f6d2ce12abdcefed15709 100644
+index a01799072a309140c8e58aebdc5a45234a2d19fb..4b3b70e90fd11941b64b9a8b283b9dec982a7db6 100644
 --- a/docs/maintainer/paged-kv-cache.md
 +++ b/docs/maintainer/paged-kv-cache.md
-@@ -778,3 +778,182 @@ Exact model state 和 backend mathematics 见
+@@ -778,3 +778,188 @@ Exact model state 和 backend mathematics 见
  [Qwen3.5 model](qwen3_5-model.md)与 [DFlash](dflash.md)；persistent KV codec 和 causal consumer
  numerical contract 由上表中的 growing-cache Ops 定义。路径用于定位当前实现，不把文件或类名本身提升为
  外部接口。
@@ -63,7 +63,8 @@ index a01799072a309140c8e58aebdc5a45234a2d19fb..269c3b50a5f693bd8d6f6d2ce12abdce
 +
 +The integration has single-device ordinary and fixed MTP1..15 paths with BF16, INT8, NVFP4,
 +K8V4 or RK8V4 (native rotated K8/V4 planes and scales). Text admits 1..4 active requests;
-+resident or CPU Vision admits one. Adaptive MTP admits one text request without ngram or disk;
++resident or CPU Vision admits one. Adaptive MTP supports the same lane limits; ngram admits
++one text lane or one INT8/NVFP4 resident/CPU Vision lane, and cold disk admits one text lane;
 +fast prompt Attention admits INT8/RK8V4 text without disk,
 +with the native prefix catalog disabled. Multi-request qualification covers startup concurrency
 +2 and 4 separately; unqualified combinations are not release capability claims. Post-RMS/pre-RoPE
@@ -162,14 +163,19 @@ index a01799072a309140c8e58aebdc5a45234a2d19fb..269c3b50a5f693bd8d6f6d2ce12abdce
 +Directory hit/miss/eviction counts are monotonic. Active Host reservation bytes are reported
 +separately from materialized payload bytes. Native page/state accounting remains in the resource manager.
 +
-+Ngram copy proposals are available with fixed MTP on one active text request. They index
++Ngram copy proposals are available with fixed or adaptive MTP on one active text request,
++or one resident/CPU Vision request with INT8 or NVFP4 KV. They index
 +the committed logical token ledger, never compact slots or rejected drafts. Candidate storage
 +covers max(neural, ngram)+1 verification columns, and R must fit
 +max(neural, ngram)+neural native append rows. Both neural and copy graph families use
 +B+R attention capacity while retaining logical RoPE and RNG positions. Only the final
 +Frontend-accepted prefix contributes persistent mean-K statistics. Ngram widths above 15
-+also retain the native single-request GDN replay restriction. Images plus ngram and
-+concurrent KVMem ngram are rejected pending separate qualification.
++also retain the native single-request GDN replay restriction. Concurrent KVMem ngram
++remains rejected. INT8/NVFP4 image/ngram qualification covers accepted copy proposals,
++query replay, exact restored greedy/seeded output, cancellation/recovery, media replacement
++and image budget rejection. K8V4 image/ngram remains rejected after a cold/restored newline
++difference; BF16/RK8V4 image/ngram await qualification. See the parent
++[report](../../../../docs/vision-ngram-validation-20261005.md).
 +
 +Resident or CPU vision supports one active request. Complete image pages are mandatory alongside
 +the sink and append tail; admission rejects images that cannot fit B. Prefix identity includes
@@ -4082,7 +4088,7 @@ index 3a0d9157ffdec290e1ea5f19fea7fd6405edc0d3..f60aa2e99bc0a6d96b0ebe733e3f0159
      const bool recover_invariant_failures_;
      const bool kv_lease_growth_;
 diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
-index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..bf52274d14237ab47507b6158185ba9368ca2e23 100644
+index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..0e8e24726464728701560987e52860e6581b6940 100644
 --- a/src/runtime/engine/model_instance.cpp
 +++ b/src/runtime/engine/model_instance.cpp
 @@ -239,6 +239,63 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
@@ -4107,11 +4113,11 @@ index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..bf52274d14237ab47507b6158185ba93
 +            (options.speculative.draft_tokens >= 1 && options.speculative.draft_tokens <= 15);
 +        const bool fixed_mtp = memory_mtp && options.speculative.mtp_policy == MtpDraftPolicy::Fixed;
 +        const bool adaptive_mtp = memory_mtp &&
-+            options.speculative.mtp_policy == MtpDraftPolicy::Adaptive &&
-+            options.max_concurrency == 1 && !options.enable_vision &&
-+            options.speculative.ngram_draft_tokens == 0 && options.kvmem.disk_path.empty();
++            options.speculative.mtp_policy == MtpDraftPolicy::Adaptive;
 +        const bool memory_ngram_supported = options.speculative.ngram_draft_tokens == 0 ||
-+            (fixed_mtp && options.max_concurrency == 1 && !options.enable_vision &&
++            (memory_mtp && options.max_concurrency == 1 &&
++             (!options.enable_vision || options.kv_cache == KvCacheStorage::Int8Group64 ||
++                 options.kv_cache == KvCacheStorage::Nvfp4Group16) &&
 +             options.speculative.ngram_draft_tokens <= 63 &&
 +             options.speculative.ngram_min_match >= 4 && options.speculative.ngram_min_match <= 64 &&
 +             std::max(options.speculative.draft_tokens, options.speculative.ngram_draft_tokens) +
@@ -4142,7 +4148,7 @@ index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..bf52274d14237ab47507b6158185ba93
 +             options.kv_cache != KvCacheStorage::Fp8KeyNvfp4Value &&
 +             options.kv_cache != KvCacheStorage::RotatedInt8KeyInt4ValueGroup64)) {
 +            throw std::invalid_argument("KVMem requires explicit B+R page-aligned "
-+                "capacity per lane, nonzero global H, aligned prefill <= R, BF16/INT8/NVFP4/K8V4/RK8V4, 1..4 text lanes or one resident/CPU-vision lane, ordinary/fixed MTP1..15 or single-text-lane adaptive MTP without ngram/disk, text-only INT8/RK8V4 fast prefill without disk, "
++                "capacity per lane, nonzero global H, aligned prefill <= R, BF16/INT8/NVFP4/K8V4/RK8V4, 1..4 text lanes or one resident/CPU-vision lane, ordinary/fixed/adaptive MTP1..15, ngram on one lane (INT8/NVFP4 for images), text-only INT8/RK8V4 fast prefill without disk, "
 +                "and disabled prefix cache");
 +        }
 +    }
@@ -4256,7 +4262,7 @@ index ff590ace14997c8506fc03497b15f31a181a03e2..cb71e1b64bc5265a6682281739c6d954
  }
  
 diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
-index 97d9974961de55594564cdd901affed648e20529..923b3ee033911f55ab8511600d9f924ed4d952cf 100644
+index 97d9974961de55594564cdd901affed648e20529..99cb773fb9ad349388c5d2196bed6efdb5d6412c 100644
 --- a/src/serve/serve_options.cpp
 +++ b/src/serve/serve_options.cpp
 @@ -85,6 +85,18 @@ std::string serve_usage_text(const char* argv0) {
@@ -4272,8 +4278,8 @@ index 97d9974961de55594564cdd901affed648e20529..923b3ee033911f55ab8511600d9f924e
 +           "                                KVMem uses B+R device tokens and its own\n"
 +           "                                verified history reuse; BF16/INT8/NVFP4/K8V4/RK8V4,\n"
 +           "                                1..4 text lanes or one resident/CPU-vision lane,\n"
-+           "                                ordinary/fixed MTP1..15; adaptive MTP: C1 text,\n"
-+           "                                ngram/disk off; fast prefill: INT8/RK8V4 text, disk off\n"
++           "                                ordinary/fixed/adaptive MTP1..15; ngram: C1 text or INT8/NVFP4 vision,\n"
++           "                                cold disk: C1 text/profile off; fast: INT8/RK8V4 text, disk off\n"
 +           "  --kvmem-verify-transfers      check restored KV/GDN bytes (diagnostic)\n"
             "  --max-context N               logical context ceiling of each request (default\n"
             "                                8192)\n"
@@ -4326,11 +4332,11 @@ index 97d9974961de55594564cdd901affed648e20529..923b3ee033911f55ab8511600d9f924e
 +            (options.speculative.draft_tokens >= 1 && options.speculative.draft_tokens <= 15);
 +        const bool fixed_mtp = memory_mtp && options.speculative.mtp_policy == MtpDraftPolicy::Fixed;
 +        const bool adaptive_mtp = memory_mtp &&
-+            options.speculative.mtp_policy == MtpDraftPolicy::Adaptive &&
-+            options.max_concurrency == 1 && !options.enable_vision &&
-+            options.speculative.ngram_draft_tokens == 0 && options.kvmem.disk_path.empty();
++            options.speculative.mtp_policy == MtpDraftPolicy::Adaptive;
 +        const bool memory_ngram_supported = options.speculative.ngram_draft_tokens == 0 ||
-+            (fixed_mtp && options.max_concurrency == 1 && !options.enable_vision &&
++            (memory_mtp && options.max_concurrency == 1 &&
++             (!options.enable_vision || options.kv_cache == KvCacheStorage::Int8Group64 ||
++                 options.kv_cache == KvCacheStorage::Nvfp4Group16) &&
 +             options.speculative.ngram_draft_tokens <= 63 &&
 +             options.speculative.ngram_min_match >= 4 && options.speculative.ngram_min_match <= 64 &&
 +             std::max(options.speculative.draft_tokens, options.speculative.ngram_draft_tokens) +
@@ -4352,7 +4358,7 @@ index 97d9974961de55594564cdd901affed648e20529..923b3ee033911f55ab8511600d9f924e
 +             options.kv_cache != KvCacheStorage::Nvfp4Group16 &&
 +             options.kv_cache != KvCacheStorage::Fp8KeyNvfp4Value &&
 +             options.kv_cache != KvCacheStorage::RotatedInt8KeyInt4ValueGroup64)) {
-+            throw std::invalid_argument("KVMem requires ordinary/fixed MTP1..15 or single-text-lane adaptive MTP without ngram/disk, single-GPU BF16/INT8/NVFP4/K8V4/RK8V4 generation, images on one resident/CPU-vision lane, text-only INT8/RK8V4 fast prefill without disk, "
++            throw std::invalid_argument("KVMem requires ordinary/fixed/adaptive MTP1..15, ngram on one lane (INT8/NVFP4 for images), single-GPU BF16/INT8/NVFP4/K8V4/RK8V4 generation, images on one resident/CPU-vision lane, text-only INT8/RK8V4 fast prefill without disk, "
 +                "and exclusive ownership of history caching");
 +        }
 +        if (options.kvmem.selected_tokens < 128 || options.kvmem.selected_tokens % 64 ||
@@ -4470,7 +4476,7 @@ index f9971c923e2de8063bf69c16a581df94f568ddc1..6083e81581a4c386bdb91b5f85d5cc32
 +ninfer_finalize_bundle(ninfer_kvmem_nvfp4_tests)
 +ninfer_stage_runtime_dlls(ninfer_kvmem_nvfp4_tests)
 diff --git a/tests/README.md b/tests/README.md
-index 41c93343d778334dc0bca7213e9342f913572b70..8b096368e7dddc584a82f5e6a53999afcfc0be17 100644
+index 41c93343d778334dc0bca7213e9342f913572b70..f49d100d42012790d68c222caec7b26fd6c1f761 100644
 --- a/tests/README.md
 +++ b/tests/README.md
 @@ -298,6 +298,99 @@ The old/new Qwen3.8 binding matrix uses `out/qwen3_8_27b_old.ninfer` and
@@ -4573,7 +4579,7 @@ index 41c93343d778334dc0bca7213e9342f913572b70..8b096368e7dddc584a82f5e6a53999af
  ## Container build cache
  
  Check the Dockerfile's incremental-build and configuration-invalidation behavior without compiling
-@@ -313,3 +406,45 @@ timestamps, non-code edits, and one-file incremental compilation. Docker BuildKi
+@@ -313,3 +406,75 @@ timestamps, non-code edits, and one-file incremental compilation. Docker BuildKi
  `podman` can be passed instead to check that builder. Logs and the fixture remain in an ignored
  `build-cache-test.*` directory; the test image and its small build caches remain in the builder.
  The check needs the Dockerfile's build dependencies but no GPU or model weights.
@@ -4619,6 +4625,36 @@ index 41c93343d778334dc0bca7213e9342f913572b70..8b096368e7dddc584a82f5e6a53999af
 +past EOS into new role tokens does not create a reconstructible chat prefix. Other history
 +checks retain their exact output-budget assertions. Details and supported bounds are in the
 +parent [report](../../../docs/parameter-admission-validation-20261004.md).
++
++## KVMem adaptive-combination follow-up
++
++The focused follow-up uses ten model processes on IQ3S/RTX 5060 Ti, reusing
++existing numerical evidence. The final feature slot in `ninfer_p4_history` and
++`ninfer_memory_concurrency` accepts `adaptive-fast`; concurrency also accepts
++`adaptive`. The ngram fixture accepts a final `adaptive` after its MTP draft
++width. Vision accepts `adaptive` after `resident|cpu` and `query-only`;
++disk accepts it after `ngram-width short|long eager|graph`.
++Each fixture checks the adaptive observation and records its window histogram;
++existing reuse, isolation, exact ngram greedy comparisons, cancellation,
++resource retirement and transfer assertions remain active. Disk cold and hit
++are separate processes sharing one dedicated directory. Fast prefill remains
++INT8/RK8V4 text-only without cold disk. Ngram supports one text or INT8/NVFP4 resident/CPU Vision lane, max63;
++images remain one resident/CPU lane and cold snapshots require profile off.
++The new bounds and measured configurations are recorded in the parent
++[report](../../../docs/adaptive-combinations-validation-20261005.md).
++
++## KVMem images with ngram
++
++`ninfer_memory_vision` accepts `all|query-only|native-boundary`, then
++`fixed|adaptive`, then an optional ngram width. `copy-compare` runs only the
++cold/restored copy pair, including ngram-off or native controls. A nonzero width adds real image
++and text copy requests with positive wide-draft acceptance, exact cold/restored
++greedy and seeded-sampling comparisons, cancellation/recovery, output limits
++and edited-prefix rejection. Copy requests honor model stop tokens; the existing
++fixed-length color fixtures keep their original termination policy. Transfer
++verification logs must prove query replay, not merely a long input or an enabled
++flag. The parent [qualification report](../../../docs/vision-ngram-validation-20261005.md)
++records the two admitted configurations, the deferred K8V4 case and controls.
 diff --git a/tests/experimental/kvmem_test_options.h b/tests/experimental/kvmem_test_options.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..e29cd0e383488754390957ddc20d7260a829d33f
@@ -4662,10 +4698,10 @@ index 0000000000000000000000000000000000000000..e29cd0e383488754390957ddc20d7260
 +} // namespace ninfer::test
 diff --git a/tests/experimental/memory_concurrency.cpp b/tests/experimental/memory_concurrency.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b442d106f9fa0f627b938b40c217c99a2f4c7b8c
+index 0000000000000000000000000000000000000000..2dcc0739324860eae4845853a276d4814c047e8e
 --- /dev/null
 +++ b/tests/experimental/memory_concurrency.cpp
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,200 @@
 +#include "ninfer/engine.h"
 +#include "kvmem_test_options.h"
 +#include <algorithm>
@@ -4730,7 +4766,7 @@ index 0000000000000000000000000000000000000000..b442d106f9fa0f627b938b40c217c99a
 +int main(int argc, char** argv) {
 +    try {
 +        require(argc >= 5 && argc <= 8,
-+                "artifact draft-count(0..15) concurrency(2|4) host-MiB [bf16|int8|nvfp4|k8v4|rk8v4] [eager|graph] [fast]");
++                "artifact draft-count(0..15) concurrency(2|4) host-MiB [bf16|int8|nvfp4|k8v4|rk8v4] [eager|graph] [fast|adaptive|adaptive-fast]");
 +        const auto drafts = static_cast<std::uint32_t>(std::stoul(argv[2]));
 +        const auto concurrency = static_cast<std::uint32_t>(std::stoul(argv[3]));
 +        ninfer::EngineOptions options;
@@ -4755,8 +4791,10 @@ index 0000000000000000000000000000000000000000..b442d106f9fa0f627b938b40c217c99a
 +            options.speculative.draft_tokens = drafts;
 +        }
 +        if (argc == 8) {
-+            require(std::string(argv[7]) == "fast", "expected fast");
-+            options.fast_prefill_kernel = true;
++            const std::string feature = argv[7];
++            require(feature == "fast" || feature == "adaptive" || feature == "adaptive-fast", "invalid feature");
++            options.fast_prefill_kernel = feature != "adaptive";
++            if (feature != "fast") options.speculative.mtp_policy = ninfer::MtpDraftPolicy::Adaptive;
 +        }
 +        ninfer::Engine engine(options);
 +        const bool pressure = options.kvmem.host_bytes <
@@ -4809,6 +4847,13 @@ index 0000000000000000000000000000000000000000..b442d106f9fa0f627b938b40c217c99a
 +                        "one lane affected another lane's termination");
 +                if (!jobs[row].cancel && drafts)
 +                    require(result.speculative.accepted_tokens > 0, "MTP was silently disabled");
++                if (options.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive) {
++                    require(result.speculative.adaptive, "adaptive MTP was silently disabled");
++                    std::cout << "MEMORY_ADAPTIVE " << label << " lane=" << row
++                              << " transitions=" << result.speculative.window_transitions << " windows=";
++                    for (auto count : result.speculative.rounds_per_window) std::cout << count << ',';
++                    std::cout << std::endl;
++                }
 +                if (!jobs[row].cancel && !jobs[row].expected_code.empty())
 +                    require(result.content.find(jobs[row].expected_code) != std::string::npos,
 +                            "request returned the wrong archive access code");
@@ -4859,10 +4904,10 @@ index 0000000000000000000000000000000000000000..b442d106f9fa0f627b938b40c217c99a
 +}
 diff --git a/tests/experimental/memory_disk.cpp b/tests/experimental/memory_disk.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..73b49262984bc360fbb0062682fcdfd515601931
+index 0000000000000000000000000000000000000000..5f16a2863f77d60a373ba7ff8f03ac70f88e4407
 --- /dev/null
 +++ b/tests/experimental/memory_disk.cpp
-@@ -0,0 +1,123 @@
+@@ -0,0 +1,133 @@
 +#include "ninfer/engine.h"
 +#include "kvmem_test_options.h"
 +#include <atomic>
@@ -4888,7 +4933,7 @@ index 0000000000000000000000000000000000000000..73b49262984bc360fbb0062682fcdfd5
 +}
 +int main(int argc, char** argv) {
 +    try {
-+        require(argc >= 7 && argc <= 10, "artifact drafts(0..4) bf16|int8|nvfp4|k8v4|rk8v4 cache-dir cold|hit|error|cancel|clear quota-MiB [ngram-width] [short|long] [eager|graph]");
++        require(argc >= 7 && argc <= 11, "artifact drafts(0..15) bf16|int8|nvfp4|k8v4|rk8v4 cache-dir cold|hit|error|cancel|clear quota-MiB [ngram-width] [short|long] [eager|graph] [adaptive]");
 +        ninfer::EngineOptions options;
 +        options.artifact_path = argv[1];
 +        options.device_profile = "off";
@@ -4905,7 +4950,11 @@ index 0000000000000000000000000000000000000000..73b49262984bc360fbb0062682fcdfd5
 +            options.speculative.draft_tokens = drafts;
 +        }
 +        if (argc >= 8) options.speculative.ngram_draft_tokens = static_cast<std::uint32_t>(std::stoul(argv[7]));
-+        if (argc == 10) options.use_cuda_graph = ninfer::test::kvmem_test_graph(argv[9]);
++        if (argc >= 10) options.use_cuda_graph = ninfer::test::kvmem_test_graph(argv[9]);
++        if (argc == 11) {
++            require(std::string(argv[10]) == "adaptive", "expected adaptive");
++            options.speculative.mtp_policy = ninfer::MtpDraftPolicy::Adaptive;
++        }
 +        ninfer::Engine engine(options);
 +        ninfer::PromptInput input;
 +        input.options.enable_thinking = false;
@@ -4976,6 +5025,12 @@ index 0000000000000000000000000000000000000000..73b49262984bc360fbb0062682fcdfd5
 +        if (mode == "error") require(memory.disk_errors > 0, "snapshot failure was not reported");
 +        if (mode != "error" && mode != "clear") require(memory.disk_writes > 0, "trusted checkpoint was not persisted");
 +        if (mode == "clear") require(memory.disk_writes == 0, "explicit clear republished the discarded history");
++        if (options.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive) {
++            require(result.speculative.adaptive, "adaptive MTP was silently disabled");
++            std::cout << "MEMORY_ADAPTIVE disk transitions=" << result.speculative.window_transitions << " windows=";
++            for (auto count : result.speculative.rounds_per_window) std::cout << count << ',';
++            std::cout << std::endl;
++        }
 +        std::cout << "MEMORY_DISK mode=" << mode << " reused=" << result.reused_prompt_tokens
 +                  << " hits=" << memory.disk_hits << " writes=" << memory.disk_writes
 +                  << " errors=" << memory.disk_errors << " host=" << memory.host_payload_bytes
@@ -4988,10 +5043,10 @@ index 0000000000000000000000000000000000000000..73b49262984bc360fbb0062682fcdfd5
 +}
 diff --git a/tests/experimental/memory_ngram.cpp b/tests/experimental/memory_ngram.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cad680ad280d4c1053d7a3acb2b10221b8918988
+index 0000000000000000000000000000000000000000..f8306bde5cbe4526c48a1bcf1d01a454be710edb
 --- /dev/null
 +++ b/tests/experimental/memory_ngram.cpp
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,131 @@
 +#include "ninfer/engine.h"
 +#include "kvmem_test_options.h"
 +#include <atomic>
@@ -5021,7 +5076,7 @@ index 0000000000000000000000000000000000000000..cad680ad280d4c1053d7a3acb2b10221
 +}
 +int main(int argc, char** argv) {
 +    try {
-+        require(argc == 5 || argc == 6, "artifact bf16|int8|nvfp4|k8v4|rk8v4 eager|graph ngram-width [mtp-drafts]");
++        require(argc >= 5 && argc <= 7, "artifact bf16|int8|nvfp4|k8v4|rk8v4 eager|graph ngram-width [mtp-drafts] [adaptive]");
 +        ninfer::EngineOptions options;
 +        options.artifact_path = argv[1];
 +        options.device_profile = "off"; options.max_context = 8192; options.prefill_chunk = 128;
@@ -5032,9 +5087,13 @@ index 0000000000000000000000000000000000000000..cad680ad280d4c1053d7a3acb2b10221
 +        options.kv_cache = ninfer::test::kvmem_test_storage(argv[2]);
 +        options.use_cuda_graph = ninfer::test::kvmem_test_graph(argv[3]);
 +        options.speculative.backend = ninfer::SpeculativeBackend::Mtp;
-+        options.speculative.draft_tokens = argc == 6 ? static_cast<std::uint32_t>(std::stoul(argv[5])) : 3;
++        options.speculative.draft_tokens = argc >= 6 ? static_cast<std::uint32_t>(std::stoul(argv[5])) : 3;
 +        options.speculative.ngram_draft_tokens = static_cast<std::uint32_t>(std::stoul(argv[4]));
 +        options.speculative.ngram_min_match = 4;
++        if (argc == 7) {
++            require(std::string(argv[6]) == "adaptive", "expected adaptive");
++            options.speculative.mtp_policy = ninfer::MtpDraftPolicy::Adaptive;
++        }
 +        ninfer::Engine engine(options);
 +        ninfer::PromptInput prompt;
 +        prompt.options.enable_thinking = false;
@@ -5077,6 +5136,13 @@ index 0000000000000000000000000000000000000000..cad680ad280d4c1053d7a3acb2b10221
 +                      << " rounds=" << result.speculative.ngram_rounds
 +                      << " drafted=" << result.speculative.ngram_drafted_tokens
 +                      << " accepted=" << result.speculative.ngram_accepted_tokens << std::endl;
++            if (options.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive) {
++                require(result.speculative.adaptive, "adaptive MTP was silently disabled");
++                std::cout << "MEMORY_ADAPTIVE case=" << name
++                          << " transitions=" << result.speculative.window_transitions << " windows=";
++                for (auto count : result.speculative.rounds_per_window) std::cout << count << ',';
++                std::cout << std::endl;
++            }
 +            return result;
 +        };
 +        const auto cold = run("cold-copy", prompt, false);
@@ -5243,10 +5309,10 @@ index 0000000000000000000000000000000000000000..d6f0a0f9a5ab988adfc6cae0abdeb3f5
 +}
 diff --git a/tests/experimental/memory_vision.cpp b/tests/experimental/memory_vision.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..16b220a59087ae50c197c484759ad1cefd3f370e
+index 0000000000000000000000000000000000000000..a06bb282f9bc798c3fd7ddbf2428921d9d9b8441
 --- /dev/null
 +++ b/tests/experimental/memory_vision.cpp
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,259 @@
 +#include "ninfer/engine.h"
 +#include "kvmem_test_options.h"
 +#include <algorithm>
@@ -5303,8 +5369,8 @@ index 0000000000000000000000000000000000000000..16b220a59087ae50c197c484759ad1ce
 +
 +int main(int argc, char** argv) {
 +    try {
-+        require(argc >= 6 && argc <= 10,
-+                "artifact draft-count(0..15) native|kvmem red.png blue.png [bf16|int8|nvfp4|k8v4|rk8v4] [eager|graph] [resident|cpu] [query-only|native-boundary]");
++        require(argc >= 6 && argc <= 12,
++                "artifact draft-count(0..15) native|kvmem red.png blue.png [bf16|int8|nvfp4|k8v4|rk8v4] [eager|graph] [resident|cpu] [all|query-only|native-boundary|copy-compare] [fixed|adaptive] [ngram-width]");
 +        const auto red = media(argv[4]), blue = media(argv[5]);
 +        const bool memory = std::string(argv[3]) == "kvmem";
 +        const auto drafts = static_cast<std::uint32_t>(std::stoul(argv[2]));
@@ -5331,6 +5397,12 @@ index 0000000000000000000000000000000000000000..16b220a59087ae50c197c484759ad1ce
 +            options.vision_residency = std::string(argv[8]) == "cpu" ? ninfer::VisionResidency::Cpu
 +                                                                   : ninfer::VisionResidency::Resident;
 +        }
++        if (argc >= 11) {
++            require(std::string(argv[10]) == "adaptive" || std::string(argv[10]) == "fixed", "expected fixed or adaptive");
++            options.speculative.mtp_policy = std::string(argv[10]) == "adaptive"
++                ? ninfer::MtpDraftPolicy::Adaptive : ninfer::MtpDraftPolicy::Fixed;
++        }
++        if (argc == 12) options.speculative.ngram_draft_tokens = static_cast<std::uint32_t>(std::stoul(argv[11]));
 +        ninfer::Engine engine(options);
 +        const auto input = [](const char* key) {
 +            ninfer::PromptInput result;
@@ -5340,11 +5412,16 @@ index 0000000000000000000000000000000000000000..16b220a59087ae50c197c484759ad1ce
 +            return result;
 +        };
 +        const auto run = [&](const char* label, ninfer::PromptInput prompt,
-+                             std::vector<std::string> expected, bool reused, bool cancel = false) {
++                             std::vector<std::string> expected, bool reused, bool cancel = false,
++                             std::uint32_t count = 48, float temperature = 0.0F,
++                             bool model_stops = false) {
 +            ninfer::RequestOptions request;
-+            request.execution.requested_output_tokens = cancel ? 160 : 48;
-+            request.execution.sampling.temperature = 0;
-+            request.stop.include_model_defaults = false;
++            request.execution.requested_output_tokens = cancel ? 160 : count;
++            request.execution.sampling.temperature = temperature;
++            request.execution.sampling.seed = 42;
++            request.execution.sampling.top_k = 20;
++            request.execution.sampling.top_p = 0.9F;
++            request.stop.include_model_defaults = model_stops;
 +            Sink sink;
 +            sink.cancel_enabled = cancel;
 +            const auto result = engine.submit(engine.prepare(std::move(prompt)), request,
@@ -5353,7 +5430,16 @@ index 0000000000000000000000000000000000000000..16b220a59087ae50c197c484759ad1ce
 +            require(engine.is_available(), "image request made Engine unavailable");
 +            require((result.reused_prompt_tokens != 0) == (memory && reused), "wrong image reuse decision");
 +            require(cancel ? result.finish_reason == ninfer::FinishReason::Cancelled
-+                           : result.generated_token_ids.size() == 48, "wrong image request termination");
++                           : (!result.generated_token_ids.empty() && result.generated_token_ids.size() <= count &&
++                              (model_stops || result.generated_token_ids.size() == count)), "wrong image request termination");
++            require(result.prompt.has_media, "vision fixture lost media");
++            if (options.speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive) {
++                require(result.speculative.adaptive, "adaptive MTP was silently disabled");
++                std::cout << "MEMORY_ADAPTIVE " << label
++                          << " transitions=" << result.speculative.window_transitions << " windows=";
++                for (auto count : result.speculative.rounds_per_window) std::cout << count << ',';
++                std::cout << std::endl;
++            }
 +            auto text = result.content;
 +            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
 +            for (const auto& word : expected)
@@ -5365,9 +5451,53 @@ index 0000000000000000000000000000000000000000..16b220a59087ae50c197c484759ad1ce
 +            }
 +            std::cout << "MEMORY_VISION " << label << " reused=" << result.reused_prompt_tokens
 +                      << " output=" << result.generated_token_ids.size() << " accepted="
-+                      << result.speculative.accepted_tokens << " text=" << result.content << std::endl;
++                      << result.speculative.accepted_tokens << " prompt=" << result.prompt.prompt_tokens
++                      << " ng_rounds=" << result.speculative.ngram_rounds
++                      << " ng_drafted=" << result.speculative.ngram_drafted_tokens
++                      << " ng_accepted=" << result.speculative.ngram_accepted_tokens
++                      << " text=" << result.content << std::endl;
++            return result;
 +        };
-+        if (argc == 10) {
++        const bool copy_compare = argc >= 10 && std::string(argv[9]) == "copy-compare";
++        if (options.speculative.ngram_draft_tokens || copy_compare) {
++            auto copy = input("image-copy");
++            filler(copy);
++            std::string passage = "The violet observatory opens at sunrise. ";
++            for (int i = 0; i < 12; ++i)
++                passage += "Its telescope observes distant galaxies, while the astronomers record the changing light of stars. ";
++            add(copy, ninfer::ChatRole::User,
++                "First state the image's color in English. Then copy the following passage exactly, without explanations:\n" + passage, {red});
++            const auto cold = run("image-copy-cold", copy, {"red", "violet observatory"}, false, false, 192, 0.0F, true);
++            if (memory) require(cold.prompt.prompt_tokens > options.kvmem.device_tokens(), "copy did not cross the device window");
++            if (options.speculative.ngram_draft_tokens) require(cold.speculative.ngram_rounds > 0 && cold.speculative.ngram_accepted_tokens >
++                drafts * cold.speculative.ngram_rounds, "image copy did not exercise wide accepted ngram proposals");
++            const auto repeat = run("image-copy-repeat", copy, {"red"}, true, false, 192, 0.0F, true);
++            if (cold.generated_token_ids != repeat.generated_token_ids) {
++                const auto diff = std::mismatch(cold.generated_token_ids.begin(), cold.generated_token_ids.end(),
++                    repeat.generated_token_ids.begin(), repeat.generated_token_ids.end());
++                std::cout << "MEMORY_VISION COPY_DIFFERENCE token=" << (diff.first - cold.generated_token_ids.begin())
++                          << " cold_size=" << cold.generated_token_ids.size() << " repeat_size=" << repeat.generated_token_ids.size();
++                if (diff.first != cold.generated_token_ids.end()) std::cout << " cold_token=" << *diff.first;
++                if (diff.second != repeat.generated_token_ids.end()) std::cout << " repeat_token=" << *diff.second;
++                std::cout << std::endl;
++            }
++            require(cold.generated_token_ids == repeat.generated_token_ids, "image ngram restore changed greedy output");
++            if (copy_compare) { std::cout << "MEMORY_VISION COPY_COMPARE PASS" << std::endl; return 0; }
++            run("image-copy-cancel", copy, {}, true, true, 192, 0.0F, true);
++            const auto recovered = run("image-copy-recovery", copy, {"red"}, true, false, 192, 0.0F, true);
++            require(cold.generated_token_ids == recovered.generated_token_ids, "image ngram cancellation polluted history");
++            for (auto count : {1U, 2U, 65U}) {
++                const auto limited = run("image-copy-limit", copy, {}, true, false, count, 0.0F, true);
++                require(limited.generated_token_ids.front() == cold.generated_token_ids.front(), "image ngram output limit changed first token");
++            }
++            const auto sampled = run("image-copy-sampling", copy, {}, true, false, 96, 0.8F, true);
++            const auto sampled_again = run("image-copy-sampling-repeat", copy, {}, true, false, 96, 0.8F, true);
++            require(sampled.generated_token_ids == sampled_again.generated_token_ids, "image ngram restore changed seeded sampling");
++            auto edited = copy;
++            edited.messages[1].parts[0].text = "This archive entry was replaced.";
++            run("image-copy-edited-prefix", edited, {"red", "violet observatory"}, false, false, 96, 0.0F, true);
++        }
++        if (argc >= 10 && std::string(argv[9]) != "all") {
 +            const bool boundary = std::string(argv[9]) == "native-boundary";
 +            require(boundary || std::string(argv[9]) == "query-only", "expected query-only or native-boundary");
 +            auto query = input("query-image");
@@ -5547,10 +5677,10 @@ index 0000000000000000000000000000000000000000..6db740714534e255c1def58fa40db5db
 +}
 diff --git a/tests/experimental/p1_options.cpp b/tests/experimental/p1_options.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..cf20305ea78755c989f7f319390738bcf89bc509
+index 0000000000000000000000000000000000000000..d153640d55f84fb1a1e945a873f99df3ac220ca7
 --- /dev/null
 +++ b/tests/experimental/p1_options.cpp
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,221 @@
 +#include "runtime/engine/model_instance.h"
 +#include <functional>
 +#include <iostream>
@@ -5660,6 +5790,46 @@ index 0000000000000000000000000000000000000000..cf20305ea78755c989f7f319390738bc
 +            extended.enable_vision = true;
 +            extended.vision_residency = ninfer::VisionResidency::Cpu;
 +            (void)ninfer::runtime::normalize_engine_options(extended);
++            extended.speculative.mtp_policy = ninfer::MtpDraftPolicy::Adaptive;
++            (void)ninfer::runtime::normalize_engine_options(extended);
++            extended.vision_residency = ninfer::VisionResidency::Resident;
++            (void)ninfer::runtime::normalize_engine_options(extended);
++            for (const auto residency : {ninfer::VisionResidency::Resident, ninfer::VisionResidency::Cpu}) {
++                extended.vision_residency = residency;
++                for (const auto policy : {ninfer::MtpDraftPolicy::Fixed, ninfer::MtpDraftPolicy::Adaptive}) {
++                    extended.speculative.mtp_policy = policy;
++                    for (const auto width : {15U, 31U, 63U}) {
++                        extended.speculative.ngram_draft_tokens = width;
++                        const bool qualified = storage == ninfer::KvCacheStorage::Int8Group64 ||
++                            storage == ninfer::KvCacheStorage::Nvfp4Group16;
++                        if (!qualified) {
++                            bool rejected = false;
++                            try { (void)ninfer::runtime::normalize_engine_options(extended); }
++                            catch (const std::invalid_argument&) { rejected = true; }
++                            if (!rejected) throw std::runtime_error("Unqualified image/ngram storage accepted");
++                            continue;
++                        }
++                        const auto accepted = ninfer::runtime::normalize_engine_options(extended);
++                        if (!accepted.enable_vision || accepted.vision_residency != residency ||
++                            accepted.speculative.ngram_draft_tokens != width || accepted.speculative.mtp_policy != policy)
++                            throw std::runtime_error("KVMem changed the image/ngram combination");
++                    }
++                }
++            }
++            extended.speculative.ngram_draft_tokens = 0;
++            extended.speculative.mtp_policy = ninfer::MtpDraftPolicy::Adaptive;
++            extended.enable_vision = false;
++            extended.max_concurrency = 4;
++            extended.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(1024);
++            (void)ninfer::runtime::normalize_engine_options(extended);
++            extended.max_concurrency = 1;
++            extended.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(256);
++            extended.speculative.ngram_draft_tokens = 31;
++            (void)ninfer::runtime::normalize_engine_options(extended);
++            extended.device_profile = "off";
++            extended.kvmem.disk_path = "adaptive-cold";
++            extended.kvmem.disk_bytes = 1ULL << 30;
++            (void)ninfer::runtime::normalize_engine_options(extended);
 +        }
 +        for (const auto storage : {ninfer::KvCacheStorage::Int8Group64,
 +                ninfer::KvCacheStorage::RotatedInt8KeyInt4ValueGroup64}) {
@@ -5677,7 +5847,7 @@ index 0000000000000000000000000000000000000000..cf20305ea78755c989f7f319390738bc
 +            [](auto& o) { o.kvmem.disk_path = "concurrent"; o.kvmem.disk_bytes = 1ULL << 30;
 +                         o.device_profile = "off"; o.max_concurrency = 2;
 +                         o.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(512); },
-+                        [](auto& o) { o.enable_vision = true; o.vision_residency = ninfer::VisionResidency::Overlay; },
++            [](auto& o) { o.enable_vision = true; o.vision_residency = ninfer::VisionResidency::Overlay; },
 +            [](auto& o) { o.enable_vision = true; o.max_concurrency = 2;
 +                         o.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(512); },
 +            [](auto& o) { o.concurrent_prefill = true; },
@@ -5699,12 +5869,10 @@ index 0000000000000000000000000000000000000000..cf20305ea78755c989f7f319390738bc
 +            [](auto& o) { o.speculative.backend = ninfer::SpeculativeBackend::Mtp;
 +                         o.speculative.draft_tokens = 3;
 +                         o.speculative.mtp_policy = ninfer::MtpDraftPolicy::Adaptive;
++                         o.speculative.ngram_draft_tokens = 15;
 +                         o.max_concurrency = 2; o.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(512); },
 +            [](auto& o) { o.speculative.backend = ninfer::SpeculativeBackend::Mtp;
 +                         o.speculative.draft_tokens = 3; o.speculative.ngram_draft_tokens = 64; },
-+            [](auto& o) { o.speculative.backend = ninfer::SpeculativeBackend::Mtp;
-+                         o.speculative.draft_tokens = 3; o.speculative.ngram_draft_tokens = 15;
-+                         o.enable_vision = true; },
 +            [](auto& o) { o.speculative.backend = ninfer::SpeculativeBackend::Mtp;
 +                         o.speculative.draft_tokens = 3; o.speculative.ngram_draft_tokens = 15;
 +                         o.max_concurrency = 2; o.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(512); },
@@ -5726,7 +5894,7 @@ index 0000000000000000000000000000000000000000..cf20305ea78755c989f7f319390738bc
 +                if (!rejected) { throw std::runtime_error("unsupported KVMem combination accepted"); }
 +            }
 +        }
-+        std::cout << "P1_OPTIONS PASS: NVFP4/K8V4 ordinary/fixed MTP1..15, adaptive text C1, CPU Vision, fast text prefill, text lanes/vision/disk and " << invalid.size() * 3
++        std::cout << "P1_OPTIONS PASS: NVFP4/K8V4 ordinary/fixed MTP1..15, adaptive lanes/images/ngram/cold, CPU Vision, fast text prefill, text lanes/vision/disk and " << invalid.size() * 3
 +                  << " rejected combinations\n";
 +        return 0;
 +    } catch (const std::exception& e) {
@@ -5994,10 +6162,10 @@ index 0000000000000000000000000000000000000000..184609658106bec46545b973e086ff58
 +}
 diff --git a/tests/experimental/p4_history.cpp b/tests/experimental/p4_history.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..1a6d25b609d3b8bb9e22bd86e5eeaea172801fb5
+index 0000000000000000000000000000000000000000..324e9f76a3fbc333f5f308496a5b01fea12998ad
 --- /dev/null
 +++ b/tests/experimental/p4_history.cpp
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,443 @@
 +#include "ninfer/engine.h"
 +#include "kvmem_test_options.h"
 +#include <atomic>
@@ -6058,7 +6226,7 @@ index 0000000000000000000000000000000000000000..1a6d25b609d3b8bb9e22bd86e5eeaea1
 +int main(int argc, char** argv) {
 +    try {
 +        if (argc < 5 || argc > 9) throw std::invalid_argument(
-+            "artifact bf16|int8|nvfp4|k8v4|rk8v4 eager|graph output [drafts] [mode] [ngram-width] [wddm|adaptive|fast]");
++            "artifact bf16|int8|nvfp4|k8v4|rk8v4 eager|graph output [drafts] [mode] [ngram-width] [wddm|adaptive|fast|adaptive-fast]");
 +        ninfer::EngineOptions o;
 +        o.artifact_path = argv[1]; o.max_context = 16384; o.device = 0;
 +        o.max_concurrency = 1; o.prefill_chunk = 128;
@@ -6084,9 +6252,11 @@ index 0000000000000000000000000000000000000000..1a6d25b609d3b8bb9e22bd86e5eeaea1
 +        if (argc == 9) {
 +            const std::string feature = argv[8];
 +            if (feature == "wddm") o.wddm_evictable_budget = true;
-+            else if (feature == "adaptive") o.speculative.mtp_policy = ninfer::MtpDraftPolicy::Adaptive;
-+            else if (feature == "fast") o.fast_prefill_kernel = true;
-+            else throw std::invalid_argument("expected wddm, adaptive or fast");
++            else if (feature == "adaptive" || feature == "adaptive-fast") {
++                o.speculative.mtp_policy = ninfer::MtpDraftPolicy::Adaptive;
++                o.fast_prefill_kernel = feature == "adaptive-fast";
++            } else if (feature == "fast") o.fast_prefill_kernel = true;
++            else throw std::invalid_argument("expected wddm, adaptive, fast or adaptive-fast");
 +        }
 +        if (input_fallback) o.gdn_state_fp16 = true;
 +        if (input_fallback && mode != "input-fallback") {
@@ -6952,10 +7122,10 @@ index 9def7c0df5e6c80d24c3684e7d7d5667a3436426..00a825c73f4fac16e520eb7946cdaad7
      run_test("session publication order", test_session_publication_order_controls_tied_source);
      run_test("canonical pressure", test_canonical_pressure_starts_with_disposable_owner);
 diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
-index a2a85784b4cfb969b48d3c3bfc116400f8bda693..ce1a0c99cca7b3fce9a0b3ef0a5bae81e4d9e15d 100644
+index a2a85784b4cfb969b48d3c3bfc116400f8bda693..4a2795a648695b2208d156635f2394edb2ad32cb 100644
 --- a/tests/test_serve_options.cpp
 +++ b/tests/test_serve_options.cpp
-@@ -24,14 +24,158 @@ ServeOptions parse(std::vector<std::string> arguments) {
+@@ -24,14 +24,192 @@ ServeOptions parse(std::vector<std::string> arguments) {
      std::vector<char*> argv;
      argv.reserve(arguments.size());
      for (std::string& argument : arguments) { argv.push_back(argument.data()); }
@@ -7007,7 +7177,7 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..ce1a0c99cca7b3fce9a0b3ef0a5bae81
 +    for (const auto& extra : std::vector<std::vector<std::string>>{
 +             {"--spec", "mtp", "--draft-tokens", "0"},
 +             {"--spec", "mtp", "--draft-tokens", "16"},
-+             {"--spec", "mtp", "--draft-tokens", "4", "--adaptive-mtp", "--max-concurrency", "2"}}) {
++             {"--spec", "mtp", "--draft-tokens", "4", "--adaptive-mtp", "--max-concurrency", "2", "--ngram-draft-tokens", "15"}}) {
 +        auto args = memory_args; args.insert(args.end(), extra.begin(), extra.end());
 +        bool rejected = false;
 +        try { (void)parse(args); } catch (const std::invalid_argument&) { rejected = true; }
@@ -7030,7 +7200,7 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..ce1a0c99cca7b3fce9a0b3ef0a5bae81
 +        failures += check(parsed.speculative.ngram_draft_tokens == 31,
 +                          "KVMem ngram width was silently disabled");
 +        for (const auto& extra : std::vector<std::vector<std::string>>{
-+                 {"--max-concurrency", "2"}, {"--vision"}, {"--ngram-draft-tokens", "64"}}) {
++                 {"--max-concurrency", "2"}, {"--ngram-draft-tokens", "64"}}) {
 +            auto bad = args; bad.insert(bad.end(), extra.begin(), extra.end());
 +            bool rejected = false;
 +            try { (void)parse(bad); } catch (const std::invalid_argument&) { rejected = true; }
@@ -7043,9 +7213,21 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..ce1a0c99cca7b3fce9a0b3ef0a5bae81
 +                                 "--adaptive-mtp", "--ngram-draft-tokens", "0"});
 +        failures += check(make_engine_options(parse(args)).speculative.mtp_policy == ninfer::MtpDraftPolicy::Adaptive,
 +                          "KVMem adaptive MTP was not preserved");
++        auto lanes = args;
++        lanes.insert(lanes.end(), {"--max-concurrency", "4"});
++        failures += check(make_engine_options(parse(lanes)).max_concurrency == 4,
++                          "adaptive MTP concurrency was not preserved");
++        auto copy = args;
++        copy.insert(copy.end(), {"--ngram-draft-tokens", "31"});
++        failures += check(make_engine_options(parse(copy)).speculative.ngram_draft_tokens == 31,
++                          "adaptive MTP copy drafting was not preserved");
++        auto disk = args;
++        disk.insert(disk.end(), {"--kvmem-disk-path", "adaptive-cold", "--kvmem-disk-mib", "512", "--device-profile", "off"});
++        failures += check(!make_engine_options(parse(disk)).kvmem.disk_path.empty(),
++                          "adaptive MTP cold snapshots were not preserved");
 +        args = memory_args;
 +        args.insert(args.end(), {"--kv-dtype", format, "--vision-cpu", "--spec", "mtp",
-+                                 "--draft-tokens", "15", "--ngram-draft-tokens", "0"});
++                                 "--draft-tokens", "15", "--ngram-draft-tokens", "0", "--adaptive-mtp"});
 +        failures += check(make_engine_options(parse(args)).vision_residency == ninfer::VisionResidency::Cpu,
 +                          "KVMem CPU Vision was not preserved");
 +    }
@@ -7054,6 +7236,28 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..ce1a0c99cca7b3fce9a0b3ef0a5bae81
 +        args.insert(args.end(), {"--kv-dtype", format, "--max-concurrency", "4", "--fast-prefill-kernel"});
 +        failures += check(make_engine_options(parse(args)).fast_prefill_kernel,
 +                          "KVMem fast text prefill was not preserved");
++    }
++    for (const auto* format : {"bf16", "int8", "nvfp4", "k8v4", "rk8v4"}) {
++        for (const auto* residency : {"resident", "cpu"}) {
++            for (const auto policy : {ninfer::MtpDraftPolicy::Fixed, ninfer::MtpDraftPolicy::Adaptive}) {
++                for (const auto width : {15U, 31U, 63U}) {
++                    auto args = memory_args;
++                    args.insert(args.end(), {"--kv-dtype", format, "--vision", "--vision-residency", residency,
++                        "--spec", "mtp", "--draft-tokens", "15", "--ngram-draft-tokens", std::to_string(width)});
++                    if (policy == ninfer::MtpDraftPolicy::Adaptive) args.push_back("--adaptive-mtp");
++                    if (std::string_view(format) != "int8" && std::string_view(format) != "nvfp4") {
++                        bool rejected = false;
++                        try { (void)parse(args); } catch (const std::invalid_argument&) { rejected = true; }
++                        failures += check(rejected, "Unqualified KVMem image/ngram storage accepted");
++                        continue;
++                    }
++                    const auto image_copy = make_engine_options(parse(args));
++                    failures += check(image_copy.enable_vision && image_copy.max_concurrency == 1 &&
++                        image_copy.speculative.ngram_draft_tokens == width && image_copy.speculative.mtp_policy == policy,
++                        "KVMem image/ngram mapping changed the requested execution");
++                }
++            }
++        }
 +    }
      const auto memory_defaults = parse({"ninfer-serve", "model.ninfer"});
 +    for (const auto* format : {"nvfp4", "k8v4"}) {
@@ -7102,7 +7306,7 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..ce1a0c99cca7b3fce9a0b3ef0a5bae81
 +        for (const auto& extra : std::vector<std::vector<std::string>>{
 +                 {"--max-concurrency", "5"}, {"--vision", "--max-concurrency", "2"},
 +                 {"--spec", "mtp", "--draft-tokens", "16"},
-+                 {"--spec", "mtp", "--draft-tokens", "4", "--adaptive-mtp", "--max-concurrency", "2"},
++                 {"--spec", "mtp", "--draft-tokens", "4", "--adaptive-mtp", "--max-concurrency", "2", "--ngram-draft-tokens", "15"},
 +                 {"--spec", "mtp", "--draft-tokens", "3", "--lookup-ngram", "1"},
 +                 {"--kv-dtype", "fp8"}, {"--kv-dtype", "nvpf4"}}) {
 +            auto args = memory_args;
@@ -7116,7 +7320,7 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..ce1a0c99cca7b3fce9a0b3ef0a5bae81
      failures += check(memory_defaults.cuda_memory_policy == ninfer::CudaMemoryPolicy::DriverDefault &&
                            memory_defaults.cuda_vram_reserve_bytes == 0 &&
                            memory_defaults.cuda_memory_probe_step_bytes == 0 &&
-@@ -1526,3 +1670,11 @@ int main() {
+@@ -1526,3 +1704,11 @@ int main() {
  
      return failures == 0 ? 0 : 1;
  }

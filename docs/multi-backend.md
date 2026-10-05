@@ -4,6 +4,14 @@ Windows 入口 `scripts/windows/start-backend.ps1` 在启动时选择 `llamacpp`
 
 ## 启动
 
+ninfer 预编译包可直接运行默认脚本。将包含文本、视觉和 MTP 组件的模型放到包根目录，命名为 `model.ninfer`；包和模型的完整路径不能含中文字符。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninfer.ps1
+```
+
+默认端口18200，context200k、budget36k、gen reserve及输出上限16k、双INT8、自适应MTP上限4、ngram31、CPU视觉（图片上限256 tokens），Host预算12GiB。脚本直接列出server参数，可编辑模型路径、设备与预算。这组功能已通过小预算组合测试，完整36k/16k/200k配置尚未验收；需要包含本次放行代码的服务端，旧ZIP尚未更新。
+
 解压包后，在 PowerShell 中运行：
 
 ```powershell
@@ -26,7 +34,7 @@ llama.cpp 示例：
 
 ## ninfer 功能与组合
 
-当前源码支持固定 MTP1–15、多个 Host 会话、最多四条文本请求，以及一条 resident/CPU 图像请求；BF16/INT8/NVFP4/K8V4/RK8V4 沿用相同的请求预算规则。冷快照仍限制单文本请求。自适应 MTP 仅允许单路文本且关闭 ngram/冷快照，快速 prefill 仅允许 INT8/RK8V4 文本且关闭冷快照。冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
+当前源码支持固定 MTP1–15、多个 Host 会话、最多四条文本请求，以及一条 resident/CPU 图像请求；BF16/INT8/NVFP4/K8V4/RK8V4 沿用相同的请求预算规则。冷快照仍限制单文本请求。自适应 MTP 允许文本 C1–4、resident/CPU 图片 C1，以及单请求文本/INT8或NVFP4图片的 ngram 和单文本请求的冷快照；快速 prefill 仅允许 INT8/RK8V4 文本且关闭冷快照。冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
 
 双 NVFP4 已接入源码，5050 上的聚焦数值／页搬运测试及 Bonsai B128/R128 ordinary、MTP1 eager、MTP4 Graph 功能检查已通过。
 两个 MTP 用例使用现有 D3D12/WDDM 选项、FP16 GDN 和关闭的 ngram；默认 CUDA 预算下 Q8 MTP 装载仍被容量检查拒绝。
@@ -63,7 +71,7 @@ Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinar
   -MtpDrafts 2 -NgramDrafts 0 -KvType nvfp4 -Budget 32768 -Reserve 16384
 ```
 
-`-MtpDrafts` 默认 0，可选固定 1–15；`-AdaptiveMtp` 要求 MTP、单路文本且关闭 ngram/冷快照；`-FastPrefill` 仅允许 INT8/RK8V4 文本且关闭冷快照；`-VisionResidency cpu` 要求 `-Vision` 和一条活动请求；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP 和单活动文本请求；`-NgramMinMatch` 默认 12，可选 4–64。例如 `-MtpDrafts 3 -NgramDrafts 31 -KvType rk8v4`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。MTP 独立 attention window、视频、overlay Vision、并发图像、自适应多路/图片和快速图片/冷快照仍被拒绝。`-DeviceProfile auto` 可选原生设备配置；磁盘快照首版要求 `off`，以固定跨进程执行配置。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
+`-MtpDrafts` 默认 0，可选固定 1–15；`-AdaptiveMtp` 要求 MTP，沿用文本 C1–4、图片 C1、ngram单请求文本/INT8或NVFP4图片、冷快照单文本请求的限制；`-FastPrefill` 仅允许 INT8/RK8V4 文本且关闭冷快照；`-VisionResidency cpu` 要求 `-Vision` 和一条活动请求；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP 和单活动文本请求，或 INT8/NVFP4 的 resident/CPU 图片请求；`-NgramMinMatch` 默认 12，可选 4–64。例如 `-MtpDrafts 3 -NgramDrafts 31 -KvType rk8v4`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。MTP 独立 attention window、视频、overlay Vision、并发图像和快速图片/冷快照仍被拒绝。`-DeviceProfile auto` 可选原生设备配置；磁盘快照首版要求 `off`，以固定跨进程执行配置。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
 
 本次 ninfer 实测制品是 Qwen3.8-27B-GSQ-RCO-IQ3_S，设备为 RTX 5060 Ti 16GB、CUDA 13.2、`sm_120a`。8K/64K/128K/256K 档的早期口令检索和后续追问通过；这组人工构造用例不代表通用长文问答质量，也不表示其他 GPU 架构已验收。示例的 B=2048、R=512、H=12 GiB 是实际通过的配置。
 
@@ -100,3 +108,7 @@ ninfer 保留四种用途独立的完整状态点：输入/查询前 Base、正�
 公共核心可用 `KVMEM_BUILD_LLAMA=OFF -DKVMEM_BUILD_SERVER_TESTS=OFF` 单独构建，llama 目标继续使用现有顶层 CMake。ninfer 在自己的构建目录中增加 `-DNINFER_KVMEM_SOURCE_DIR=<kvmem checkout>/kvmem`，构建 `ninfer-serve`；两边独立配置 CUDA 与编译器，公共核心维持 C++17，ninfer 使用 C++20。
 
 在 VS 2022 Developer PowerShell 中运行 `scripts/windows/package-backends.ps1`，传入 `-LlamaWorker`、`-NinferWorker`、`-NinferSource`、`-OutputDir` 和 `-CudaPath`，可加 `-VcpkgInstalled` 与 `-ValidationReport`。输出目录必须不存在。脚本为每个 worker 收集 DLL，检查干净 PATH 下的启动，并写入许可文件、二进制校验值和验证报告；模型不会复制。打包成功只证明依赖可加载，推理结果以配套验证报告为准。
+
+自适应组合另补 10 次 IQ3S／5060 Ti 实验，覆盖快速 prefill、2/4 路、ngram31/63、resident/CPU 图片 query 边界、冷快照跨进程恢复；复用既有数值检查，不进行全排列或性能比较。范围和证据见 [自适应组合补测](adaptive-combinations-validation-20261005.md)。
+
+图片＋MTP＋ngram 已放行 INT8/NVFP4；K8V4换行差异待定位，BF16/RK8V4组合未验收。范围与实际复制/replay证据见 [图片ngram补测](vision-ngram-validation-20261005.md)。
