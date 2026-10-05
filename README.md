@@ -23,7 +23,7 @@ Tested on RTX 5060 Ti 16GB; RTX 30/40 hardware validation is pending. 已在 RTX
 
 This development checkout adds a Windows single-GPU ninfer text backend with native KVMem history storage, retrieval and multi-turn checkpoints. See [multi-backend startup and build instructions](docs/multi-backend.md). Existing llama.cpp entry points remain available; the prebuilt releases below describe the earlier llama.cpp product.
 
-**Prebuilt downloads:** [Windows x64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Linux / WSL2 x86_64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Windows / Linux ROCm (beta 2)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2)
+**Prebuilt downloads (llama.cpp backend) / 预编译下载（llama.cpp 后端）：** [Windows x64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Linux / WSL2 x86_64 CUDA 13 / 12 (rc3)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) · [Windows / Linux ROCm (beta 2)](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2)
 
 **QQ community / QQ 交流群：1040777853**
 
