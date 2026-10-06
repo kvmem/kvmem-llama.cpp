@@ -17,22 +17,6 @@
 
 **Windows RTX 30/40/50 users are encouraged to try the NInfer prerelease. 推荐 Windows RTX 30／40／50 系用户尝试 NInfer 预发布版。** NInfer uses `.ninfer` models; llama.cpp uses GGUF. Models are downloaded separately. 两个后端的模型格式不同，模型需另行准备。
 
-### NInfer prerelease for NVIDIA RTX 30 40 50
-
-| GPU / 显卡 | Windows ZIP |
-|---|---|
-| RTX 30 series / 30 系 | [Download / 下载 · sm_86](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0-ninfer-rc1/ninfer-server-rtx30-sm86-ui.zip) |
-| RTX 40 series / 40 系 | [Download / 下载 · sm_89](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0-ninfer-rc1/ninfer-server-rtx40-sm89-ui.zip) |
-| RTX 50 series / 50 系 | [Download / 下载 · sm_120a](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0-ninfer-rc1/ninfer-server-rtx50-sm120a-ui.zip) |
-
-Includes the server, embedded Web UI, and default startup script. Tested on RTX 5060 Ti 16GB; RTX 30/40 hardware validation is pending. Choose a model and KV budget that fit your VRAM. 包含服务端、内嵌 UI 和默认启动脚本；已在 RTX 5060 Ti 16GB 实测，30/40 系尚待对应硬件验证，请按显存选择模型和 KV 预算。
-
-[English conversion and startup guide](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0-ninfer-rc1#english) · [中文转换与启动说明](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0-ninfer-rc1#简体中文) · [SHA256SUMS.txt](https://github.com/kvmem/kvmem-llama.cpp/releases/download/v0.18.0-ninfer-rc1/SHA256SUMS.txt)
-
-**The Latest release, v0.17.0, is source only; it has no prebuilt runtime. GitHub Latest 的 v0.17.0 仅提供源码，没有预编译运行包。**
-
-[Historical CUDA RC2 / 历史 CUDA RC2](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc2) · [Historical CUDA RC1 / 历史 CUDA RC1](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc1) · [Historical ROCm Beta1 / 历史 ROCm Beta1](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta)
-
 **QQ community / QQ 交流群：1040777853**
 
 ## Near-lossless Qwen3.8-27B at a full 256K workspace on 16 GiB VRAM
