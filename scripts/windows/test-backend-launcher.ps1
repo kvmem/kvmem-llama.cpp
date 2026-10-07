@@ -132,6 +132,20 @@ try {
     if ($copy.argv[[array]::IndexOf($copy.argv, '--ngram-draft-tokens') + 1] -ne '31') {
         throw 'ngram mapping failed'
     }
+    if ($copy.argv -contains '--default-thinking-budget') { throw 'thinking budget was enabled by default' }
+    $budget = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -ThinkingBudget 8192 | ConvertFrom-Json
+    if ($budget.argv[[array]::IndexOf($budget.argv, '--default-thinking-budget') + 1] -ne '8192') {
+        throw 'thinking budget mapping failed'
+    }
+    $budgetRejected = $false
+    try {
+        $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+            -WorkerArgs @('--default-thinking-budget', '8192')
+    } catch {
+        $budgetRejected = $_.Exception.Message -match 'Use -ThinkingBudget'
+    }
+    if (!$budgetRejected) { throw 'native thinking-budget argument was accepted' }
     $llama = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') `
         -WorkerArgs @('--spec-type', 'draft-mtp') | ConvertFrom-Json
     if ($llama.argv -notcontains 'draft-mtp' -or !$llama.capabilities.speculative_decoding -or

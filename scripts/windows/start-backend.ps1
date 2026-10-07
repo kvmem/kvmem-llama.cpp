@@ -26,6 +26,7 @@ param(
     [ValidateSet('resident', 'cpu')][string]$VisionResidency = 'resident',
     [ValidateRange(1, 16384)][int]$VisionTokens = 1024,
     [ValidateSet('off', 'auto')][string]$DeviceProfile = 'off',
+    [ValidateRange(0, 2147483647)][int]$ThinkingBudget = 0,
     [string]$DiskPath,
     [ValidateRange(1, 1048576)][int]$DiskMiB = 4096,
     [string[]]$WorkerArgs = @(),
@@ -95,6 +96,9 @@ if ($Backend -eq 'ninfer') {
     if (@($WorkerArgs | Where-Object { $_ -match '^--(device|devices|stage-layers)(=|$)' }).Count) {
         throw 'Use -Gpu and -StageLayers to configure ninfer devices'
     }
+    if (@($WorkerArgs | Where-Object { $_ -match '^--default-thinking-budget(=|$)' }).Count) {
+        throw 'Use -ThinkingBudget to configure the ninfer thinking budget'
+    }
 }
 if (!$KvType) { $KvType = if ($Backend -eq 'ninfer') { 'int8' } else { 'q8_0' } }
 if ($Backend -eq 'ninfer') {
@@ -130,8 +134,9 @@ if ($Backend -eq 'ninfer') {
     if ($AdaptiveMtp) { $nativeArgs += '--adaptive-mtp' }
     if ($FastPrefill) { $nativeArgs += '--fast-prefill-kernel' }
     if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', $VisionResidency, '--vision-max-merged', "$VisionTokens") }
+    if ($ThinkingBudget -gt 0) { $nativeArgs += @('--default-thinking-budget', "$ThinkingBudget") }
 } else {
-    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'DiskPath', 'DiskMiB')) {
+    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'DiskPath', 'DiskMiB', 'ThinkingBudget')) {
         if ($PSBoundParameters.ContainsKey($name)) { throw "-$name configures ninfer; use llama native options in -WorkerArgs" }
     }
     if ($PSBoundParameters.ContainsKey('HostMiB')) {

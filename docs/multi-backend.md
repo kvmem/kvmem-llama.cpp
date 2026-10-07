@@ -14,7 +14,7 @@ ninfer 预编译包可直接运行默认脚本。将包含文本、视觉和 MTP
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninfer.ps1
 ```
 
-默认端口18200，context200k、budget36k、gen reserve及输出上限16k、双INT8、自适应MTP上限4、ngram31、CPU视觉（图片上限1024 tokens），Host预算12GiB。脚本调用统一启动器，可编辑模型路径与预算，通过 `-Gpu` 选择设备。小预算CPU/resident视觉的实际1024-token图片及八路图文功能已通过，范围见 [视觉并发验收](vision-concurrency-validation-20261006.md)；完整36k/16k/200k配置尚未验收。需要包含本次放行代码的服务端，旧ZIP尚未更新。
+默认端口18200，context200k、budget36k、gen reserve及输出上限16k、思考预算8192、双INT8、自适应MTP上限4、ngram31、CPU视觉（图片上限1024 tokens），Host预算12GiB。脚本调用统一启动器，可编辑模型路径与预算，通过 `-Gpu` 选择设备。小预算CPU/resident视觉的实际1024-token图片及八路图文功能已通过，范围见 [视觉并发验收](vision-concurrency-validation-20261006.md)；完整36k/16k/200k配置尚未验收。需要包含本次放行代码的服务端，旧ZIP尚未更新。
 
 解压包后，在 PowerShell 中运行：
 

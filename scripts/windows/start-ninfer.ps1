@@ -12,4 +12,5 @@ param(
     -Model "$PSScriptRoot\..\..\model.ninfer" -Gpu $Gpu -StageLayers $StageLayers `
     -Port 18200 -Context 204800 -Concurrency 1 -Prefill 256 -MaxTokens 16384 `
     -Budget 36864 -Reserve 16384 -HostMiB 12288 -RetainedSessions 1 -KvType int8 `
-    -MtpDrafts 4 -AdaptiveMtp -NgramDrafts 31 -Vision -VisionResidency cpu -VisionTokens 1024
+    -MtpDrafts 4 -AdaptiveMtp -NgramDrafts 31 -Vision -VisionResidency cpu -VisionTokens 1024 `
+    -ThinkingBudget 8192

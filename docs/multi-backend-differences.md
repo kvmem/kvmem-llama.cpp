@@ -145,9 +145,9 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 |---|---|
 | 两边共用 | Backend、Model、Worker、Gpu、ListenHost、Port、Context、Budget、Reserve、Prefill、MaxTokens、KvType，以及 WorkerArgs。ninfer 的 `-Gpu` 接受 1–8 个不重复 UUID，顺序即 layer stage 顺序 |
 | 共用脚本默认值 | 端口 18200、Context=262144、B=4096、R=1024、Prefill=128、MaxTokens=1024、Concurrency=1；KV 默认 llama q8_0 / ninfer int8；ninfer 视觉 token 默认 1024。相同 MaxTokens 仍受各后端的输出限制 |
-| 只为 ninfer 映射 | HostMiB、StageLayers、MtpDrafts、AdaptiveMtp、FastPrefill、NgramDrafts/MinMatch、Concurrency、RetainedSessions、Vision/Residency/Tokens、DeviceProfile；显式传给 llama 会被脚本拒绝。DiskPath/MiB 当前暂时禁用。设备参数只能走 `-Gpu` 和 `-StageLayers`，不能再从 WorkerArgs 传 `--device`、`--devices` 或 `--stage-layers` |
+| 只为 ninfer 映射 | HostMiB、StageLayers、MtpDrafts、AdaptiveMtp、FastPrefill、NgramDrafts/MinMatch、Concurrency、RetainedSessions、Vision/Residency/Tokens、DeviceProfile、ThinkingBudget；显式传给 llama 会被脚本拒绝。省略 ThinkingBudget 不限制思考。DiskPath/MiB 当前暂时禁用。设备参数只能走 `-Gpu` 和 `-StageLayers`，思考预算只能走 `-ThinkingBudget`，不能再从 WorkerArgs 传 `--device`、`--devices`、`--stage-layers` 或 `--default-thinking-budget` |
 | llama 的对应能力 | MTP、lane、会话、视觉和冷磁盘等已有能力仍可用，当前需要通过 WorkerArgs 传原生参数；脚本拒绝对应入口选项不表示后端没有该能力 |
-| 默认 ninfer 快捷脚本 | `start-ninfer.ps1` 调用统一启动器。Context=204800、B=36864、R=16384、Host=12288MiB、Prefill=256、输出上限16384、单路、INT8、自适应MTP上限4、ngram31、CPU视觉、每图1024 tokens、保留1个非活动 Host 会话。可用 `-Gpu` 和 `-StageLayers`。这些值与共用脚本默认值不同 |
+| 默认 ninfer 快捷脚本 | `start-ninfer.ps1` 调用统一启动器。Context=204800、B=36864、R=16384、Host=12288MiB、Prefill=256、输出上限16384、思考预算8192、单路、INT8、自适应MTP上限4、ngram31、CPU视觉、每图1024 tokens、保留1个非活动 Host 会话。可用 `-Gpu` 和 `-StageLayers`。这些值与共用脚本默认值不同 |
 
 代码位置：[共用启动脚本](../scripts/windows/start-backend.ps1)、[ninfer 快捷脚本](../scripts/windows/start-ninfer.ps1)。
 
