@@ -15,7 +15,7 @@ channel histories; it can take tens of minutes because it builds three roughly
 ```powershell
 python scripts/test_server_three_session_5g.py `
   --server .\build-session\bin\llama-kvmem-server.exe `
-  --model C:\Users\leyew\AppData\Local\KVMem\models\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf `
+  --model models\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf `
   --gpu GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c `
   --output artifacts\three-session-5g-k8v4-5060ti
 ```

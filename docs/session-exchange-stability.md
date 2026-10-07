@@ -28,7 +28,7 @@ the service log plus machine-readable result under `artifacts/`.
 & .\build-session-host\bin\kvmem-session-transfer-test.exe --scale-1to10
 python scripts/test_server_session_exchange_1to10.py `
   --server .\build-session\bin\llama-kvmem-server.exe `
-  --model C:\Users\leyew\AppData\Local\KVMem\models\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf `
+  --model models\Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf `
   --gpu GPU-5847813c-9e6e-bb43-cc5e-621aac091b6c `
   --output artifacts\session-exchange-1to10-5060ti
 ```

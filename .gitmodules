@@ -4,5 +4,5 @@
 	shallow = true
 [submodule "ninfer"]
 	path = backends/ninfer
-	url = https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco.git
+	url = https://github.com/iamwavecut/ninfer-all.git
 	shallow = true

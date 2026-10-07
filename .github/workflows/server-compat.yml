@@ -141,10 +141,29 @@ jobs:
       - name: Compiler cache statistics
         if: ${{ always() }}
         run: ccache --show-stats
+  ninfer-pinned-sources:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare and verify the pinned ninfer-all integration
+        run: |
+          python scripts/prepare-backends.py --backend ninfer
+          python scripts/prepare-backends.py --backend ninfer --check
+      - name: Verify repeated preparation
+        run: |
+          python scripts/prepare-backends.py --backend ninfer
+          python scripts/prepare-backends.py --backend ninfer --check
   # Keep the existing required check name and fail if any backend check is skipped or fails.
   host-and-server-units-linux:
     if: ${{ always() }}
-    needs: [host-linux, host-windows, cuda-build-linux]
+    needs: [host-linux, host-windows, cuda-build-linux, ninfer-pinned-sources]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -153,10 +172,12 @@ jobs:
           LINUX_RESULT: ${{ needs.host-linux.result }}
           WINDOWS_RESULT: ${{ needs.host-windows.result }}
           CUDA_RESULT: ${{ needs.cuda-build-linux.result }}
+          NINFER_RESULT: ${{ needs.ninfer-pinned-sources.result }}
         run: |
           test "$LINUX_RESULT" = success
           test "$WINDOWS_RESULT" = success
           test "$CUDA_RESULT" = success
+          test "$NINFER_RESULT" = success
   ui-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 20

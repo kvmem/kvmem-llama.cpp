@@ -23,6 +23,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if (MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
+    # One source-root prefix covers this tree, including backends/llamacpp. The trailing
+    # separator is required. On CUDA 13.2, -Xcompiler also rewrites the device __FILE__ string.
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        add_compile_options(
+            $<$<COMPILE_LANGUAGE:C,CXX>:/d1trimfile:${CMAKE_SOURCE_DIR}/>
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/d1trimfile:${CMAKE_SOURCE_DIR}/>)
+    endif()
 endif()
 if (WIN32 AND NOT DEFINED BUILD_SHARED_LIBS)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries")

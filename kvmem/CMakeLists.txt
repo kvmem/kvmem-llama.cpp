@@ -22,6 +22,10 @@ add_library(kvmem
 set_target_properties(kvmem PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(kvmem PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(kvmem PUBLIC cxx_std_17)
+if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    # ninfer's /d1trimfile prefix is its own source root and does not match this directory.
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/d1trimfile:${CMAKE_CURRENT_SOURCE_DIR}/>)
+endif()
 target_compile_definitions(kvmem PUBLIC KVMEM_ENABLE_NVME=$<BOOL:${KVMEM_ENABLE_NVME}>)
 
 if (WIN32)

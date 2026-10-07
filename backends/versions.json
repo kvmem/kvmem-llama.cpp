@@ -12,12 +12,12 @@
   },
   "ninfer": {
     "path": "backends/ninfer",
-    "upstream": "https://github.com/Ryan-gsq/ninfer-16g-5070ti-5080-5090-qwen3.8-27b-gsq-rco.git",
-    "base_commit": "6e9189c1089f6968e29fe2e1c51b4596e2346eed",
+    "upstream": "https://github.com/iamwavecut/ninfer-all.git",
+    "base_commit": "8319e8f512477d0cfdef89e16c17c1ba9f9bc7b3",
     "license_file": "backends/ninfer/LICENSE",
     "local_changes": "KVMem integration is maintained in the versioned patch; the submodule remains pinned to base_commit",
     "patch": "backends/patches/ninfer-kvmem.patch",
-    "patch_sha256": "f152ff064d8a902ed8963b4a22d7c722c89b077d08da3e8eaddb7579963b4a49",
-    "patched_tree": "cea470798986793d6c09a8a7efbca6b562ce0fea"
+    "patch_sha256": "667b7ae9e7357dbb9cbb2d0c352cdc8fdd2a9bf6583248faf99ed0da0afc631f",
+    "patched_tree": "54485065cbdf4397227f6b524c08ea50c7b9ee02"
   }
 }

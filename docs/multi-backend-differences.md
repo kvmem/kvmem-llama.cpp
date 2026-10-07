@@ -2,6 +2,8 @@
 
 更新日期：2026 年 10 月 7 日。适用于 `feat/multi-backend-framework` 当前工作区的 KVMem 集成。主仓库提交 `98b5910` 之后的 ninfer 改动在 `backends/patches/ninfer-kvmem.patch`，准备后的树哈希在 `backends/versions.json`。
 
+迁移候选的 ninfer 上游为 `iamwavecut/ninfer-all`，固定在 `8319e8f51247`。KVMem 保留 Qwen3.5/3.8 Dense 的既有边界，新增的 `qwen4_exp`、suspend、graft 和 router 尚未适配，组合会被拒绝。Q2_0/Q4_0/Q5_0 是权重量化格式，不能据此推断新的模型架构已经支持 KVMem。新基线的实际验证范围见 [迁移记录](ninfer-all-migration-validation.md)。
+
 llama.cpp 与 ninfer 共用 KVMem 策略和内存契约，但保留各自的推理、页池、请求处理和参数解析。切换后端时，需要同时核对参数名称、默认值、计量范围和执行行为。下表比较的是本项目的 `llama-kvmem-server` 与 ninfer KVMem worker，不是上游两个引擎的全部能力。
 
 除“统一启动入口”一节外，默认值均指直接启动 worker 且未显式覆盖的配置。旧预编译包的功能以随包说明和验收报告为准；当前源码的参数不能自动用于旧包。运行方法见 [多后端运行](multi-backend.md)，源码准备方法见 [仓库工作流](multi-backend-repository.md)。

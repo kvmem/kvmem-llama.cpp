@@ -10,7 +10,7 @@ core, adapters, engine revisions and integration patches together.
 | `kvmem/` | Portable memory contracts, native KV payloads, retrieval and Host storage |
 | `src/adapter/`, `tools/` | llama.cpp product adapter and serving |
 | `backends/llamacpp/` | Official ggml-org/llama.cpp submodule at a fixed commit |
-| `backends/ninfer/` | Existing Ryan ninfer fork submodule at a fixed commit |
+| `backends/ninfer/` | iamwavecut/ninfer-all submodule at a fixed commit |
 | `backends/patches/` | KVMem changes relative to each fixed engine revision |
 | `scripts/windows/` | Build, launcher and packaging entry points |
 | `backends/versions.json` | Baseline revisions, licenses, patch hashes and prepared tree hashes |
@@ -18,6 +18,12 @@ core, adapters, engine revisions and integration patches together.
 Each backend keeps its existing license and third-party notices. Source-only
 upstream vocabulary and test fixtures are included; inference model weights,
 builds, logs, session snapshots and personal DSH configuration are not.
+
+The migration candidate pins ninfer-all to `8319e8f512477d0cfdef89e16c17c1ba9f9bc7b3`.
+llama.cpp keeps its existing revision. Qualification progress and limits are in
+[the migration record](ninfer-all-migration-validation.md); the earlier dated
+qualification reports describe the Ryan baseline. New upstream releases are adopted
+deliberately, with an updated integration patch and prepared-tree hash.
 
 ## Checkout and preparation
 
@@ -75,7 +81,8 @@ ctest --test-dir build-backends/core --output-on-failure
 ```
 
 The build wrapper prepares its selected backend automatically. `-Python` selects
-the Python executable. `-DryRun` prints the resolved argument arrays without fetching
+the Python executable. Compilation defaults to eight parallel jobs; `-Jobs` overrides it.
+`-DryRun` prints the resolved argument arrays without fetching
 or applying patches; `-ConfigureOnly` and `-BuildOnly`
 separate configure and compilation. Backend-specific CMake arguments should be
 passed with the matching `-Backend`, not indiscriminately to `all`.

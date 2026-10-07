@@ -6,7 +6,7 @@ param(
     [string]$Python = 'python',
     [string]$CudaPath = $env:CUDA_PATH,
     [string]$CudaArchitectures = '120a',
-    [ValidateRange(1, 64)][int]$Jobs = 2,
+    [ValidateRange(1, 64)][int]$Jobs = 8,
     [string[]]$CMakeArgs = @(),
     [switch]$ConfigureOnly,
     [switch]$BuildOnly,
