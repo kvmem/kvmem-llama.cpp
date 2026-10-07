@@ -122,8 +122,11 @@ rebase the integration patch onto that revision, update hashes and run affected
 checks. Do not follow an unpinned branch. Root `patches/` remains historical material;
 the active patches live under `backends/patches/`.
 
-The current branch is a development candidate. P6-P10 implementation and selected
-tests are complete, including the short-input history-reuse fix, but the complete
-release matrix is not finished. See [validation status](multi-backend-validation.md)
+The current branch is a development candidate. P6-P10 and the later source
+admissions are in this tree: nine KV types, text and resident/CPU vision at up
+to eight requests, ngram, fast prefill on the admitted formats, and the ninfer
+layer pipeline. Cold snapshots stay disabled at the entry points. The release
+matrix and a package that matches this source are not finished. Current patch
+hashes are in `backends/versions.json`. See [validation status](multi-backend-validation.md)
 and [supported backend combinations](multi-backend.md). Once accepted, merge into
 `master` through normal Git history; do not force-replace the main branch.

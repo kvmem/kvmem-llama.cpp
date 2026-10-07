@@ -1,6 +1,10 @@
 # KVMem 多后端运行
 
+本文对应 `feat/multi-backend-framework` 工作区 2026-10-07 的源码。已发布 ZIP 早于这些能力。两后端参数差异见 [实现差异](multi-backend-differences.md)。
+
 Windows 入口 `scripts/windows/start-backend.ps1` 在启动时选择 `llamacpp` 或 `ninfer`。两个 worker 分进程运行，各自拥有推理引擎和 GPU 内存；公共 KVMem 策略库直接链接在 worker 内。
+
+切换后端时的参数、默认值和执行行为区别见 [两后端实现差异](multi-backend-differences.md)，包括 ninfer 固定 64-token block、recent 保留量、R 与输出上限，以及 Host 和磁盘预算的不同含义。
 
 ## 启动
 
@@ -10,7 +14,7 @@ ninfer 预编译包可直接运行默认脚本。将包含文本、视觉和 MTP
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninfer.ps1
 ```
 
-默认端口18200，context200k、budget36k、gen reserve及输出上限16k、双INT8、自适应MTP上限4、ngram31、CPU视觉（图片上限256 tokens），Host预算12GiB。脚本直接列出server参数，可编辑模型路径、设备与预算。这组功能已通过小预算组合测试，完整36k/16k/200k配置尚未验收；需要包含本次放行代码的服务端，旧ZIP尚未更新。
+默认端口18200，context200k、budget36k、gen reserve及输出上限16k、双INT8、自适应MTP上限4、ngram31、CPU视觉（图片上限1024 tokens），Host预算12GiB。脚本调用统一启动器，可编辑模型路径与预算，通过 `-Gpu` 选择设备。小预算CPU/resident视觉的实际1024-token图片及八路图文功能已通过，范围见 [视觉并发验收](vision-concurrency-validation-20261006.md)；完整36k/16k/200k配置尚未验收。需要包含本次放行代码的服务端，旧ZIP尚未更新。
 
 解压包后，在 PowerShell 中运行：
 
@@ -21,6 +25,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\start-ninf
 ```
 
 `-Worker` 可指定本地构建的 `ninfer-serve.exe` 或 `llama-kvmem-server.exe`；省略时使用包内 `workers/<backend>/` 的程序。`-DryRun` 输出启动参数，`-Describe` 查询静态能力。默认监听 `127.0.0.1:18200`，前台运行，Ctrl+C 结束本次启动的 worker。安装 NVIDIA 驱动及 Microsoft Visual C++ 2015–2022 x64 Runtime；包内保留各引擎的 DLL，模型另行提供。
+
+ninfer 源码的多卡采用上游 layer pipeline。`-Gpu 'GPU-a,GPU-b'` 保留 UUID 顺序，第一张卡承担 embedding、head、MTP 和 resident Vision；CPU Vision 保留原生 Host 编码路径。可加 `-StageLayers 40,24` 指定连续层数，省略时按各卡空闲内存规划；层数总和由模型装载器验证。统一启动器禁止重复或空设备、超过八卡，以及经 `WorkerArgs` 重复传入设备参数。物理卡必须具有相同 compute capability，显存容量可不同。B/R 仍是每请求的完整逻辑窗口，H 是共享预算；各卡只持有自己的层，不按卡数拆分 B/R 或重复建立 Host 历史。
+
+```powershell
+./scripts/windows/start-backend.ps1 -Backend ninfer `
+  -Worker 'D:/build/apps/ninfer-serve.exe' -Model 'D:/models/model-vision-mtp.ninfer' `
+  -Gpu 'GPU-first-uuid,GPU-second-uuid' -Vision -VisionResidency cpu `
+  -MtpDrafts 3 -Budget 2048 -Reserve 512 -Prefill 512
+```
+
+多卡范围与证据见 [多卡验收](ninfer-multigpu-validation-20261006.md)。这是源码能力，RC1 ZIP 不因此更新。多卡用于扩展容量，尚无本轮吞吐提升结论；`--cuda-memory-policy mixed/strict` 继续要求单卡，KVMem overlay Vision、DFlash、并行 prefill 和磁盘冷快照继续沿用当前限制。
 
 llama.cpp 示例：
 
@@ -34,17 +49,17 @@ llama.cpp 示例：
 
 ## ninfer 功能与组合
 
-当前源码支持固定 MTP1–15、多个 Host 会话、最多四条文本请求，以及一条 resident/CPU 图像请求；BF16/INT8/NVFP4/K8V4/RK8V4 沿用相同的请求预算规则。冷快照仍限制单文本请求。自适应 MTP 允许文本 C1–4、resident/CPU 图片 C1，以及单请求文本/INT8或NVFP4图片的 ngram 和单文本请求的冷快照；快速 prefill 仅允许 INT8/RK8V4 文本且关闭冷快照。冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
+当前源码支持固定 MTP1–15、多个 Host 会话、最多八条文本或 resident/CPU 图像请求，可在同一服务中混合图文；BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 沿用相同的请求预算规则。2026-10-06 按用户要求暂时禁用 ninfer 的 KVMem 磁盘冷快照入口，内存中的 Host 历史复用继续可用。自适应 MTP 允许文本及 resident/CPU 图片 C1–8；ngram1–15 可用于九种 KV 的多路文本及 resident/CPU 图片，启动并发大于1时，配置的 ngram16–63 自动降至15并提示，单路保留原宽度。快速 prefill 允许 INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 的文本及 resident/CPU 图片。CPU 图片编码沿用原生串行编码器，八条活动请求不表示八张图片同时编码。冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
 
 双 NVFP4 已接入源码，5050 上的聚焦数值／页搬运测试及 Bonsai B128/R128 ordinary、MTP1 eager、MTP4 Graph 功能检查已通过。
 两个 MTP 用例使用现有 D3D12/WDDM 选项、FP16 GDN 和关闭的 ngram；默认 CUDA 预算下 Q8 MTP 装载仍被容量检查拒绝。
 5060 Ti＋IQ3S 已通过双 NVFP4 的 229 组数值／功能／质量／故障注入检查：ordinary/MTP1–4 × eager/Graph、Host 会话、2/4 路文本、resident 图像、冷快照和最高 128K 档检索。三次独立 B32768/R16384、MTP4 Graph 服务启动及越窗 HTTP 请求也通过，ngram/lookup 均关闭。[完整记录](nvfp4-kvmem-validation-20261004.md)保留失败尝试与测试修正；这是本地源码验收，现有运行包不因此获得该能力。
 `-KvType nvfp4` 对 K/V 都使用 group-16 e2m1 packed codes 与 E4M3 scale 字节，
 Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinary 或固定 MTP1–15、
-1–4 条文本请求或一条 resident/CPU 图像请求、Host 会话复用；冷快照仍要求单文本请求和
-`DeviceProfile off`。ngram 默认关闭。
+1–4 条文本请求或一条 resident/CPU 图像请求、Host 会话复用；该历史验收中的冷快照目前已暂时禁用。
+ngram 默认关闭。
 
-`-KvType k8v4` 已接入 Main/MTP、Host 会话、文本并发、resident 图像和冷快照。K 使用 FP8_E4M3FN codes 与一份 FP16 row scale，V 使用 NVFP4 codes 与 raw E4M3 group-16 scales；两者均沿用原生 D256 归一化 Hadamard。5060 Ti＋IQ3S 通过了精简的 26 次真实模型实验和 8 项基础检查，包括 MTP0 eager/Graph、MTP1–3 Graph、MTP4 eager/Graph、C4、图像、磁盘格式隔离、8K/32K 检索，以及 B32768/R16384 MTP4 Graph 服务。ngram/lookup 均关闭；本轮没有性能对比和全排列验收。[清单、配置与结果](k8v4-kvmem-validation-20261004.md)。
+`-KvType k8v4` 已接入 Main/MTP、Host 会话、文本并发和 resident 图像；此前已验证的冷快照入口当前暂时禁用。K 使用 FP8_E4M3FN codes 与一份 FP16 row scale，V 使用 NVFP4 codes 与 raw E4M3 group-16 scales；两者均沿用原生 D256 归一化 Hadamard。5060 Ti＋IQ3S 通过了精简的 26 次真实模型实验和 8 项基础检查，包括 MTP0 eager/Graph、MTP1–3 Graph、MTP4 eager/Graph、C4、图像、磁盘格式隔离、8K/32K 检索，以及 B32768/R16384 MTP4 Graph 服务。ngram/lookup 均关闭；本轮没有性能对比和全排列验收。[清单、配置与结果](k8v4-kvmem-validation-20261004.md)。
 
 新增参数采用 12 个组合的定向补测，另加原生视觉边界诊断，累计 18 次模型启动，使用 5060 Ti＋IQ3S，ngram/lookup 关闭。启动器增加 `-AdaptiveMtp`、`-FastPrefill`、`-VisionResidency cpu`，并将 `-MtpDrafts` 扩至 0–15。数值检查、失败尝试与最小重跑证据见 [参数补测记录](parameter-admission-validation-20261004.md)。这次没有性能对比或全排列验收。
 
@@ -54,15 +69,16 @@ Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinar
   -Model 'D:/models/model-mtp.ninfer' -Gpu 'GPU-your-device-uuid' `
   -MtpDrafts 3 -Concurrency 2 -Budget 2048 -Reserve 512 -Prefill 512
 
-# 图像需要包含视觉权重与预处理资源的制品；默认最多 256 个视觉 tokens/图。
+# 图像需要包含视觉权重与预处理资源的制品；默认最多 1024 个视觉 tokens/图。
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
   -Model 'D:/models/model-vision-mtp.ninfer' -Gpu 'GPU-your-device-uuid' `
-  -Vision -VisionTokens 256 -MtpDrafts 3 -Budget 2048 -Reserve 512 -Prefill 512
+  -Vision -VisionTokens 1024 -MtpDrafts 3 -Budget 2048 -Reserve 512 -Prefill 512
 
-# 单活动文本请求：RK8V4 与跨进程冷会话恢复。
+# 八条活动图文请求；B/R 是每路预算，ngram 显式关闭。
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
-  -Model 'D:/models/model-mtp.ninfer' -Gpu 'GPU-your-device-uuid' `
-  -MtpDrafts 3 -KvType rk8v4 -DiskPath 'D:/cache/kvmem' -DiskMiB 4096
+  -Model 'D:/models/model-vision-mtp.ninfer' -Gpu 'GPU-your-device-uuid' `
+  -Vision -VisionResidency cpu -Concurrency 8 -VisionTokens 1024 `
+  -MtpDrafts 3 -NgramDrafts 0 -Budget 2048 -Reserve 512 -Prefill 512
 
 # NVFP4 本地源码验收配置示例，使用新编译的 worker；ngram 关闭。
 ./scripts/windows/start-backend.ps1 -Backend ninfer `
@@ -71,7 +87,7 @@ Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinar
   -MtpDrafts 2 -NgramDrafts 0 -KvType nvfp4 -Budget 32768 -Reserve 16384
 ```
 
-`-MtpDrafts` 默认 0，可选固定 1–15；`-AdaptiveMtp` 要求 MTP，沿用文本 C1–4、图片 C1、ngram单请求文本/INT8或NVFP4图片、冷快照单文本请求的限制；`-FastPrefill` 仅允许 INT8/RK8V4 文本且关闭冷快照；`-VisionResidency cpu` 要求 `-Vision` 和一条活动请求；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP 和单活动文本请求，或 INT8/NVFP4 的 resident/CPU 图片请求；`-NgramMinMatch` 默认 12，可选 4–64。例如 `-MtpDrafts 3 -NgramDrafts 31 -KvType rk8v4`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。MTP 独立 attention window、视频、overlay Vision、并发图像和快速图片/冷快照仍被拒绝。`-DeviceProfile auto` 可选原生设备配置；磁盘快照首版要求 `off`，以固定跨进程执行配置。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
+`-MtpDrafts` 默认 0，可选固定 1–15；`-AdaptiveMtp` 要求 MTP，允许文本/图片 C1–8；`-FastPrefill` 允许 INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 的文本及 resident/CPU 图片 C1–8，冷快照保持禁用；`-VisionResidency cpu` 要求 `-Vision`；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP：宽度 1–15 允许 C1–8；启动并发 C2–8 时，配置的 16–63 自动降至15并提示，C1 保留原宽度。文本及 resident/CPU 图片均允许 BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 九种 KV。多路上限 15 来自原生 GDN 验证工作区的 16 列容量；本次移除了 KVMem 额外的单路门禁。`-NgramMinMatch` 默认 12，可选 4–64。例如八路文本用 `-Concurrency 8 -MtpDrafts 3 -NgramDrafts 15 -KvType int8`，图片再加 `-Vision`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。直接运行 server 开启 MTP 时，默认 ngram15 可用于多路；统一脚本默认仍显式传入 ngram0。快捷脚本默认单路/ngram31，改成多路时会自动使用 ngram15；以启动并发上限为准，当时只有一条活动请求也不改变宽度。MTP 独立 attention window、视频、overlay Vision、并行 prefill 和冷快照仍被拒绝。`-DeviceProfile auto` 可选原生设备配置；磁盘冷快照当前暂时禁用。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
 
 本次 ninfer 实测制品是 Qwen3.8-27B-GSQ-RCO-IQ3_S，设备为 RTX 5060 Ti 16GB、CUDA 13.2、`sm_120a`。8K/64K/128K/256K 档的早期口令检索和后续追问通过；这组人工构造用例不代表通用长文问答质量，也不表示其他 GPU 架构已验收。示例的 B=2048、R=512、H=12 GiB 是实际通过的配置。
 
@@ -87,17 +103,23 @@ Main 与 MTP 页池使用相同格式。参数组合与双 INT8 相同：ordinar
 - 未超过 B+R 的短输入保存输入末尾前一 token 的 Base 和正常生成结束时的执行端点。短转长时，越过新 query 探测起点且不具有同查询附件的旧检查点不被复用。
 - 复用与全量计算可能经过不同的原生分块边界，不能承诺两者浮点状态或所有 greedy tokens 完全相同。相同 checkpoint 的重复请求、取消恢复，以及明确答案的检索测试分别验收。
 
+本次同时修复了 IQ3_S 模型八路/ngram15/Graph 的原生预热启动缺陷；实际验证范围见 [ngram并发补测](ngram-concurrency-validation-20261006.md)。
+
+旧 `--lookup-ngram` 在 KVMem ninfer 中明确禁用，统一使用 `--ngram-draft-tokens` 与 `--ngram-min-match`；启动脚本对应 `-NgramDrafts` 和 `-NgramMinMatch`。经 `WorkerArgs` 传入旧参数也会被拦截。直接运行服务或调用 Engine 时，非零 lookup 配置会明确报错并指向新参数；未启用 MTP 或同时启用新 ngram 也不能放行旧路径。
+
 ## API 与状态
 
 `POST /v1/chat/completions` 使用原生 ninfer 的 tokenizer、chat template、采样器和协议实现。`stream: true` 返回 SSE，断开请求会触发取消；下次提交完整 messages 可恢复可信历史。`GET /health` 查询就绪状态，`GET /v1/models` 查询模型，`GET /props` 提供 `backend`、`kvmem` 预算和能力；`/stats`、`/v1/load` 提供原生运行统计及 KVMem 当前历史的 payload、mean 统计、checkpoint 图像用量。历史换入/换出计数随历史替换重置。
 
 ninfer 直接启动参数为 `--kvmem-budget B --kvmem-gen-reserve R --kvmem-host-mib H`，其中 H 的单位为 MiB。这会关闭原生前缀缓存目录，由 KVMem 管理当前会话历史；`--no-prefix-reuse` 同时关闭 KVMem 的跨请求复用。`--kvmem-verify-transfers` 逐字节检查恢复内容，用于功能诊断，会增加传输开销。
 
+直接指定多卡用 `--devices 0,1`，可附加 `--stage-layers 40,24`；序号对应 `CUDA_VISIBLE_DEVICES` 的 UUID 顺序。`/props` 的 `execution` 返回实际设备顺序和最终层数切分，KVMem usage 继续统计共享历史与逻辑页数量。
+
 ninfer 保留四种用途独立的完整状态点：输入/查询前 Base、正常生成结束的已执行端点、Frontend 确认的输入回退边界、生成内容的模板重建边界。输入回退点不会被生成阶段的思考结束状态覆盖，下一轮丢弃或替换生成答案、继续追加相同工具历史时，仍可复用此前输入。未改写的 assistant/工具回放可复用生成内容；最后一个尚未执行的输出 token 留给下一轮计算。每个会话共用一份 Host KV 历史，最多四个完整状态点。长历史工具续写在查询 span 和精确输入身份一致时保留原 Q/选页，只计算新增尾部；新用户查询重新执行检索，改写后的历史仅恢复仍精确匹配的完整状态点。恢复更早状态时放弃较晚状态点，防止共享历史被覆写后仍错误命中。此补全属于 ninfer 适配，llamacpp 路径保持原有行为。
 
-冷快照使用 `--kvmem-disk-path PATH --kvmem-disk-mib N`。启动器设置 `-DiskPath` 时会开启 `--derive-session-keys`，从 system 和首条 user 消息派生会话键；Responses API 也可显式传 `prompt_cache_key`。Chat Completions 当前接受该字段但不映射为原生会话键，应使用派生键。它只保存具有会话键的非活动文本历史，按模型制品身份、KV/状态布局、执行配置与精确输入前缀恢复。只在完整校验通过后分配新的设备页与版本；不会恢复旧指针或 GPU 句柄。进程重启、Host 淘汰后再次提交同会话的完整 messages 可触发读取。损坏、截断、版本不匹配或写入失败会计入 `disk_errors`，请求可重新计算。
+KVMem 磁盘冷快照已暂时禁用。启动器显式传入 `-DiskPath`、`-DiskMiB` 或经 `WorkerArgs` 传入对应原生参数都会被拒绝；服务端直接传入 `--kvmem-disk-path`、`--kvmem-disk-mib` 也明确报错；Engine 配置的非空 `disk_path` 或非零 `disk_bytes` 同样被拒绝。能力描述中的 `disk_restore` 为 false。内存会话复用和 `--derive-session-keys` 保持可用；llama.cpp 的 conversation SSD 缓存保持原有行为。
 
-磁盘目录是单 worker 所有的冷缓存；实际文件放在专用子目录 `ninfer-kvmem-v5`，保存共享原生 KV、四种完整状态点、mean 统计与冻结 Q/选页。旧 v3/v4 记录不作为 v5 来源，重新计算后可生成新记录，旧文件不被删除。磁盘配额包含 v5 记录和原子替换的临时文件，替换期间新旧记录都收费。配额不足时淘汰最旧非活动文件；仍无法容纳则跳过保存。它不是在线 NVMe 分层，也不使用 DirectStorage。状态提供 `disk_hits`、`disk_writes`、`disk_errors`；`history_hits`、`history_misses` 与 `history_evictions` 为进程累计计数。
+已有快照文件和底层实现保留，当前入口不会读写它们。此前的 `ninfer-kvmem-v5` 格式保存原生 KV、四种状态点、mean 统计与冻结 Q/选页，支持匹配配置的文本历史跨进程恢复；此前验收记录仅描述禁用前的行为。它不是在线 NVMe 分层，也不使用 DirectStorage。
 
 已知 H 或逻辑上下文不足会在请求执行前返回错误，服务可以继续使用。实际 CUDA 驱动/设备错误仍沿用原生 ninfer 的失败处理，可能需要重启 worker；没有承诺在设备故障后继续复用同一会话。
 
@@ -111,4 +133,6 @@ ninfer 保留四种用途独立的完整状态点：输入/查询前 Base、正�
 
 自适应组合另补 10 次 IQ3S／5060 Ti 实验，覆盖快速 prefill、2/4 路、ngram31/63、resident/CPU 图片 query 边界、冷快照跨进程恢复；复用既有数值检查，不进行全排列或性能比较。范围和证据见 [自适应组合补测](adaptive-combinations-validation-20261005.md)。
 
-图片＋MTP＋ngram 已放行 INT8/NVFP4；K8V4换行差异待定位，BF16/RK8V4组合未验收。范围与实际复制/replay证据见 [图片ngram补测](vision-ngram-validation-20261005.md)。
+图片＋MTP＋ngram 当前放行九种原生 KV，支持 resident/CPU 及1–8路；多路宽度16–63自动降至15。新增 `fp8`、`rk4v4`、`rk4v4-e8`、`rk2v4-e8` 只补格式身份和准入，复用原生量化与换页实现。范围与实测见 [新增KV准入补测](other-kv-admission-validation-20261006.md)；此前五种格式见 [图片ngram补测](vision-ngram-all-kv-validation-20261006.md)，首次K8V4换行差异及对照见 [初次图片ngram补测](vision-ngram-validation-20261005.md)。
+
+快速 prefill 的新增 RK 格式与图片准入仅移除额外门禁，复用原生内核，验收范围见 [快速prefill准入补测](fast-prefill-admission-validation-20261006.md)。该开关影响符合原生路由条件的 prompt Attention，不负责并行 prefill，其他 KV 仍用各自原有路径。

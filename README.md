@@ -17,10 +17,10 @@
 
 **Windows RTX 30/40/50 users are encouraged to try the NInfer prerelease. 推荐 Windows RTX 30／40／50 系用户尝试 NInfer 预发布版。** NInfer uses `.ninfer` models; llama.cpp uses GGUF. Models are downloaded separately. 两个后端的模型格式不同，模型需另行准备。
 
-> Development branch: the framework references pinned llama.cpp and ninfer submodules under `backends/`, with versioned KVMem integration patches. See [repository layout and builds](docs/multi-backend-repository.md) and [backend capabilities](docs/multi-backend.md). P6-P10 final qualification is still in progress.
+> Development branch: the framework references pinned llama.cpp and ninfer submodules under `backends/`, with versioned KVMem integration patches. See [repository layout and builds](docs/multi-backend-repository.md), [backend capabilities](docs/multi-backend.md), and [implementation differences](docs/multi-backend-differences.md). P6-P10 final qualification is still in progress.
 
 
-This development checkout adds a Windows single-GPU ninfer text backend with native KVMem history storage, retrieval and multi-turn checkpoints. See [multi-backend startup and build instructions](docs/multi-backend.md). Existing llama.cpp entry points remain available; the prebuilt releases below describe the earlier llama.cpp product.
+This development checkout adds a Windows ninfer backend with native KVMem history storage, retrieval, multi-turn checkpoints and layer splitting across GPUs for text and resident/CPU Vision. See [multi-backend startup and build instructions](docs/multi-backend.md) for the 2026-10-07 source capabilities and their qualification scope. Existing llama.cpp entry points remain available. The prebuilt downloads below, including ninfer v0.18.0 RC1, predate that source.
 
 **QQ community / QQ 交流群：1040777853**
 

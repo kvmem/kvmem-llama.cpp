@@ -1,6 +1,6 @@
 # 公共内存契约
 
-本契约在独立 C++17 核心中实现。llama 的单 GPU、Flash Attention、RAM packed 路径和 ninfer 的单 GPU 文本 KVMem 路径已经接入；llama 的其他物理配置保留原生兼容桥。实际支持组合见 [多后端运行](multi-backend.md)，公共类型的存在不表示所有后端都支持对应功能。
+本契约在独立 C++17 核心中实现。最先接入的是 llama 的单 GPU、Flash Attention、RAM packed 路径，以及 ninfer 的 KVMem 工作集切换。当前产品组合以 [多后端运行](multi-backend.md) 为准，包括 ninfer 的九种 KV、文本和 resident/CPU 视觉，以及多卡 layer pipeline。公共类型的存在不表示所有后端都支持对应功能。llama 的其他物理配置保留原生兼容桥。
 
 入口是 `kvmem/include/kvmem/memory_contract.hpp` 与 `native_kv_payload.hpp`，实现分别位于 `kvmem/src/host/`。新接口没有引擎、GPU runtime 或 Tensor 类型。
 
@@ -109,6 +109,8 @@ llama 的预填充计划可包含已登记、尚未计算 KV 的行，而 `Memor
 | 连续多轮、编辑、取消 | 保留已有能力 | 可信 checkpoint 复用；失配或无 checkpoint 时从头计算 |
 | MTP、并发、多模态、磁盘恢复 | 保留已有能力 | 首版不开放 |
 | 接入 `MemorySession` | 单 GPU FA + RAM packed；其他配置保留兼容桥 | 所有已支持的 KVMem 工作集切换 |
+
+上表的「ninfer KVMem 首版」只描述 P3 第一步。后来的 MTP、并发、视觉和多卡在 ninfer 适配器里实现，不以该行的「首版不开放」为当前产品边界。磁盘冷快照入口当前关闭。当前组合见 [多后端运行](multi-backend.md)。
 
 ## 验证与复现
 
