@@ -435,7 +435,7 @@ index 0000000000000000000000000000000000000000..9c7ede518ca14fd2f735f9cfe5336c5f
 +                std::uint32_t block_tokens, Tensor& output, cudaStream_t stream);
 +} // namespace ninfer::ops
 diff --git a/include/ninfer/types.h b/include/ninfer/types.h
-index cb2d08f5f7dfa28380a70c14320e18a6ab10f1ab..55e48c668b021b60b07813519c0e8e449030b1cb 100644
+index cb2d08f5f7dfa28380a70c14320e18a6ab10f1ab..676d5e23d7a2c9d55b4a739f876b89a42d7ce404 100644
 --- a/include/ninfer/types.h
 +++ b/include/ninfer/types.h
 @@ -133,8 +133,9 @@ struct SpeculativeOptions {
@@ -449,7 +449,7 @@ index cb2d08f5f7dfa28380a70c14320e18a6ab10f1ab..55e48c668b021b60b07813519c0e8e44
      std::uint32_t ngram_draft_tokens = 0;
      std::uint32_t ngram_min_match    = 12;
      // CPU-only retention, separate from KV. Zero keeps request-local drafting.
-@@ -350,6 +351,23 @@ enum class CudaMemoryPolicy : std::uint8_t {
+@@ -350,6 +351,33 @@ enum class CudaMemoryPolicy : std::uint8_t {
      Mixed,
  };
  
@@ -458,7 +458,17 @@ index cb2d08f5f7dfa28380a70c14320e18a6ab10f1ab..55e48c668b021b60b07813519c0e8e44
 +struct KvmemOptions {
 +    std::uint32_t selected_tokens = 0; // B; zero disables KVMem
 +    std::uint32_t reserve_tokens = 0;  // R; also covers each prefill chunk
++    // Whole-page rounding uses this backend's fixed 64-token page.
++    // Sink 0 keeps one page; a positive value rounds down and stays at least one page.
++    // Recent rounds down and must retain at least one page for the partial append tail.
++    // Values below 64 are rejected when KVMem is enabled; the default keeps one page.
++    std::uint32_t sink_tokens = 0;
++    std::uint32_t recent_tokens = 64;
 +    std::uint64_t host_bytes = 0;      // H; hard bound on archived native payload
++    [[nodiscard]] std::uint32_t sink_blocks() const noexcept {
++        return sink_tokens < 64 ? 1U : sink_tokens / 64U;
++    }
++    [[nodiscard]] std::uint32_t recent_blocks() const noexcept { return recent_tokens / 64U; }
 +    std::uint32_t retained_sessions = 4; // bounded inactive Host histories, 1..16
 +    bool verify_transfers = false;    // correctness diagnostics, off in product runs
 +    // Optional cold snapshots of named inactive text sessions. Temporary writes
@@ -473,7 +483,7 @@ index cb2d08f5f7dfa28380a70c14320e18a6ab10f1ab..55e48c668b021b60b07813519c0e8e44
  struct EngineOptions {
      std::filesystem::path artifact_path;
      std::filesystem::path chat_template_path;
-@@ -372,6 +390,8 @@ struct EngineOptions {
+@@ -372,6 +400,8 @@ struct EngineOptions {
      // Past the model's native window (max_position_embeddings), up to four times it: positions run
      // unscaled RoPE, or with rope_yarn the whole window takes Qwen's YaRN at factor
      // max_context / native (ops::RopeYarn).
@@ -482,7 +492,7 @@ index cb2d08f5f7dfa28380a70c14320e18a6ab10f1ab..55e48c668b021b60b07813519c0e8e44
      bool rope_yarn = false;
      // A fixed YaRN factor in (1,4] for every position of the text and MTP layers, whatever
      // max_context is: Qwen documents one factor per deployment rather than one per window. 1 leaves
-@@ -1291,7 +1311,27 @@ struct CudaResidencySummary {
+@@ -1291,7 +1321,27 @@ struct CudaResidencySummary {
      std::size_t verified_reserve_bytes = 0;
  };
  
@@ -510,7 +520,7 @@ index cb2d08f5f7dfa28380a70c14320e18a6ab10f1ab..55e48c668b021b60b07813519c0e8e44
      int device                                = 0;
      std::uint32_t max_context                 = 0;
      KvCapacityMode kv_capacity_mode           = KvCapacityMode::Explicit;
-@@ -1361,6 +1401,7 @@ struct RuntimeHostWorkStats {
+@@ -1361,6 +1411,7 @@ struct RuntimeHostWorkStats {
  // Monotonic execution counters, boundary-consistent current gauges, and explicitly named last
  // decision observations. Consumers derive interval counters by subtracting two snapshots.
  struct RuntimeStats {
@@ -3412,10 +3422,10 @@ index e57cc085b0f2a3b8904a995ed94208b3fbe44f2c..7311f0cd50db1f123edc7cf8f485e671
      sequence.dflash_context_frontier = 0;
 diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..a02fc39e87327fbc3069adc1f98b91331cfa94bd
+index 0000000000000000000000000000000000000000..8e2e7b5c6a009dee470604bd40e1663276aae1b3
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
-@@ -0,0 +1,965 @@
+@@ -0,0 +1,975 @@
 +#include "models/qwen3_5/program/program_impl.h"
 +#include "models/qwen3_5/program/context.h"
 +#include "models/qwen3_5/program/context_work.h"
@@ -3795,10 +3805,13 @@ index 0000000000000000000000000000000000000000..a02fc39e87327fbc3069adc1f98b9133
 +    std::sort(pages.begin(), pages.end());
 +    pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
 +    if (!pages.empty()) {
-+        const auto sink = std::binary_search(pages.begin(), pages.end(), 0U) ? 0U : 1U;
-+        // Reserve every image region, the sink and one append page. Images in
-+        // the future suffix are priced before admission, before their evaluation.
-+        if (pages.size() + sink + 1 > kvmem_options.selected_tokens / page_tokens) {
++        std::uint32_t extra_sink = 0;
++        for (std::uint32_t id = 0; id < kvmem_options.sink_blocks(); ++id) {
++            if (!std::binary_search(pages.begin(), pages.end(), id)) ++extra_sink;
++        }
++        // Recent pages include the mandatory partial append tail; startup requires at least one.
++        const auto tail_pages = kvmem_options.recent_blocks();
++        if (pages.size() + extra_sink + tail_pages > kvmem_options.selected_tokens / page_tokens) {
 +            throw RequestError(RequestErrorKind::ContextLengthExceeded,
 +                "KVMem selection budget cannot retain complete image regions; increase the budget or reduce image resolution");
 +        }
@@ -3820,9 +3833,16 @@ index 0000000000000000000000000000000000000000..a02fc39e87327fbc3069adc1f98b9133
 +        const auto count = kv_pages_for_tokens(begin);
 +        const auto keep = std::min(count, kvmem_options.selected_tokens / page_tokens);
 +        auto& state = sequence.window;
-+        std::vector<std::uint64_t> mandatory{0};
-+        for (const auto id : state.media_pages) if (id < count) mandatory.push_back(id);
-+        if (count > 1) mandatory.push_back(count - 1);
++        std::vector<std::uint64_t> mandatory;
++        if (count == 0) {
++            mandatory.push_back(0);
++        } else {
++            const auto sink_keep = std::min(kvmem_options.sink_blocks(), count);
++            for (std::uint32_t id = 0; id < sink_keep; ++id) mandatory.push_back(id);
++            for (const auto id : state.media_pages) if (id < count) mandatory.push_back(id);
++            const auto recent_keep = std::min(kvmem_options.recent_blocks(), count);
++            for (std::uint32_t i = 0; i < recent_keep; ++i) mandatory.push_back(count - 1 - i);
++        }
 +        std::sort(mandatory.begin(), mandatory.end());
 +        mandatory.erase(std::unique(mandatory.begin(), mandatory.end()), mandatory.end());
 +        std::vector<std::uint64_t> selected;
@@ -4383,10 +4403,10 @@ index 0000000000000000000000000000000000000000..a02fc39e87327fbc3069adc1f98b9133
 +} // namespace ninfer::models::qwen3_5::detail
 diff --git a/src/models/qwen3_5/program/storage/memory_snapshot.cpp b/src/models/qwen3_5/program/storage/memory_snapshot.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..4d2149afe7590e8417a9f8e19485b957ea5dbb32
+index 0000000000000000000000000000000000000000..00e839c1c0ef3515974a643c333df2f1bff3e736
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/memory_snapshot.cpp
-@@ -0,0 +1,349 @@
+@@ -0,0 +1,350 @@
 +#include "models/qwen3_5/program/program_impl.h"
 +#include "kvmem/snapshot.hpp"
 +#include <bit>
@@ -4701,7 +4721,8 @@ index 0000000000000000000000000000000000000000..4d2149afe7590e8417a9f8e19485b957
 +        if (!matching) return;
 +        kvmem::KvMemStoreConfig selection;
 +        selection.block_tokens = 64; selection.select_budget = kvmem_options.selected_tokens;
-+        selection.sink_blocks = 1; selection.recent_blocks = 1;
++        selection.sink_blocks = kvmem_options.sink_blocks();
++        selection.recent_blocks = kvmem_options.recent_blocks();
 +        window.selector = std::make_unique<kvmem::KvMemStore>(selection);
 +        window.selector->register_append(frontier);
 +        window.statistics_frontier = frontier; window.host_bytes = required;
@@ -4738,7 +4759,7 @@ index 0000000000000000000000000000000000000000..4d2149afe7590e8417a9f8e19485b957
 +} // namespace ninfer::models::qwen3_5::detail
 diff --git a/src/models/qwen3_5/program/storage/memory_statistics.cpp b/src/models/qwen3_5/program/storage/memory_statistics.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..d962b7aa844af601929f5a687394bc11a70c7822
+index 0000000000000000000000000000000000000000..43e655ac3f8e9f572f5d0fd5283879a84fc2ada4
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/memory_statistics.cpp
 @@ -0,0 +1,145 @@
@@ -4782,8 +4803,8 @@ index 0000000000000000000000000000000000000000..d962b7aa844af601929f5a687394bc11
 +        kvmem::KvMemStoreConfig selection;
 +        selection.block_tokens = 64;
 +        selection.select_budget = kvmem_options.selected_tokens;
-+        selection.sink_blocks = 1;
-+        selection.recent_blocks = 1;
++        selection.sink_blocks = kvmem_options.sink_blocks();
++        selection.recent_blocks = kvmem_options.recent_blocks();
 +        state.selector = std::make_unique<kvmem::KvMemStore>(selection);
 +        state.query_sum.assign(memory_statistics->query_elements(), 0.0F);
 +        state.query_begin = query_begin;
@@ -5347,7 +5368,7 @@ index 3a0d9157ffdec290e1ea5f19fea7fd6405edc0d3..f60aa2e99bc0a6d96b0ebe733e3f0159
      const bool recover_invariant_failures_;
      const bool kv_lease_growth_;
 diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
-index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..24e50e0e8c51d774ba1828600d9d188987f7072a 100644
+index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..fb8f271b2d8fe1a429a113f0d1b5f148793a537f 100644
 --- a/src/runtime/engine/model_instance.cpp
 +++ b/src/runtime/engine/model_instance.cpp
 @@ -5,6 +5,7 @@
@@ -5358,7 +5379,7 @@ index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..24e50e0e8c51d774ba1828600d9d1889
  #include "artifact/reader.h"
  #include "artifact/formats.h"
  #include "core/startup.h"
-@@ -239,6 +240,80 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
+@@ -239,6 +240,88 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
  } // namespace
  
  EngineOptions normalize_engine_options(EngineOptions options) {
@@ -5385,6 +5406,14 @@ index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..24e50e0e8c51d774ba1828600d9d1889
 +        if (options.speculative.lookup_ngram != 0) {
 +            throw std::invalid_argument(
 +                "KVMem disables legacy --lookup-ngram; use --ngram-draft-tokens and --ngram-min-match");
++        }
++        if (options.kvmem.recent_blocks() == 0) {
++            throw std::invalid_argument(
++                "KVMem recent_tokens must be at least 64 to retain the partial append page");
++        }
++        if (static_cast<std::uint64_t>(options.kvmem.sink_blocks()) + options.kvmem.recent_blocks() >
++            options.kvmem.selected_tokens / 64) {
++            throw std::invalid_argument("KVMem sink and recent tokens exceed selected_tokens after rounding to 64-token pages");
 +        }
 +        const auto window = options.kvmem.device_tokens();
 +        const bool ordinary = options.speculative.backend == SpeculativeBackend::None &&
@@ -5439,7 +5468,7 @@ index 37dda2a51593040165731b2d68d1e9f2b8ebb18c..24e50e0e8c51d774ba1828600d9d1889
      switch (options.purpose) {
      case EnginePurpose::Generation:
          break;
-@@ -287,10 +362,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
+@@ -287,10 +370,9 @@ EngineOptions normalize_engine_options(EngineOptions options) {
          throw std::invalid_argument("ngram session capacity must be between 1 MiB and the total "
                                      "archive capacity");
      }
@@ -5490,7 +5519,7 @@ index b7c1512cbe28ae90276012fe0abfc64b59a1afd8..23a94f22bc4eaacbbacfc05bea939cf5
      engine_options.max_pending_requests     = options.max_pending_requests;
      engine_options.pending_timeout_ms       = options.pending_timeout_ms;
 diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
-index 44b20b3b35b41d31d1d6f0112032fad6f184f318..8b160f8c0f5a7bd703a3af128635771883d29634 100644
+index 44b20b3b35b41d31d1d6f0112032fad6f184f318..16ff37d781c2b293ac02898418374a7b2fc902c7 100644
 --- a/src/serve/http_server.cpp
 +++ b/src/serve/http_server.cpp
 @@ -3,6 +3,7 @@
@@ -5510,7 +5539,7 @@ index 44b20b3b35b41d31d1d6f0112032fad6f184f318..8b160f8c0f5a7bd703a3af1286357718
          {"default_generation_settings",
           {{"n_ctx", load_capacity_.max_context},
            {"speculative", options_.speculative.backend != ninfer::SpeculativeBackend::None},
-@@ -726,6 +727,31 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
+@@ -726,6 +727,33 @@ void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) c
          // The WebUI ungreys its "Use llama-server proxy" option from this flag alone.
          {"cors_proxy_enabled", options_.webui_mcp_proxy},
      };
@@ -5522,6 +5551,8 @@ index 44b20b3b35b41d31d1d6f0112032fad6f184f318..8b160f8c0f5a7bd703a3af1286357718
 +    props["kvmem"] = {{"enabled", options_.kvmem.selected_tokens != 0},
 +        {"selected_tokens", options_.kvmem.selected_tokens},
 +        {"reserve_tokens", options_.kvmem.reserve_tokens},
++        {"sink_tokens", options_.kvmem.sink_tokens},
++        {"recent_tokens", options_.kvmem.recent_tokens},
 +        {"host_payload_budget_bytes", options_.kvmem.host_bytes}};
 +    if (options_.kvmem.selected_tokens) {
 +        props["kvmem"]["usage"] = kvmem_status_json(service_->runtime_stats().kvmem);
@@ -5590,7 +5621,7 @@ index ff590ace14997c8506fc03497b15f31a181a03e2..cb71e1b64bc5265a6682281739c6d954
  }
  
 diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
-index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15475b9764 100644
+index 97d9974961de55594564cdd901affed648e20529..d7b8690ff9642fbbf3302c305ba6bcc44df18964 100644
 --- a/src/serve/serve_options.cpp
 +++ b/src/serve/serve_options.cpp
 @@ -1,4 +1,5 @@
@@ -5599,13 +5630,17 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
  #include "product/cuda_memory_options.h"
  #include "product/post_thinking_options.h"
  #include "product/rope_yarn_options.h"
-@@ -85,6 +86,22 @@ std::string serve_usage_text(const char* argv0) {
+@@ -85,6 +86,26 @@ std::string serve_usage_text(const char* argv0) {
             "  --help, -h                    show this help and exit\n"
             "\n"
             "MODEL & CONTEXT\n"
 +           "  --kvmem-budget N              selected history B, tokens aligned to 64\n"
 +           "  --kvmem-gen-reserve N         append workspace R, tokens aligned to 64\n"
 +           "  --kvmem-host-mib N            Host native KV payload budget H, MiB\n"
++           "  --kvmem-sink-tokens N         always-kept prefix; default 0 = one 64-token\n"
++           "                                page; positive values round down, minimum one page\n"
++           "  --kvmem-recent-tokens N       always-kept newest suffix; default 64 (one page);\n"
++           "                                minimum 64; values round down to whole pages\n"
 +           "  --kvmem-sessions N            retained Host histories, 1..16 (default 4)\n"
 +           "  --kvmem-disk-path PATH        temporarily disabled\n"
 +           "  --kvmem-disk-mib N            temporarily disabled\n"
@@ -5622,7 +5657,7 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
             "  --max-context N               logical context ceiling of each request (default\n"
             "                                8192)\n"
             "  --max-concurrency N           requests decoded together, 1..8 (default 1)\n"
-@@ -100,7 +117,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -100,7 +121,7 @@ std::string serve_usage_text(const char* argv0) {
             "  --chat-template FILE          replace the artifact's chat template at startup\n"
             "  --device N                    CUDA device index (default 0)\n"
             "  --devices A,B,...             one pipeline stage per listed device, 2..8\n"
@@ -5631,7 +5666,7 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
             "  --stage-layers A,B,...        layers per stage in --devices order (default:\n"
             "                                split by free memory)\n"
             "  --no-cuda-graph               decode without CUDA Graphs (on by default)\n"
-@@ -289,8 +306,8 @@ std::string serve_usage_text(const char* argv0) {
+@@ -289,8 +310,8 @@ std::string serve_usage_text(const char* argv0) {
             "  --ngram-draft-tokens N        copy up to N tokens (1..63) per round from\n"
             "                                earlier prompt, tool-result or output text,\n"
             "                                verified alongside --spec; on with 15 whenever\n"
@@ -5642,7 +5677,7 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
             "  --ngram-min-match N           shortest match a copy is drawn from, 4..64\n"
             "                                (default 12)\n"
             "  --ngram-archive-mib N         keep finished requests' copy sources in RAM for\n"
-@@ -302,7 +319,7 @@ std::string serve_usage_text(const char* argv0) {
+@@ -302,7 +323,7 @@ std::string serve_usage_text(const char* argv0) {
             "  --lookup-ngram N              context-lookup drafting alongside --spec: the\n"
             "                                last N tokens are matched against the sequence\n"
             "                                so far and what followed is proposed (default 0:\n"
@@ -5651,7 +5686,16 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
             "\n"
             "VISION (off by default)\n"
             "  --vision                      accept images and video and load the Vision GPU\n"
-@@ -529,6 +546,25 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -491,6 +512,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+     bool long_anchor_spacing_explicit = false;
+     bool ngram_width_explicit         = false;
+     bool vision_max_merged_explicit   = false;
++    bool sink_tokens_explicit         = false;
++    bool recent_tokens_explicit       = false;
+     std::optional<std::size_t> kv_headroom_mib;
+     // Last flag seen that belongs to only one prefix-cache mode, for the cross-mode error.
+     const char* legacy_cache_flag  = nullptr;
+@@ -529,6 +552,33 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          } else if (arg == "--kv-capacity") {
              options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
              kv_capacity_explicit = true;
@@ -5661,6 +5705,14 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
 +        } else if (arg == "--kvmem-gen-reserve") {
 +            options.kvmem.reserve_tokens = static_cast<std::uint32_t>(
 +                parse_nonnegative_int(require_value("--kvmem-gen-reserve"), "kvmem-gen-reserve"));
++        } else if (arg == "--kvmem-sink-tokens") {
++            options.kvmem.sink_tokens = static_cast<std::uint32_t>(
++                parse_nonnegative_int(require_value("--kvmem-sink-tokens"), "kvmem-sink-tokens"));
++            sink_tokens_explicit = true;
++        } else if (arg == "--kvmem-recent-tokens") {
++            options.kvmem.recent_tokens = static_cast<std::uint32_t>(
++                parse_nonnegative_int(require_value("--kvmem-recent-tokens"), "kvmem-recent-tokens"));
++            recent_tokens_explicit = true;
 +        } else if (arg == "--kvmem-sessions") {
 +            options.kvmem.retained_sessions = static_cast<std::uint32_t>(
 +                parse_nonnegative_int(require_value("--kvmem-sessions"), "kvmem-sessions"));
@@ -5677,7 +5729,7 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
          } else if (arg == "--kv-headroom-mib" || arg == "--vram-headroom-mib") {
              // --vram-headroom-mib is the Wallawalla47 fork's name for the same headroom.
              const std::uint64_t mib = parse_u64(require_value(arg.c_str()), arg.c_str() + 2);
-@@ -891,7 +927,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -891,7 +941,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          } else if (arg == "--lenient-assistant-history") {
              options.lenient_assistant_history = true;
          } else if (arg == "--derive-session-keys") {
@@ -5687,7 +5739,7 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
              options.derive_session_keys = true;
          } else if (arg == "--auto-prefix-grid") {
              legacy_cache_flag        = "--auto-prefix-grid";
-@@ -1042,8 +1079,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1042,8 +1093,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              "caching systems");
      }
      if (options.context_cache.mode == ContextCacheMode::Hybrid) {
@@ -5698,7 +5750,7 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
                                          " configures the default prefix cache and cannot be "
                                          "combined with --use-alt-prefix-caching");
          }
-@@ -1189,10 +1226,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1189,10 +1240,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
          throw std::invalid_argument(
              "--cuda-graph-allowance-mib requires CUDA graphs (omit --no-cuda-graph)");
      }
@@ -5714,7 +5766,7 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
      }
      if (options.ngram_native_sessions && options.speculative.ngram_archive_bytes == 0) {
          throw std::invalid_argument("--ngram-native-sessions requires --ngram-archive-mib");
-@@ -1202,6 +1240,72 @@ ServeOptions parse_serve_options(int argc, char** argv) {
+@@ -1202,6 +1254,82 @@ ServeOptions parse_serve_options(int argc, char** argv) {
              throw std::invalid_argument("--default-max-tokens must be positive");
          }
      }
@@ -5763,6 +5815,15 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
 +            throw std::invalid_argument("KVMem requires ordinary/fixed/adaptive MTP1..15, ngram1..63 (automatically capped at 15 with 2..8 lanes), single-GPU or layer-pipeline BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 generation, 1..8 text or resident/CPU-vision lanes, INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 fast prefill without disk, "
 +                "and exclusive ownership of history caching");
 +        }
++        if (options.kvmem.recent_blocks() == 0) {
++            throw std::invalid_argument(
++                "KVMem --kvmem-recent-tokens must be at least 64 to retain the partial append page");
++        }
++        if (static_cast<std::uint64_t>(options.kvmem.sink_blocks()) + options.kvmem.recent_blocks() >
++            options.kvmem.selected_tokens / 64) {
++            throw std::invalid_argument(
++                "KVMem sink and recent tokens exceed --kvmem-budget after rounding to 64-token pages");
++        }
 +        if (options.kvmem.selected_tokens < 128 || options.kvmem.selected_tokens % 64 ||
 +            options.kvmem.reserve_tokens < 64 || options.kvmem.reserve_tokens % 64 ||
 +            window < 256 || window > options.max_context || !options.kvmem.host_bytes ||
@@ -5781,7 +5842,8 @@ index 97d9974961de55594564cdd901affed648e20529..5de8d2ec8440760cdc583edbf751de15
 +        // is disabled here; KVMem owns the current session's trusted checkpoint.
 +        options.context_cache.enabled = false;
 +    } else if (options.kvmem.reserve_tokens || options.kvmem.host_bytes || options.kvmem.verify_transfers ||
-+         !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes) {
++         !options.kvmem.disk_path.empty() || options.kvmem.disk_bytes ||
++         sink_tokens_explicit || recent_tokens_explicit) {
 +        throw std::invalid_argument("KVMem auxiliary options require --kvmem-budget");
 +    }
      return options;
@@ -7664,10 +7726,10 @@ index 0000000000000000000000000000000000000000..7b9f70caa63b1a09a3a7a50fcc835fbd
 +}
 diff --git a/tests/experimental/p1_options.cpp b/tests/experimental/p1_options.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..8d9fd1ab96669d68fb0f324f4a65e18216156c9d
+index 0000000000000000000000000000000000000000..0d70263d88c1efa72a262aab50a64b83638f6bb5
 --- /dev/null
 +++ b/tests/experimental/p1_options.cpp
-@@ -0,0 +1,376 @@
+@@ -0,0 +1,402 @@
 +#include "runtime/engine/model_instance.h"
 +#include <algorithm>
 +#include <functional>
@@ -7679,14 +7741,40 @@ index 0000000000000000000000000000000000000000..8d9fd1ab96669d68fb0f324f4a65e182
 +int main() {
 +    ninfer::EngineOptions base;
 +    base.max_context = 2048;
-+    base.kvmem = {128, 128, 1024ULL * 1024ULL * 1024ULL};
++    base.kvmem = {.selected_tokens = 128, .reserve_tokens = 128,
++                 .host_bytes = 1024ULL * 1024ULL * 1024ULL};
 +    base.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(256);
 +    base.prefill_chunk = 128;
 +    base.context_cache.enabled = false;
 +    try {
 +        const auto valid = ninfer::runtime::normalize_engine_options(base);
-+        if (valid.kvmem.device_tokens() != 256 || valid.max_context != 2048) {
++        if (valid.kvmem.device_tokens() != 256 || valid.max_context != 2048 ||
++            valid.kvmem.host_bytes != (1ULL << 30) || valid.kvmem.sink_blocks() != 1 ||
++            valid.kvmem.recent_blocks() != 1) {
 +            throw std::runtime_error("normalization changed logical/physical limits");
++        }
++        for (const auto recent : {0U, 1U, 63U}) {
++            auto bad = base;
++            bad.kvmem.recent_tokens = recent;
++            bool rejected = false;
++            try { (void)ninfer::runtime::normalize_engine_options(bad); }
++            catch (const std::invalid_argument&) { rejected = true; }
++            if (!rejected) throw std::runtime_error("Engine allowed an unprotected partial append page");
++        }
++        for (const auto recent : {64U, 65U, 127U}) {
++            auto kept = base;
++            kept.kvmem.recent_tokens = recent;
++            if (ninfer::runtime::normalize_engine_options(kept).kvmem.recent_blocks() != 1)
++                throw std::runtime_error("Engine changed the rounded recent page allocation");
++        }
++        for (const bool all_sink : {false, true}) {
++            auto bad = base;
++            if (all_sink) bad.kvmem.sink_tokens = 128;
++            else bad.kvmem.recent_tokens = 128;
++            bool rejected = false;
++            try { (void)ninfer::runtime::normalize_engine_options(bad); }
++            catch (const std::invalid_argument&) { rejected = true; }
++            if (!rejected) throw std::runtime_error("Engine allowed sink plus recent larger than B");
 +        }
 +        for (const bool mtp_enabled : {false, true}) {
 +            for (const bool image_enabled : {false, true}) {
@@ -9753,7 +9841,7 @@ index 9def7c0df5e6c80d24c3684e7d7d5667a3436426..00a825c73f4fac16e520eb7946cdaad7
      run_test("session publication order", test_session_publication_order_controls_tied_source);
      run_test("canonical pressure", test_canonical_pressure_starts_with_disposable_owner);
 diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
-index a2a85784b4cfb969b48d3c3bfc116400f8bda693..aab0a7eb60a751fd52c6e6fce07bde3354e4c814 100644
+index a2a85784b4cfb969b48d3c3bfc116400f8bda693..d49ec44558297969d6257611b287be89ae35b2fb 100644
 --- a/tests/test_serve_options.cpp
 +++ b/tests/test_serve_options.cpp
 @@ -2,9 +2,11 @@
@@ -9768,7 +9856,7 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..aab0a7eb60a751fd52c6e6fce07bde33
  #include <string>
  #include <string_view>
  #include <utility>
-@@ -24,14 +26,310 @@ ServeOptions parse(std::vector<std::string> arguments) {
+@@ -24,14 +26,348 @@ ServeOptions parse(std::vector<std::string> arguments) {
      std::vector<char*> argv;
      argv.reserve(arguments.size());
      for (std::string& argument : arguments) { argv.push_back(argument.data()); }
@@ -9806,8 +9894,46 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..aab0a7eb60a751fd52c6e6fce07bde33
 +    failures += check(kvmem.allow_prefix_reuse && !kvmem_engine.context_cache.enabled &&
 +        kvmem_engine.kvmem.selected_tokens == 384 && kvmem_engine.kvmem.reserve_tokens == 128 &&
 +        kvmem_engine.kvmem.host_bytes == (16ULL << 30) &&
++        kvmem_engine.kvmem.sink_tokens == 0 && kvmem_engine.kvmem.recent_tokens == 64 &&
++        kvmem_engine.kvmem.sink_blocks() == 1 && kvmem_engine.kvmem.recent_blocks() == 1 &&
 +        kvmem_engine.kv_capacity.explicit_tokens == 512,
 +        "KVMem budgets or independent history reuse were not mapped to Engine");
++    {
++        auto args = memory_args;
++        // 1024 recent tokens are 16 pages, so this case needs a larger B than the 384 default.
++        std::replace(args.begin(), args.end(), std::string("384"), std::string("2048"));
++        args.insert(args.end(), {"--kvmem-sink-tokens", "100", "--kvmem-recent-tokens", "1024"});
++        const auto kept = make_engine_options(parse(args)).kvmem;
++        failures += check(kept.sink_tokens == 100 && kept.sink_blocks() == 1 &&
++            kept.recent_tokens == 1024 && kept.recent_blocks() == 16,
++            "KVMem sink/recent did not round down to 64-token pages");
++    }
++    {
++        auto args = memory_args;
++        args.insert(args.end(), {"--kvmem-sink-tokens", "128", "--kvmem-recent-tokens", "127"});
++        const auto kept = make_engine_options(parse(args)).kvmem;
++        failures += check(kept.sink_blocks() == 2 && kept.recent_blocks() == 1,
++            "KVMem did not keep a two-page sink and one recent page after rounding");
++    }
++    for (const auto& extra : std::vector<std::vector<std::string>>{
++             {"--kvmem-sink-tokens", "256", "--kvmem-recent-tokens", "192"},
++             {"--kvmem-recent-tokens", "4096"},
++             {"--kvmem-recent-tokens", "0"}, {"--kvmem-recent-tokens", "1"},
++             {"--kvmem-recent-tokens", "63"},
++             {"--kvmem-sink-tokens", "-1"}, {"--kvmem-recent-tokens", "1.5"}}) {
++        auto args = memory_args; args.insert(args.end(), extra.begin(), extra.end());
++        bool rejected = false;
++        try { (void)parse(args); } catch (const std::invalid_argument&) { rejected = true; }
++        failures += check(rejected, "invalid KVMem sink/recent configuration accepted");
++    }
++    for (const auto& extra : std::vector<std::vector<std::string>>{
++             {"--kvmem-sink-tokens", "0"}, {"--kvmem-recent-tokens", "0"}}) {
++        auto args = std::vector<std::string>{"ninfer-serve", "model.ninfer"};
++        args.insert(args.end(), extra.begin(), extra.end());
++        bool rejected = false;
++        try { (void)parse(args); } catch (const std::invalid_argument&) { rejected = true; }
++        failures += check(rejected, "KVMem sink/recent was accepted without a budget");
++    }
 +    failures += check(kvmem_engine.kvmem.disk_path.empty() && kvmem_engine.kvmem.disk_bytes == 0,
 +                      "KVMem defaults enabled disabled cold snapshots");
 +    for (const bool mtp_enabled : {false, true}) {
@@ -10081,7 +10207,7 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..aab0a7eb60a751fd52c6e6fce07bde33
      failures += check(memory_defaults.cuda_memory_policy == ninfer::CudaMemoryPolicy::DriverDefault &&
                            memory_defaults.cuda_vram_reserve_bytes == 0 &&
                            memory_defaults.cuda_memory_probe_step_bytes == 0 &&
-@@ -170,7 +468,6 @@ int main() {
+@@ -170,7 +506,6 @@ int main() {
      for (const auto& tail : std::vector<std::vector<std::string>>{
               {"--ngram-draft-tokens", "64"},
               {"--ngram-min-match", "3"},
@@ -10089,7 +10215,7 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..aab0a7eb60a751fd52c6e6fce07bde33
               {"--spec", "none"}}) {
          std::vector<std::string> arguments{"ninfer-serve",
                                             "model.ninfer",
-@@ -206,15 +503,11 @@ int main() {
+@@ -206,15 +541,11 @@ int main() {
      }
      failures += check(parse({"ninfer-serve", "model.ninfer"}).speculative.ngram_draft_tokens == 0,
                        "ngram default needs a neural backend");
@@ -10110,7 +10236,7 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..aab0a7eb60a751fd52c6e6fce07bde33
  
      const auto mtp_ngram = parse({"ninfer-serve", "model.ninfer", "--spec", "mtp", "--draft-tokens",
                                    "3", "--ngram-draft-tokens", "15"});
-@@ -253,14 +546,12 @@ int main() {
+@@ -253,14 +584,12 @@ int main() {
              } catch (const std::invalid_argument&) { rejected = true; }
              failures += check(rejected, "unsupported neural/ngram pair admitted");
          }
@@ -10131,7 +10257,7 @@ index a2a85784b4cfb969b48d3c3bfc116400f8bda693..aab0a7eb60a751fd52c6e6fce07bde33
          const auto wide_single =
              parse({"ninfer-serve", "model.ninfer", "--spec", backend, "--draft-tokens", "3",
                     "--ngram-draft-tokens", "63", "--max-concurrency", "1"});
-@@ -1526,3 +1817,11 @@ int main() {
+@@ -1526,3 +1855,11 @@ int main() {
  
      return failures == 0 ? 0 : 1;
  }

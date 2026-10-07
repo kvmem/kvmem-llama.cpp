@@ -146,6 +146,40 @@ try {
         $budgetRejected = $_.Exception.Message -match 'Use -ThinkingBudget'
     }
     if (!$budgetRejected) { throw 'native thinking-budget argument was accepted' }
+    if ($copy.argv[[array]::IndexOf($copy.argv, '--kvmem-sink-tokens') + 1] -ne '0' -or
+        $copy.argv[[array]::IndexOf($copy.argv, '--kvmem-recent-tokens') + 1] -ne '64') {
+        throw 'default sink/recent windows were not one 64-token page'
+    }
+    $windows = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -SinkTokens 128 -RecentTokens 127 | ConvertFrom-Json
+    if ($windows.argv[[array]::IndexOf($windows.argv, '--kvmem-sink-tokens') + 1] -ne '128' -or
+        $windows.argv[[array]::IndexOf($windows.argv, '--kvmem-recent-tokens') + 1] -ne '127') {
+        throw 'sink/recent mapping failed'
+    }
+    foreach ($recent in @(0, 1, 63)) {
+        $recentRejected = $false
+        try {
+            $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+                -RecentTokens $recent
+        } catch { $recentRejected = $true }
+        if (!$recentRejected) { throw 'recent smaller than one 64-token page was accepted' }
+    }
+    $windowsRejected = $false
+    try {
+        $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+            -WorkerArgs @('--kvmem-recent-tokens', '128')
+    } catch {
+        $windowsRejected = $_.Exception.Message -match 'Use -SinkTokens and -RecentTokens'
+    }
+    if (!$windowsRejected) { throw 'native sink/recent argument was accepted' }
+    $windowsFit = $false
+    try {
+        $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+            -Budget 128 -RecentTokens 128
+    } catch {
+        $windowsFit = $_.Exception.Message -match 'exceed -Budget'
+    }
+    if (!$windowsFit) { throw 'sink plus recent larger than the budget was accepted' }
     $llama = & $launcher @common -Backend llamacpp -Model (Join-Path $testDir 'model.gguf') `
         -WorkerArgs @('--spec-type', 'draft-mtp') | ConvertFrom-Json
     if ($llama.argv -notcontains 'draft-mtp' -or !$llama.capabilities.speculative_decoding -or

@@ -27,6 +27,8 @@ param(
     [ValidateRange(1, 16384)][int]$VisionTokens = 1024,
     [ValidateSet('off', 'auto')][string]$DeviceProfile = 'off',
     [ValidateRange(0, 2147483647)][int]$ThinkingBudget = 0,
+    [ValidateRange(0, 2147483647)][int]$SinkTokens = 0,
+    [ValidateRange(64, 2147483647)][int]$RecentTokens = 64,
     [string]$DiskPath,
     [ValidateRange(1, 1048576)][int]$DiskMiB = 4096,
     [string[]]$WorkerArgs = @(),
@@ -99,6 +101,9 @@ if ($Backend -eq 'ninfer') {
     if (@($WorkerArgs | Where-Object { $_ -match '^--default-thinking-budget(=|$)' }).Count) {
         throw 'Use -ThinkingBudget to configure the ninfer thinking budget'
     }
+    if (@($WorkerArgs | Where-Object { $_ -match '^--kvmem-(sink|recent)-tokens(=|$)' }).Count) {
+        throw 'Use -SinkTokens and -RecentTokens to configure the ninfer keep windows'
+    }
 }
 if (!$KvType) { $KvType = if ($Backend -eq 'ninfer') { 'int8' } else { 'q8_0' } }
 if ($Backend -eq 'ninfer') {
@@ -115,6 +120,11 @@ if ($Backend -eq 'ninfer') {
         throw 'Fast prefill requires INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 without cold disk'
     }
     if ($VisionResidency -ne 'resident' -and !$Vision) { throw 'CPU Vision requires -Vision' }
+    $sinkBlocks = if ($SinkTokens -lt 64) { 1 } else { [int][Math]::Floor($SinkTokens / 64) }
+    $recentBlocks = [int][Math]::Floor($RecentTokens / 64)
+    if (($sinkBlocks + $recentBlocks) * 64 -gt $Budget) {
+        throw 'ninfer sink and recent tokens exceed -Budget after rounding down to 64-token pages'
+    }
     if ($NgramDrafts -and (!$MtpDrafts -or
         ([Math]::Max($MtpDrafts, $NgramDrafts) + $MtpDrafts) -gt $Reserve)) {
         throw 'ngram requires MTP and reserve >= max(MTP drafts, effective ngram drafts) + MTP drafts'
@@ -125,6 +135,7 @@ if ($Backend -eq 'ninfer') {
     $nativeArgs = @($Model, '--host', $ListenHost, '--port', "$Port", '--max-context', "$Context",
         '--max-concurrency', "$Concurrency", '--prefill-chunk', "$Prefill", '--default-max-tokens', "$MaxTokens",
         '--kvmem-budget', "$Budget", '--kvmem-gen-reserve', "$Reserve", '--kvmem-host-mib', "$HostMiB",
+        '--kvmem-sink-tokens', "$SinkTokens", '--kvmem-recent-tokens', "$RecentTokens",
         '--kvmem-sessions', "$RetainedSessions", '--kv-dtype', $KvType, '--device-profile', $DeviceProfile)
     if ($gpuIds.Count -gt 1) { $nativeArgs += @('--devices', ((0..($gpuIds.Count - 1)) -join ',')) }
     else { $nativeArgs += @('--device', '0') }
@@ -136,7 +147,7 @@ if ($Backend -eq 'ninfer') {
     if ($Vision) { $nativeArgs += @('--vision', '--vision-residency', $VisionResidency, '--vision-max-merged', "$VisionTokens") }
     if ($ThinkingBudget -gt 0) { $nativeArgs += @('--default-thinking-budget', "$ThinkingBudget") }
 } else {
-    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'DiskPath', 'DiskMiB', 'ThinkingBudget')) {
+    foreach ($name in @('StageLayers', 'MtpDrafts', 'AdaptiveMtp', 'FastPrefill', 'NgramDrafts', 'NgramMinMatch', 'Concurrency', 'RetainedSessions', 'Vision', 'VisionResidency', 'VisionTokens', 'DeviceProfile', 'DiskPath', 'DiskMiB', 'ThinkingBudget', 'SinkTokens', 'RecentTokens')) {
         if ($PSBoundParameters.ContainsKey($name)) { throw "-$name configures ninfer; use llama native options in -WorkerArgs" }
     }
     if ($PSBoundParameters.ContainsKey('HostMiB')) {

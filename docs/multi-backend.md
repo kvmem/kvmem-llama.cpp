@@ -4,7 +4,7 @@
 
 Windows 入口 `scripts/windows/start-backend.ps1` 在启动时选择 `llamacpp` 或 `ninfer`。两个 worker 分进程运行，各自拥有推理引擎和 GPU 内存；公共 KVMem 策略库直接链接在 worker 内。
 
-切换后端时的参数、默认值和执行行为区别见 [两后端实现差异](multi-backend-differences.md)，包括 ninfer 固定 64-token block、recent 保留量、R 与输出上限，以及 Host 和磁盘预算的不同含义。
+切换后端时的参数、默认值和执行行为区别见 [两后端实现差异](multi-backend-differences.md)，包括 ninfer 固定 64-token block、recent 默认且至少保留一页（参数至少 64 tokens）、R 与输出上限，以及 Host 和磁盘预算的不同含义。
 
 ## 启动
 
