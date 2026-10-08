@@ -1,4 +1,4 @@
-# KVMem + llama.cpp
+# KVMem: llama.cpp and ninfer backends
 
 <a id="downloads"></a>
 
