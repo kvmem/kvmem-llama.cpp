@@ -8,7 +8,7 @@
 
 | 用途 / Audience | 后端 / Backend | 模型 / Model | 下载 / Download | 状态 / Status |
 |---|---|---|---|---|
-| Windows NVIDIA RTX 30/40/50 | NInfer | `.ninfer` | [v0.18.0 RC1](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0-ninfer-rc1) | 预发布 / Prerelease |
+| Windows NVIDIA RTX 30/40/50 | NInfer | `.ninfer` | [v0.18.0 RC2](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.18.0-ninfer-rc2) | 预发布 / Prerelease |
 | Windows NVIDIA | llama.cpp | GGUF | [CUDA RC3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) | 预发布 / Prerelease |
 | Linux / WSL2 NVIDIA | llama.cpp | GGUF | [CUDA RC3](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/v0.16.0-rc3) | 预发布 / Prerelease |
 | Windows / Linux / WSL2 AMD | llama.cpp | GGUF | [ROCm Beta2](https://github.com/kvmem/kvmem-llama.cpp/releases/tag/rc3-rocm-beta2) | 测试版 / Beta |
