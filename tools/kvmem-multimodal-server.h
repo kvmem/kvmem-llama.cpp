@@ -364,7 +364,14 @@ static bool run_prefill_multimodal(ServerState & st, StreamIo * io, int * n_cach
         }
         if (all_resident) llama_kvmem_keep_selected();
         if (n_cache_hit) *n_cache_hit = base.row;
-        if (multimodal_decode_span(st, base.row, query, false, io) != 0) throw std::runtime_error("multimodal prefill failed or cancelled");
+        // Keep a recurrent checkpoint at the known-equal prompt prefix when
+        // the exact user query starts after the current LCP. The query
+        // checkpoint remains separately defined at query for replay semantics.
+        const int prefix_checkpoint_row = std::min(query, std::max(base.row, lcp));
+        if (multimodal_decode_span(st, base.row, prefix_checkpoint_row, false, io) != 0) throw std::runtime_error("multimodal prefix prefill failed or cancelled");
+        auto prefix_checkpoint = multimodal_checkpoint(st, prefix_checkpoint_row);
+        multimodal_remember(st, prefix_checkpoint);
+        if (multimodal_decode_span(st, prefix_checkpoint_row, query, false, io) != 0) throw std::runtime_error("multimodal prefill failed or cancelled");
         auto query_checkpoint = multimodal_checkpoint(st, query);
         multimodal_remember(st, query_checkpoint);
         const auto probe_view = llama_kvmem_get_attention_view();
