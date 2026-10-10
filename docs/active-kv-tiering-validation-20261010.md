@@ -138,6 +138,14 @@ ASan/UBSan，以及上述 CPU 诊断和一组模型对照。新增覆盖分配�
 未追加完整测试矩阵。原始证据位于任务根目录的 `ssd-free-index-20261010`，
 前一轮写合并记录位于 `ssd-write-batching-integration-20261010`。
 
+## 同日合并：Codex 图片 detail 兼容
+
+保留多后端分支的 `eb746f7` 修复：Responses 与 Chat Completions 接受已知的
+`low`、`high`、`original` 图片 detail，并使用现有固定视觉预处理；未知或格式错误
+的值继续拒绝。该协议修复与 SSD 共享存储合并，两个后端的补丁和源码树指纹重新核对。
+合并后只补图片 detail 的两项定向协议检查，未重跑 GPU 性能矩阵；此前的 5050 HTTP/SSE
+证据和未通过的旧全套 tool-contract 断言仍见图片修复提交说明。
+
 ## 平台与交付边界（原快照）
 
 已补齐 WSL2/Ubuntu 22.04 工具链，GCC 11.4/CMake 公共层完整测试 19/19 通过。
