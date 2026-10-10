@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 5b22dd7..0f127e5 100644
+index 5b22dd7810931cd7477a2656fb7d1007f90d3e98..0f127e5a2162a01e9db96ed0eeef5523bee2c21a 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -158,7 +158,13 @@ if(MSVC)
@@ -62,7 +62,7 @@ index 5b22dd7..0f127e5 100644
  # --- Subdirectories ----------------------------------------------------------
  add_subdirectory(src)
 diff --git a/TODO.md b/TODO.md
-index f7bf1a8..f597aa2 100644
+index f7bf1a805690242868a01a4305603200ebd625a6..f597aa26c9060fd6bd35cc608a4f796cca407009 100644
 --- a/TODO.md
 +++ b/TODO.md
 @@ -4735,12 +4735,11 @@ shape the entries described.
@@ -84,7 +84,7 @@ index f7bf1a8..f597aa2 100644
  - [x] **The shipped `-maxctx` launchers ask for a host-KV pin they cannot have. Closed 2026-09-09 —
        by documenting it, because the behaviour is right and the flag is not.**
 diff --git a/apps/cli/main.cpp b/apps/cli/main.cpp
-index db7512f..40288f5 100644
+index db7512fd3e439862ee2efebd14cc499aa23b730f..40288f586ba2106f9b651c7deb04655343bf7b88 100644
 --- a/apps/cli/main.cpp
 +++ b/apps/cli/main.cpp
 @@ -358,6 +358,9 @@ int main(int argc, char** argv) {
@@ -110,7 +110,7 @@ index db7512f..40288f5 100644
          engine_options.diagnostic_observer = ninfer::product::engine_diagnostic_observer(logger);
  
 diff --git a/apps/cli/options.cpp b/apps/cli/options.cpp
-index 4e7adbb..196868b 100644
+index 4e7adbb1c5a350dfe429056467c517e98961a229..196868bcfefc8b86d059881441c178f203871179 100644
 --- a/apps/cli/options.cpp
 +++ b/apps/cli/options.cpp
 @@ -1,4 +1,5 @@
@@ -233,7 +233,7 @@ index 4e7adbb..196868b 100644
  
      const bool has_prompt   = !options.prompt.empty();
 diff --git a/apps/cli/options.h b/apps/cli/options.h
-index f615842..303e2a4 100644
+index f61584290b501894118b9bc5a8ece5df2e6929ff..303e2a4b6f006f2a65d82762dbb0644cb8528eb7 100644
 --- a/apps/cli/options.h
 +++ b/apps/cli/options.h
 @@ -51,6 +51,10 @@ struct Options {
@@ -248,7 +248,7 @@ index f615842..303e2a4 100644
      bool prefill_a8     = true;
      bool prefill_cublas = false;
 diff --git a/apps/serve/main.cpp b/apps/serve/main.cpp
-index cd72229..4560e99 100644
+index cd72229dd96a2861be041bf934bb8a709d53c7bc..4560e990c80d9085b6e034f2c19cb2d4c403e200 100644
 --- a/apps/serve/main.cpp
 +++ b/apps/serve/main.cpp
 @@ -275,6 +275,11 @@ int main(int argc, char** argv) {
@@ -286,7 +286,7 @@ index cd72229..4560e99 100644
                  ninfer::serve::ModelDefinition{.id = ninfer::serve::resolve_public_model_id(
                                                     options, first->load_summary().model_name),
 diff --git a/docs/cli.md b/docs/cli.md
-index ff62f7a..2f424c7 100644
+index ff62f7a4fc4eca88f1a0ad91e936b23f13dd33c0..2f424c71f51d33c66e5b0c98f602a30642a3e378 100644
 --- a/docs/cli.md
 +++ b/docs/cli.md
 @@ -236,7 +236,7 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
@@ -308,7 +308,7 @@ index ff62f7a..2f424c7 100644
  | `--ngram-min-match N` | shortest match a copy is drawn from, `4..64` | `12` |
  | `--prefill-cublas` | hand wide prefill GEMMs to cuBLAS: a large prefill speedup for a small perplexity cost, and it wants a larger `--prefill-chunk` to pay (see [performance](performance.md)) | off |
 diff --git a/docs/maintainer/engine-architecture.md b/docs/maintainer/engine-architecture.md
-index e1d5497..d18fa9b 100644
+index e1d54975b08ab4403af6ab51c9f0fe9504e84c0a..d18fa9bf69b7847fc6af74e4652d22f3ea48e8c3 100644
 --- a/docs/maintainer/engine-architecture.md
 +++ b/docs/maintainer/engine-architecture.md
 @@ -573,7 +573,7 @@ live KV 与 State 的 lane；未启用时每个 prefill unit 只多一次 relaxe
@@ -321,7 +321,7 @@ index e1d5497..d18fa9b 100644
    allocator（每个 plane 绑定一个 rank）、一个 Scheduler 和一个 commit 序列。embedding、head、round state、
    sampling 和 MTP 留在 rank 0，residual 经 `StageLink` 逐 stage 传递并由最后一个 stage 送回。KV 容量取各设备
 diff --git a/docs/maintainer/paged-kv-cache.md b/docs/maintainer/paged-kv-cache.md
-index 6f63bd3..00b97fc 100644
+index 6f63bd3ef323a3dc8a9c0a692e343a763e93ffdf..00b97fcf132a290d37f60fac008181a482e93457 100644
 --- a/docs/maintainer/paged-kv-cache.md
 +++ b/docs/maintainer/paged-kv-cache.md
 @@ -781,3 +781,205 @@ Exact model state 和 backend mathematics 见
@@ -531,7 +531,7 @@ index 6f63bd3..00b97fc 100644
 +MTP/ngram, restoration and cancellation evidence is in the
 +[fast-prefill report](../../../../docs/fast-prefill-admission-validation-20261006.md).
 diff --git a/docs/maintainer/pipeline-parallel-plan.md b/docs/maintainer/pipeline-parallel-plan.md
-index 72026fc..0f2ce5b 100644
+index 72026fc3f17ac5789ea02e29ed5fd9cabe0c0609..0f2ce5b846b53cd0d017cae716074caafb3a967a 100644
 --- a/docs/maintainer/pipeline-parallel-plan.md
 +++ b/docs/maintainer/pipeline-parallel-plan.md
 @@ -20,9 +20,9 @@ each stage read its weights once per micro-batch and win nothing.
@@ -589,7 +589,7 @@ index 72026fc..0f2ce5b 100644
    engine synchronizes after each chunk, so at any moment one stage is busy. Overlapping stages needs
    micro-chunks inside a chunk (later stages start on micro-chunk 0 while stage 0 runs micro-chunk 1);
 diff --git a/docs/ngram.md b/docs/ngram.md
-index 73bc3e4..a2a01e1 100644
+index 73bc3e4627601b50daa978e6c5ab645a0583a5bc..a2a01e1e0c67248b36ccca28ec113694efeb2b0b 100644
 --- a/docs/ngram.md
 +++ b/docs/ngram.md
 @@ -36,14 +36,24 @@ another. The minimum match defaults to 12 and its supported range is 4..64.
@@ -620,7 +620,7 @@ index 73bc3e4..a2a01e1 100644
  
  A round in which at least one row has a copy proposal is a copy round and verifies at the ngram
 diff --git a/docs/serving.md b/docs/serving.md
-index 6207ab0..23c20b1 100644
+index 6207ab0ce85e3e581585b7ede25fc0a8ca04279e..5f28708256578ed01fc0c6ef601c8b727c4c38e0 100644
 --- a/docs/serving.md
 +++ b/docs/serving.md
 @@ -313,14 +313,34 @@ asking for raw JSON without Markdown fences and retaining tools for information
@@ -666,7 +666,20 @@ index 6207ab0..23c20b1 100644
  
  Only normal completed final-content responses guarantee a complete JSON document satisfying the supported
  schema. Token/context limits, cancellation, transport failure, or generation errors can leave a
-@@ -776,11 +796,10 @@ The endpoint supports:
+@@ -749,7 +769,11 @@ The endpoint supports:
+ - string content and ordered text/refusal parts; adjacent parts are preserved without inserted
+   separators, and empty wire content remains an empty turn;
+ - User `image_url` parts, tool-result `image_url` parts used by compatible clients, and the User
+-  `video_url` extension using HTTP(S) or data URIs; image detail is omitted or `auto`;
++  `video_url` extension using HTTP(S) or data URIs; image `detail` may be omitted, null,
++  `auto`, `low`, `high`, or `original`. All recognized levels use the same fixed `auto`
++  preprocessing and startup `--vision-max-merged` budget; explicit levels are compatibility
++  hints, not separate resolution or token-budget guarantees. Unknown strings and non-string
++  values other than null are rejected;
+ - nonnegative `max_completion_tokens` and the legacy `max_tokens` spelling; zero performs prompt
+   processing without generation; llama.cpp's `-1` ("no limit", the WebUI's default) and omitting
+   both apply the [default output limit](#default-output-limit);
+@@ -776,11 +800,10 @@ The endpoint supports:
  - function tools and free-form `custom` tools, the latter served to the model as a
    single-string-input function under the caller's own tool name so callers that dispatch by name
    keep working;
@@ -682,16 +695,18 @@ index 6207ab0..23c20b1 100644
  - assistant tool-call history, tool-result messages, and legacy function-call history;
  - the top-level `reasoning_effort` field, where the `default` and `auto` aliases resolve to the
    server-configured level;
-@@ -793,7 +812,7 @@ The endpoint supports:
+@@ -793,8 +816,8 @@ The endpoint supports:
  Options whose observable behavior the Engine cannot provide are rejected when they request that
  behavior. This includes JSON constrained output on a server without `--structured-output` (unless
  it runs with `--unconstrained-response-format`), nonzero `logit_bias`, audio/file input or audio
 -output, `required` tool choice over several callable tools, explicit low/high image detail, web
-+output, explicit low/high image detail, web
- search, moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
+-search, moderation, low/high verbosity, stored Chat Completions, and non-empty legacy `functions`.
++output, web search, moderation, low/high verbosity, stored Chat Completions, and non-empty legacy
++`functions`.
  Each capability rejection identifies the affected field and the guarantee NInfer cannot provide.
  The vLLM/llama.cpp constrained-decoding extensions (`grammar`, `structured_outputs`, `guided_json`,
-@@ -1256,8 +1275,8 @@ wire response contains typed `output` Items.
+ `guided_regex`, `guided_choice`, and `guided_grammar`) are rejected explicitly instead of being
+@@ -1256,8 +1279,8 @@ wire response contains typed `output` Items.
  | `thinking_budget` | NInfer extension: positive per-request [thinking cap](#openai-chat-completions), or `null`; rejected by input token count, which does not generate |
  | `text.format` | `text`, `json_object`, or flat `json_schema`; see [structured output](#structured-output) |
  | `tools` | direct function definitions or namespace groups containing function definitions; see below |
@@ -702,7 +717,30 @@ index 6207ab0..23c20b1 100644
  | `max_tool_calls` | non-negative integer accepted as a hosted-tool no-op; NInfer does not execute hosted tools |
  | `truncation` | omitted or `disabled`; overlong input fails instead of silently dropping Items |
  | `top_logprobs` | integer in `[0,20]`; a nonzero value also asks for [token log probabilities](#token-log-probabilities) |
-@@ -1352,28 +1371,14 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
+@@ -1283,7 +1306,7 @@ String `input` is normalized to one user `message` with an `input_text` part. Ar
+ | `input_text` | message content part containing string `text` |
+ | `output_text` | assistant-message replay part containing string `text` |
+ | `refusal` | assistant-message replay part; its text enters assistant history |
+-| `input_image` | user- or assistant-message part with HTTP(S) or data-URI `image_url`; detail omitted or `auto`; requires server `--vision` |
++| `input_image` | user- or assistant-message part with HTTP(S) or data-URI `image_url`; detail omitted, null, `auto`, `low`, `high`, or `original`; all recognized levels fall back to fixed `auto` preprocessing; requires server `--vision` |
+ | `input_video` | NInfer extension with HTTP(S) or data-URI `video_url`; requires server `--vision` |
+ | `reasoning` | raw replay Item with `reasoning_text` content; summary/encrypted metadata may accompany raw text but cannot replace it |
+ | `function_call` | completed assistant call with optional `id` and namespace, plus required `call_id`, `name`, and JSON-object string `arguments` |
+@@ -1308,7 +1331,12 @@ An `input_text`, `input_image`, or tool-result part may carry
+ boundaries; they affect reuse opportunities, not prompt identity or output semantics. String
+ message status/phase metadata is accepted but has no Qwen prompt representation.
+ 
+-`input_file`, `input_audio`, image `file_id`, non-`auto` image detail, reasoning metadata without raw
++Image detail levels do not select separate preprocessing profiles: the server's startup
++`--vision-max-merged` budget applies to every recognized level, and canonical image Items stored
++for response-chain replay use `detail:"auto"`. Unknown strings and non-string values other than
++null remain HTTP 400 errors.
++
++`input_file`, `input_audio`, image `file_id`, reasoning metadata without raw
+ reasoning text, partial tool Items, and other Item/content types are not supported. HTTP media URLs
+ stored in a response chain are fetched again when that chain is continued; use data URIs when the
+ historical media bytes must be immutable.
+@@ -1352,28 +1380,14 @@ NInfer renders these definitions in the Qwen prompt and parses model output into
  `function_call` output Items. Each output has a protocol Item `id` (`fc_...`) and a distinct
  `call_id` (`call_...`). The client executes the function and sends a `function_call_output` Item in
  a later request. Only functions in the current effective tool set can become structured calls;
@@ -736,7 +774,7 @@ index 6207ab0..23c20b1 100644
  
  ### Response object and usage
  
-@@ -1576,16 +1581,11 @@ protocol-validated value to the selected template, substituting the nearest valu
+@@ -1576,16 +1590,11 @@ protocol-validated value to the selected template, substituting the nearest valu
  accepts as described above. `output_config.format` accepts `{"type":"json_schema","schema":{...}}`,
  enforced strictly (see [Structured output](#structured-output)); Count Tokens ignores it.
  
@@ -758,7 +796,7 @@ index 6207ab0..23c20b1 100644
  `is_error:true` explicitly in the model prompt. For a visible Assistant tool-use turn, the next
  User turn must provide exactly one leading result for every declared ID; valid results are matched
  by ID and normalized to call order. A history that begins with results remains valid as a truncated
-@@ -1733,7 +1733,7 @@ The table lists executable defaults. The startup example selects a long-context
+@@ -1733,7 +1742,7 @@ The table lists executable defaults. The startup example selects a long-context
  | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `600000` |
  | `--recover-invariant-failures` | a broken internal invariant in the Engine worker fails the active and materializing requests and leaves the waiting ones queued, as recovery from out of memory does, instead of failing the Engine; eight consecutive recoveries without a completed unit still fail it | off |
  | `--prefill-chunk N` | text-prefill chunk | `1024` |
@@ -767,7 +805,7 @@ index 6207ab0..23c20b1 100644
  | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
  | `--log-colours on\|off` | `on` colours the console log's levels and gives every statistic of the operational lines a stable colour; `off` keeps the log plain; a redirected stderr is always plain | levels coloured on a console |
  | `--log-stats-panel on\|off` | pin the session statistics panel beneath the console log on an interactive terminal | off |
-@@ -1764,8 +1764,8 @@ The table lists executable defaults. The startup example selects a long-context
+@@ -1764,8 +1773,8 @@ The table lists executable defaults. The startup example selects a long-context
  | `--lm-head-draft` | optimized proposal head | off |
  | `--adaptive-mtp` | MTP only: each round verifies 3..`--draft-tokens` drafts, the width favored by the drafts' measured survival and the measured round cost; see [Adaptive MTP](#adaptive-mtp) | off |
  | `--mtp-attention-window N` | MTP only: the draft head attends to the first 64 keys and the newest `N` before its query; verification keeps full attention; see [MTP attention window](#mtp-attention-window) | `0` (whole history) |
@@ -779,7 +817,7 @@ index 6207ab0..23c20b1 100644
  | `--ngram-archive-mib N` | RAM archive that keeps finished requests' copy sources for later requests naming the same `X-NInfer-Draft-Session` | `0` (off) |
  | `--ngram-session-mib N` | per-session share of that archive, 1 MiB up to the archive size | `128` |
 diff --git a/docs/weight-conversion.md b/docs/weight-conversion.md
-index b27d2a6..8b1b424 100644
+index b27d2a68ec6d15922a8b305b3fa8e055b6fed726..8b1b42405d48be5aa394328f802987f14e81450d 100644
 --- a/docs/weight-conversion.md
 +++ b/docs/weight-conversion.md
 @@ -63,7 +63,8 @@ The built-in recipes are ordinary Python functions in
@@ -826,7 +864,7 @@ index b27d2a6..8b1b424 100644
  `qwen3_8_27b_gguf` ([`gguf_blocks.py`](../tools/convert/gguf_blocks.py)) imports a Qwen3.8-27B GGUF
 diff --git a/include/ninfer/ops/token_sums.h b/include/ninfer/ops/token_sums.h
 new file mode 100644
-index 0000000..9c7ede5
+index 0000000000000000000000000000000000000000..9c7ede518ca14fd2f735f9cfe5336c5fe09f40a4
 --- /dev/null
 +++ b/include/ninfer/ops/token_sums.h
 @@ -0,0 +1,19 @@
@@ -850,7 +888,7 @@ index 0000000..9c7ede5
 +                std::uint32_t block_tokens, Tensor& output, cudaStream_t stream);
 +} // namespace ninfer::ops
 diff --git a/include/ninfer/types.h b/include/ninfer/types.h
-index 0d7f7ab..88c4bf6 100644
+index 0d7f7ab4066c536a5c7fb13afa51e416f970b6d2..88c4bf657b2c17e6deb2f0d455055e0526dd6cab 100644
 --- a/include/ninfer/types.h
 +++ b/include/ninfer/types.h
 @@ -133,8 +133,9 @@ struct SpeculativeOptions {
@@ -1033,7 +1071,7 @@ index 0d7f7ab..88c4bf6 100644
      std::uint64_t computed_prefill_tokens = 0;
      // Tokens committed by decode rounds; the first token emitted by prefill is excluded.
 diff --git a/src/artifact/binder.cpp b/src/artifact/binder.cpp
-index 5c37361..e0fec93 100644
+index 5c37361915ce078bc8a825dfd801224cfefc3914..e0fec9373cb64144682ff5a510af28ee4378996a 100644
 --- a/src/artifact/binder.cpp
 +++ b/src/artifact/binder.cpp
 @@ -124,6 +124,9 @@ void Binder::evict_device(ObjectHandle object, std::uint32_t rank) {
@@ -1118,7 +1156,7 @@ index 5c37361..e0fec93 100644
      std::sort(pinned.begin(), pinned.end(), [&](std::size_t a, std::size_t b) {
          return *demands_[a].pinned_order < *demands_[b].pinned_order;
 diff --git a/src/artifact/binder.h b/src/artifact/binder.h
-index 59c1574..4abf267 100644
+index 59c1574836a14ba91e7ba80bcec5501485735a57..4abf2677d87dd4b86298d3cf62a77b89f99f05ef 100644
 --- a/src/artifact/binder.h
 +++ b/src/artifact/binder.h
 @@ -19,6 +19,9 @@ struct ParameterReference {
@@ -1149,7 +1187,7 @@ index 59c1574..4abf267 100644
          std::vector<std::byte> host_data;
      };
 diff --git a/src/artifact/materializer.cpp b/src/artifact/materializer.cpp
-index 84fb065..fe69cd0 100644
+index 84fb0657bb75fa648af6496300b94221d7fc441f..fe69cd0db032934fd33c4db2a4156448c38f7ec6 100644
 --- a/src/artifact/materializer.cpp
 +++ b/src/artifact/materializer.cpp
 @@ -312,6 +312,15 @@ const WeightParent& MaterializedArtifact::host_parent(ObjectHandle handle) const
@@ -1213,7 +1251,7 @@ index 84fb065..fe69cd0 100644
      const UploadTotals upload = upload_device_objects(reader, plan.device_objects,
                                                        out.arena_bases(), device, observer, phase,
 diff --git a/src/artifact/materializer.h b/src/artifact/materializer.h
-index 05129ea..b619f63 100644
+index 05129ead74992fe1a1d8bdd0a3c26bbdcfeaade0..b619f63e53d3c3426479a9ce7af49b6e92d80bf3 100644
 --- a/src/artifact/materializer.h
 +++ b/src/artifact/materializer.h
 @@ -9,6 +9,7 @@
@@ -1250,7 +1288,7 @@ index 05129ea..b619f63 100644
          std::optional<WeightParent> host;
          std::vector<std::byte> host_data;
 diff --git a/src/artifact/views.cpp b/src/artifact/views.cpp
-index 81d2b09..f70178f 100644
+index 81d2b09c3db0574b82a1f7dd90887221281de6b6..f70178f9b1ee17a16ac0e426057a09c9ebbfa9a5 100644
 --- a/src/artifact/views.cpp
 +++ b/src/artifact/views.cpp
 @@ -12,7 +12,9 @@ WeightView bind_view(const ParameterReference& reference,
@@ -1265,7 +1303,7 @@ index 81d2b09..f70178f 100644
                                   ? materialized.pinned_parent(part.object)
                                   : materialized.host_parent(part.object);
 diff --git a/src/core/CMakeLists.txt b/src/core/CMakeLists.txt
-index 879cd03..51a5d26 100644
+index 879cd03fa508d047d77d10bbe11eea82ad3013d2..51a5d262a4f3fedacbf6304cc39d6d137027ce07 100644
 --- a/src/core/CMakeLists.txt
 +++ b/src/core/CMakeLists.txt
 @@ -1,5 +1,7 @@
@@ -1287,7 +1325,7 @@ index 879cd03..51a5d26 100644
    target_link_libraries(ninfer_core PUBLIC d3d12 dxgi)
  endif()
 diff --git a/src/core/arena.cu b/src/core/arena.cu
-index b0029af..e747c93 100644
+index b0029af8260b130eb25baf4c152f181dd03ebe18..e747c939a2c6e1efa97170f3ef6b25a0e2662a8a 100644
 --- a/src/core/arena.cu
 +++ b/src/core/arena.cu
 @@ -1,4 +1,5 @@
@@ -1422,7 +1460,7 @@ index b0029af..e747c93 100644
      size_ = other.size_;
  
 diff --git a/src/core/arena.h b/src/core/arena.h
-index 713e28f..73d8173 100644
+index 713e28f9665df45ab685c742a5d981c0d57c4688..73d8173ab479134d1df3e2d6a5b195fccade3a0c 100644
 --- a/src/core/arena.h
 +++ b/src/core/arena.h
 @@ -6,10 +6,13 @@
@@ -1464,7 +1502,7 @@ index 713e28f..73d8173 100644
  
  using WorkspaceArena = DeviceArena;
 diff --git a/src/core/decode_graph.cpp b/src/core/decode_graph.cpp
-index c934aa5..9039546 100644
+index c934aa503880315af12386f53557aeb5030db166..90395467e7771948c62c22820255efa7e15a69e8 100644
 --- a/src/core/decode_graph.cpp
 +++ b/src/core/decode_graph.cpp
 @@ -2,6 +2,7 @@
@@ -1486,7 +1524,7 @@ index c934aa5..9039546 100644
          throw std::runtime_error(
              "CUDA Graph executable update failed: " + std::string(cudaGetErrorName(err)) +
 diff --git a/src/core/device.cu b/src/core/device.cu
-index f7845f7..1e3b9d2 100644
+index f7845f7b9e7cd0c777c03542b455bfffdc46cd70..1e3b9d29c4be8016b4a9a28a3212451202525708 100644
 --- a/src/core/device.cu
 +++ b/src/core/device.cu
 @@ -1,4 +1,5 @@
@@ -1508,7 +1546,7 @@ index f7845f7..1e3b9d2 100644
                   cudaGetErrorName(err), cudaGetErrorString(err));
      std::abort();
 diff --git a/src/core/device.h b/src/core/device.h
-index e684873..86281fc 100644
+index e684873a87e7af4bf6caf173397458e047ec2620..86281fc34d9134d45fe4cce890d4b0e6a1e50133 100644
 --- a/src/core/device.h
 +++ b/src/core/device.h
 @@ -17,6 +17,17 @@
@@ -1531,7 +1569,7 @@ index e684873..86281fc 100644
  #define CUDA_CHECK(expr) ::ninfer::cuda_check((expr), #expr, __FILE__, __LINE__)
 diff --git a/src/core/resident_memory.cpp b/src/core/resident_memory.cpp
 new file mode 100644
-index 0000000..d5841f3
+index 0000000000000000000000000000000000000000..d5841f3e799de281e5c8ac7c01f393272d0f2f01
 --- /dev/null
 +++ b/src/core/resident_memory.cpp
 @@ -0,0 +1,552 @@
@@ -2089,7 +2127,7 @@ index 0000000..d5841f3
 +} // namespace ninfer::core
 diff --git a/src/core/resident_memory.h b/src/core/resident_memory.h
 new file mode 100644
-index 0000000..710f118
+index 0000000000000000000000000000000000000000..710f118eade1262188ba5c49b82fa5a0b889ea79
 --- /dev/null
 +++ b/src/core/resident_memory.h
 @@ -0,0 +1,85 @@
@@ -2180,7 +2218,7 @@ index 0000000..710f118
 +} // namespace ninfer::core
 diff --git a/src/core/resident_scan.cu b/src/core/resident_scan.cu
 new file mode 100644
-index 0000000..9a26ffd
+index 0000000000000000000000000000000000000000..9a26ffd9155440b596a9008e9a1a6c68be4e9d68
 --- /dev/null
 +++ b/src/core/resident_scan.cu
 @@ -0,0 +1,43 @@
@@ -2228,7 +2266,7 @@ index 0000000..9a26ffd
 +
 +} // namespace ninfer::core
 diff --git a/src/models/CMakeLists.txt b/src/models/CMakeLists.txt
-index 45dcd87..c3dea37 100644
+index 45dcd87a5b9bba88b39547f03aac63e57185600a..c3dea3782d2c27a9861a3ef65bb1fd196f87b07f 100644
 --- a/src/models/CMakeLists.txt
 +++ b/src/models/CMakeLists.txt
 @@ -7,7 +7,8 @@ add_library(ninfer_model_runtime STATIC)
@@ -2242,7 +2280,7 @@ index 45dcd87..c3dea37 100644
  include(qwen3_5/loading_sources.cmake)
  include(qwen3_5/frontend_sources.cmake)
 diff --git a/src/models/qwen3_5/execution/attention.cpp b/src/models/qwen3_5/execution/attention.cpp
-index 4533e7c..eee43ae 100644
+index 4533e7c6345451fd3d82a3ee2e64e4191368a47c..eee43ae316526e28cb872865caac8ce086cdc47b 100644
 --- a/src/models/qwen3_5/execution/attention.cpp
 +++ b/src/models/qwen3_5/execution/attention.cpp
 @@ -5,6 +5,7 @@
@@ -2295,7 +2333,7 @@ index 4533e7c..eee43ae 100644
                normalized_key, stream);
  }
 diff --git a/src/models/qwen3_5/execution/attention.h b/src/models/qwen3_5/execution/attention.h
-index f690a93..1d60a13 100644
+index f690a931ec9a72f2ecbe782626d57937fe1a4973..1d60a13a7748410dc69b4663750a4965ed7aabaa 100644
 --- a/src/models/qwen3_5/execution/attention.h
 +++ b/src/models/qwen3_5/execution/attention.h
 @@ -3,6 +3,7 @@
@@ -2317,7 +2355,7 @@ index f690a93..1d60a13 100644
  } // namespace ninfer::models::qwen3_5::execution
 diff --git a/src/models/qwen3_5/execution/memory_statistics.h b/src/models/qwen3_5/execution/memory_statistics.h
 new file mode 100644
-index 0000000..ed68744
+index 0000000000000000000000000000000000000000..ed68744f3bcd8db8f0947866ac9adddb93bc10cd
 --- /dev/null
 +++ b/src/models/qwen3_5/execution/memory_statistics.h
 @@ -0,0 +1,40 @@
@@ -2362,7 +2400,7 @@ index 0000000..ed68744
 +};
 +} // namespace ninfer::models::qwen3_5::execution
 diff --git a/src/models/qwen3_5/execution/text.cpp b/src/models/qwen3_5/execution/text.cpp
-index a72ef55..e3778a0 100644
+index a72ef55a5a31ffd19727e86bf8765251cfaebcf1..e3778a03327c7c2a7a03684bcb01ef03f455c25f 100644
 --- a/src/models/qwen3_5/execution/text.cpp
 +++ b/src/models/qwen3_5/execution/text.cpp
 @@ -928,9 +928,23 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase
@@ -2540,7 +2578,7 @@ index a72ef55..e3778a0 100644
                                                                                  ar_visible};
                          mtp_forward_ar_step(prev_token, io_.mtp->ar_hidden, ar_position,
 diff --git a/src/models/qwen3_5/execution/text.h b/src/models/qwen3_5/execution/text.h
-index 6e271e9..667f87e 100644
+index 6e271e97e5d2d469e1082155f6944d49ca26c547..667f87ee88591ca43196422dc48c1f408ddece8a 100644
 --- a/src/models/qwen3_5/execution/text.h
 +++ b/src/models/qwen3_5/execution/text.h
 @@ -1,4 +1,5 @@
@@ -2578,7 +2616,7 @@ index 6e271e9..667f87e 100644
      const ops::CausalAttentionExecutionEnvelope* active_causal_attention_envelope_ = nullptr;
      std::int32_t active_sequence_batch_                                            = 0;
 diff --git a/src/models/qwen3_5/execution/vision.cpp b/src/models/qwen3_5/execution/vision.cpp
-index 0737fe5..83c5dba 100644
+index 0737fe5c325d628c09897eee78ea624fc617ef22..83c5dba3a47244e67923d27af01764ced321b2fe 100644
 --- a/src/models/qwen3_5/execution/vision.cpp
 +++ b/src/models/qwen3_5/execution/vision.cpp
 @@ -676,6 +676,28 @@ VisionOverlayWindowStats VisionPrefillSession::overlay_stats() const noexcept {
@@ -2611,7 +2649,7 @@ index 0737fe5..83c5dba 100644
      for (const std::uint32_t item_index : encoded_payloads_pending_release_) {
          if (item_index >= prompt_.media_payloads.size()) { std::terminate(); }
 diff --git a/src/models/qwen3_5/execution/vision.h b/src/models/qwen3_5/execution/vision.h
-index fc92d1b..783a581 100644
+index fc92d1b8487f19ef8f566811d78248d06a345dc8..783a581d120e2a63c5f2b7074a6b5d682b6f359f 100644
 --- a/src/models/qwen3_5/execution/vision.h
 +++ b/src/models/qwen3_5/execution/vision.h
 @@ -109,6 +109,8 @@ public:
@@ -2624,7 +2662,7 @@ index fc92d1b..783a581 100644
      [[nodiscard]] double elapsed_seconds() const;
  
 diff --git a/src/models/qwen3_5/execution/workspace.h b/src/models/qwen3_5/execution/workspace.h
-index dbc8d09..1d4eab4 100644
+index dbc8d092f66ddd993390ad7a2be5315f5d893ec6..1d4eab4f059fc7a20b96651e4bd25195e577e915 100644
 --- a/src/models/qwen3_5/execution/workspace.h
 +++ b/src/models/qwen3_5/execution/workspace.h
 @@ -26,7 +26,7 @@ struct TextPrefillRoots {
@@ -2654,7 +2692,7 @@ index dbc8d09..1d4eab4 100644
      return out;
  }
 diff --git a/src/models/qwen3_5/frontend/chat_template.cpp b/src/models/qwen3_5/frontend/chat_template.cpp
-index 1bdf3ef..babfb83 100644
+index 1bdf3ef3478db084f75ce59c8359cc4db3143def..babfb838453d742a721bf63a8c9bcc6bbf99c15b 100644
 --- a/src/models/qwen3_5/frontend/chat_template.cpp
 +++ b/src/models/qwen3_5/frontend/chat_template.cpp
 @@ -433,6 +433,12 @@ RenderedChat CompiledChatTemplate::render_as(const std::vector<ChatMessage>& mes
@@ -2671,7 +2709,7 @@ index 1bdf3ef..babfb83 100644
          if (!message_blocks[i]) continue;
          const auto& block = layout.messages[*message_blocks[i]];
 diff --git a/src/models/qwen3_5/frontend/chat_template.h b/src/models/qwen3_5/frontend/chat_template.h
-index b9e8ffc..cca92cb 100644
+index b9e8ffc18db940b5506d9ea85f82ca7e2a06595e..cca92cb3108f2590615d4f391370ab144981c8d2 100644
 --- a/src/models/qwen3_5/frontend/chat_template.h
 +++ b/src/models/qwen3_5/frontend/chat_template.h
 @@ -114,6 +114,9 @@ struct RewriteCheckpointByteSpec {
@@ -2685,7 +2723,7 @@ index b9e8ffc..cca92cb 100644
      std::vector<MediaPlaceholderByteSpec> media_placeholders;
      std::vector<MediaTokenRunByteSpec> media_token_runs;
 diff --git a/src/models/qwen3_5/frontend/frontend.cpp b/src/models/qwen3_5/frontend/frontend.cpp
-index 71bd1b0..387a354 100644
+index 71bd1b049e0fc28e2eb9f692ab5051933ebe4dce..387a3544204673cee1199661027be6e164401675 100644
 --- a/src/models/qwen3_5/frontend/frontend.cpp
 +++ b/src/models/qwen3_5/frontend/frontend.cpp
 @@ -13,6 +13,7 @@
@@ -2804,7 +2842,7 @@ index 71bd1b0..387a354 100644
  
  const StopPolicy& Frontend::default_stop_policy() const noexcept { return impl_->defaults; }
 diff --git a/src/models/qwen3_5/frontend/frontend.h b/src/models/qwen3_5/frontend/frontend.h
-index 8584a84..32dcc1a 100644
+index 8584a840c654262757370397f28df680be843100..32dcc1ad3b2f3dbbf9231ef20120c9a371a4a275 100644
 --- a/src/models/qwen3_5/frontend/frontend.h
 +++ b/src/models/qwen3_5/frontend/frontend.h
 @@ -107,7 +107,8 @@ public:
@@ -2818,7 +2856,7 @@ index 8584a84..32dcc1a 100644
      [[nodiscard]] const ModelSamplingDefaults& sampling_defaults() const noexcept;
      // Publishes the resolved long-anchor count. Startup builds the frontend before the sequence
 diff --git a/src/models/qwen3_5/frontend/output_session.cpp b/src/models/qwen3_5/frontend/output_session.cpp
-index eb9c405..084d2de 100644
+index eb9c405582ab69d5003b4ce82e877cfbc52dac03..084d2de6dc90e0855eb23ade8200722c31abdc4b 100644
 --- a/src/models/qwen3_5/frontend/output_session.cpp
 +++ b/src/models/qwen3_5/frontend/output_session.cpp
 @@ -437,7 +437,8 @@ public:
@@ -2832,7 +2870,7 @@ index eb9c405..084d2de 100644
            tool_call_output(output.raw ? nullptr : std::move(tool_call_output_),
                             output.tool_name_max_length) {
 diff --git a/src/models/qwen3_5/frontend/prepared_prompt.h b/src/models/qwen3_5/frontend/prepared_prompt.h
-index 4eae32c..b09e770 100644
+index 4eae32ca426a6405d9549733a53010a0e83880a6..b09e7702ad07568f3b976c58e2f375197e9f204f 100644
 --- a/src/models/qwen3_5/frontend/prepared_prompt.h
 +++ b/src/models/qwen3_5/frontend/prepared_prompt.h
 @@ -162,6 +162,10 @@ struct PreparedPromptData {
@@ -2855,7 +2893,7 @@ index 4eae32c..b09e770 100644
      PrepareStats prepare;
      std::string graft_name;
 diff --git a/src/models/qwen3_5/frontend/processor.cpp b/src/models/qwen3_5/frontend/processor.cpp
-index 6c89c25..58ac667 100644
+index 6c89c252b80c8b9d26eca9f942d96384a18ac5d1..58ac667d41bf67943eea589329a6a690281e6a0b 100644
 --- a/src/models/qwen3_5/frontend/processor.cpp
 +++ b/src/models/qwen3_5/frontend/processor.cpp
 @@ -576,6 +576,10 @@ RenderedChat expand_placeholders(RenderedChat rendered, const std::vector<Vision
@@ -2911,7 +2949,7 @@ index 6c89c25..58ac667 100644
      output.cache_boundaries            = std::move(encoded.cache_boundaries);
      stats.prompt_tokens                = output.input_ids.size();
 diff --git a/src/models/qwen3_5/frontend/processor.h b/src/models/qwen3_5/frontend/processor.h
-index 762bd71..5a2b9ac 100644
+index 762bd710302ab6c8d452287831bd31ba0e3518b2..5a2b9ac9ee54cb52aa0a9cab36c022eb99ebd658 100644
 --- a/src/models/qwen3_5/frontend/processor.h
 +++ b/src/models/qwen3_5/frontend/processor.h
 @@ -112,6 +112,7 @@ struct ProcessedInput {
@@ -2931,7 +2969,7 @@ index 762bd71..5a2b9ac 100644
      std::vector<std::uint32_t> rewrite_execution_frontiers;
      std::vector<std::optional<std::uint32_t>> message_boundaries;
 diff --git a/src/models/qwen3_5/frontend/tool_call_parser.cpp b/src/models/qwen3_5/frontend/tool_call_parser.cpp
-index edd48f8..be9f2ea 100644
+index edd48f80f587fef65ffcff3de77f10e8ce12978f..be9f2ea0ce3712b3296ac30741aad308ff29b9e4 100644
 --- a/src/models/qwen3_5/frontend/tool_call_parser.cpp
 +++ b/src/models/qwen3_5/frontend/tool_call_parser.cpp
 @@ -307,6 +307,8 @@ Contract::Tool compile_tool_contract(const Json& definition) {
@@ -3050,7 +3088,7 @@ index edd48f8..be9f2ea 100644
          parse_qwen_tool_call_output(tool_region_, max_tool_name_length_, *contract_);
      if (forced_ && parsed.diagnostics.fallback_reason != FallbackReason::None) {
 diff --git a/src/models/qwen3_5/frontend/tool_call_parser.h b/src/models/qwen3_5/frontend/tool_call_parser.h
-index a5a2c9c..126b0c0 100644
+index a5a2c9ce3421b5336ff6e110615b99fcf206a6ab..126b0c0bb0ede2c311696a9950548312033ecc14 100644
 --- a/src/models/qwen3_5/frontend/tool_call_parser.h
 +++ b/src/models/qwen3_5/frontend/tool_call_parser.h
 @@ -36,7 +36,9 @@ struct ToolCallOutputContract {
@@ -3095,7 +3133,7 @@ index a5a2c9c..126b0c0 100644
      std::string content;
 diff --git a/src/models/qwen3_5/frontend/tool_contract.cpp b/src/models/qwen3_5/frontend/tool_contract.cpp
 new file mode 100644
-index 0000000..d891700
+index 0000000000000000000000000000000000000000..d891700806f48db8b235173679fffc3d22b0c5d4
 --- /dev/null
 +++ b/src/models/qwen3_5/frontend/tool_contract.cpp
 @@ -0,0 +1,295 @@
@@ -3396,7 +3434,7 @@ index 0000000..d891700
 +} // namespace ninfer::models::qwen3_5::frontend
 diff --git a/src/models/qwen3_5/frontend/tool_grammar.cpp b/src/models/qwen3_5/frontend/tool_grammar.cpp
 new file mode 100644
-index 0000000..2e6f32c
+index 0000000000000000000000000000000000000000..2e6f32c4c978e960655b3c55d72aa96ae391e01b
 --- /dev/null
 +++ b/src/models/qwen3_5/frontend/tool_grammar.cpp
 @@ -0,0 +1,81 @@
@@ -3483,7 +3521,7 @@ index 0000000..2e6f32c
 +} // namespace ninfer::models::qwen3_5::frontend
 diff --git a/src/models/qwen3_5/frontend/tool_grammar.h b/src/models/qwen3_5/frontend/tool_grammar.h
 new file mode 100644
-index 0000000..81c71d7
+index 0000000000000000000000000000000000000000..81c71d7679f1007575eaf480226c0fed73efaf53
 --- /dev/null
 +++ b/src/models/qwen3_5/frontend/tool_grammar.h
 @@ -0,0 +1,5 @@
@@ -3493,7 +3531,7 @@ index 0000000..81c71d7
 +std::string tool_grammar(const ToolCallOutputContract&, const StructuredOutputOptions&);
 +}
 diff --git a/src/models/qwen3_5/frontend_sources.cmake b/src/models/qwen3_5/frontend_sources.cmake
-index 84751e8..045368b 100644
+index 84751e8c806628a85f09d76fd71b9cca01b687ff..045368b7e6524b452c5a04f515f1c03e7fbceec9 100644
 --- a/src/models/qwen3_5/frontend_sources.cmake
 +++ b/src/models/qwen3_5/frontend_sources.cmake
 @@ -8,4 +8,8 @@ target_sources(ninfer_model_runtime PRIVATE
@@ -3506,7 +3544,7 @@ index 84751e8..045368b 100644
 +target_include_directories(ninfer_model_runtime PRIVATE ${PROJECT_SOURCE_DIR}/third_party/xgrammar/cpp)
 +target_link_libraries(ninfer_model_runtime PRIVATE ninfer_xgrammar)
 diff --git a/src/models/qwen3_5/load.cpp b/src/models/qwen3_5/load.cpp
-index 04b2f44..762e9e5 100644
+index 04b2f443eb6b7a6e2a296e8219a533a3db8e3303..762e9e50740c8130fda32aa64dc4028dfcc2fdd5 100644
 --- a/src/models/qwen3_5/load.cpp
 +++ b/src/models/qwen3_5/load.cpp
 @@ -58,14 +58,6 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
@@ -3541,7 +3579,7 @@ index 04b2f44..762e9e5 100644
      std::vector<StageBudget> budgets;
      budgets.reserve(free_bytes.size());
 diff --git a/src/models/qwen3_5/load/bindings.h b/src/models/qwen3_5/load/bindings.h
-index 376d715..46bab79 100644
+index 376d715cc5856c46715fc6d448d5d7bf014ca2db..46bab790f23c5d097a8ac12615d6a9003a1395a5 100644
 --- a/src/models/qwen3_5/load/bindings.h
 +++ b/src/models/qwen3_5/load/bindings.h
 @@ -58,10 +58,12 @@ private:
@@ -3558,7 +3596,7 @@ index 376d715..46bab79 100644
  
  [[nodiscard]] AttentionWeights bind_attention(Bindings& bindings, const TextConfig& config,
 diff --git a/src/models/qwen3_5/load/prepare.cpp b/src/models/qwen3_5/load/prepare.cpp
-index 15deca6..400b233 100644
+index 15deca6be9f9023891baa0f6539a899a2af7894f..400b23337eedae640dfc61f51d32082ffc1a8be5 100644
 --- a/src/models/qwen3_5/load/prepare.cpp
 +++ b/src/models/qwen3_5/load/prepare.cpp
 @@ -200,6 +200,24 @@ void Bindings::evict(WeightId id, std::uint32_t rank) {
@@ -3610,7 +3648,7 @@ index 15deca6..400b233 100644
  
  bool Bindings::transcode(WeightId id, QType target, std::string_view option) {
 diff --git a/src/models/qwen3_5/program/context.h b/src/models/qwen3_5/program/context.h
-index 0014a8c..bdeda67 100644
+index 0014a8c679146d8209a721b34607de60982ce428..bdeda6738618522d162c97b92ec0f36021c5e9cd 100644
 --- a/src/models/qwen3_5/program/context.h
 +++ b/src/models/qwen3_5/program/context.h
 @@ -45,6 +45,7 @@ struct ExecutionCore {
@@ -3630,7 +3668,7 @@ index 0014a8c..bdeda67 100644
  
  struct OrdinaryBatchContext {
 diff --git a/src/models/qwen3_5/program/decode.cpp b/src/models/qwen3_5/program/decode.cpp
-index 0b02d06..269fe6a 100644
+index 0b02d06b2fd6a72294fb7470773879aa176c5e2b..269fe6a94b85567b8b32aa57289bb6b67b2d2539 100644
 --- a/src/models/qwen3_5/program/decode.cpp
 +++ b/src/models/qwen3_5/program/decode.cpp
 @@ -42,6 +42,7 @@ auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
@@ -3790,7 +3828,7 @@ index 0b02d06..269fe6a 100644
      request.pending   = {};
      return timing.finish();
 diff --git a/src/models/qwen3_5/program/graphs.cpp b/src/models/qwen3_5/program/graphs.cpp
-index c1cd1f6..35e6e1a 100644
+index c1cd1f60ef1d01ccb23ee8f1efe331b09d0f6858..35e6e1a6ceae87bc223777d65c06e5cd8b8b3a86 100644
 --- a/src/models/qwen3_5/program/graphs.cpp
 +++ b/src/models/qwen3_5/program/graphs.cpp
 @@ -275,6 +275,7 @@ void ProgramImpl::prepare_graphs() {
@@ -3928,7 +3966,7 @@ index c1cd1f6..35e6e1a 100644
                  }
              }
 diff --git a/src/models/qwen3_5/program/planning/pressure.cpp b/src/models/qwen3_5/program/planning/pressure.cpp
-index 328a7bc..339c3c5 100644
+index 328a7bc0f7fb18a2a0633a9f6d1c41aa0eceffe8..339c3c55b8dc9ad81be949ef8e48f26ecbcc3026 100644
 --- a/src/models/qwen3_5/program/planning/pressure.cpp
 +++ b/src/models/qwen3_5/program/planning/pressure.cpp
 @@ -2651,6 +2651,16 @@ bool ProgramImpl::isolated_request_feasible(const RequestBasePlan& base) const n
@@ -3949,7 +3987,7 @@ index 328a7bc..339c3c5 100644
  bool ProgramImpl::persistent_backfill_safe(
      const RequestBasePlan& blocked_head, const AdmissionCandidate& candidate,
 diff --git a/src/models/qwen3_5/program/planning/request_plan.cpp b/src/models/qwen3_5/program/planning/request_plan.cpp
-index 9811b10..33f6faa 100644
+index 9811b10e74fcf5099736f13f261a3bd94ec989e7..33f6faaf254745976d7c980ea72a245714074dff 100644
 --- a/src/models/qwen3_5/program/planning/request_plan.cpp
 +++ b/src/models/qwen3_5/program/planning/request_plan.cpp
 @@ -84,7 +84,7 @@ runtime::PrefillWork scheduled_prefill_work(std::uint32_t begin, std::uint32_t e
@@ -4085,7 +4123,7 @@ index 9811b10..33f6faa 100644
      std::uint64_t vision_patches = 0;
      if (plan.vision) {
 diff --git a/src/models/qwen3_5/program/planning/startup.cpp b/src/models/qwen3_5/program/planning/startup.cpp
-index 2413356..85ee7b4 100644
+index 24133567ad63377d776d96856916cd4aa874b79b..85ee7b4322e9db58a23ae5e9c80115c6630d3afb 100644
 --- a/src/models/qwen3_5/program/planning/startup.cpp
 +++ b/src/models/qwen3_5/program/planning/startup.cpp
 @@ -133,7 +133,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
@@ -4254,7 +4292,7 @@ index 2413356..85ee7b4 100644
      const std::uint64_t minimum_pages64 =
          static_cast<std::uint64_t>(std::max(logical_pages, inputs.max_concurrency)) +
 diff --git a/src/models/qwen3_5/program/planning/startup.h b/src/models/qwen3_5/program/planning/startup.h
-index f825e58..042cade 100644
+index f825e588837f425592be6c3a56e1ceaf0b901c2f..042cadeb2677248ed70c59a0028078324d289daf 100644
 --- a/src/models/qwen3_5/program/planning/startup.h
 +++ b/src/models/qwen3_5/program/planning/startup.h
 @@ -35,6 +35,17 @@ struct DFlashPersistentLayout {
@@ -4302,7 +4340,7 @@ index f825e58..042cade 100644
      std::uint32_t main_page_groups          = 0;
      std::uint32_t max_concurrency           = 1;
 diff --git a/src/models/qwen3_5/program/prefill.cpp b/src/models/qwen3_5/program/prefill.cpp
-index 059f132..b69314e 100644
+index 059f132fe09e7b9128a98f65fa481b8edc3aef72..b69314edabd8e6a95627a1a41bd3a5f598dd2e40 100644
 --- a/src/models/qwen3_5/program/prefill.cpp
 +++ b/src/models/qwen3_5/program/prefill.cpp
 @@ -52,6 +52,7 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
@@ -4637,7 +4675,7 @@ index 059f132..b69314e 100644
                      throw std::logic_error("staged prefill reached the prompt without sampling");
                  }
 diff --git a/src/models/qwen3_5/program/prefix_identity.h b/src/models/qwen3_5/program/prefix_identity.h
-index d19092a..ead8dde 100644
+index d19092aea2d27d90f87275c63c95f6a11dcd66ca..ead8ddeef3b755214ceba767957eac597c65ac74 100644
 --- a/src/models/qwen3_5/program/prefix_identity.h
 +++ b/src/models/qwen3_5/program/prefix_identity.h
 @@ -49,6 +49,7 @@ public:
@@ -4649,7 +4687,7 @@ index d19092a..ead8dde 100644
      std::array<std::vector<std::int32_t>, 3> positions_;
      std::vector<VisionItem> vision_items_;
 diff --git a/src/models/qwen3_5/program/program.cpp b/src/models/qwen3_5/program/program.cpp
-index 438fe95..fba2785 100644
+index 438fe95117ce0d463db9a1496ccde1efc03782f3..fba2785d688544bb32ea5847d6b8f15cc03afc33 100644
 --- a/src/models/qwen3_5/program/program.cpp
 +++ b/src/models/qwen3_5/program/program.cpp
 @@ -620,6 +620,9 @@ std::optional<PhysicalUsageSnapshot> Program::shutdown_cleanup() noexcept {
@@ -4663,7 +4701,7 @@ index 438fe95..fba2785 100644
  bool Program::hybrid_prefix_cache() const noexcept { return impl_->hybrid_prefix_cache(); }
  
 diff --git a/src/models/qwen3_5/program/program.h b/src/models/qwen3_5/program/program.h
-index d3c6067..9f13923 100644
+index d3c606707501aec60c9283ec0b2c3a2c73f6493e..9f13923db055b9bbbd86fa6b0bc96d16f60d76f4 100644
 --- a/src/models/qwen3_5/program/program.h
 +++ b/src/models/qwen3_5/program/program.h
 @@ -1178,6 +1178,8 @@ public:
@@ -4676,7 +4714,7 @@ index d3c6067..9f13923 100644
      // Hybrid prefix cache mode (ContextCacheMode::Hybrid). Admission runs as the same context
      // transaction the Engine drives for Legacy materialization: quote, reserve, then
 diff --git a/src/models/qwen3_5/program/program_impl.cpp b/src/models/qwen3_5/program/program_impl.cpp
-index ddd6cb4..d666bd5 100644
+index ddd6cb476416bd85a565fe462c2aec62e845a2bb..d666bd562935158829c3a89333ab6c992348106f 100644
 --- a/src/models/qwen3_5/program/program_impl.cpp
 +++ b/src/models/qwen3_5/program/program_impl.cpp
 @@ -7,6 +7,7 @@
@@ -4851,7 +4889,7 @@ index ddd6cb4..d666bd5 100644
      out.max_context     = capacity;
      out.kv_capacity     = kv_capacity;
 diff --git a/src/models/qwen3_5/program/program_impl.h b/src/models/qwen3_5/program/program_impl.h
-index b82aeb3..fe186ac 100644
+index b82aeb3fcc9a87a640a7c80a9bebefb8b44625d9..fe186ac7e0999c8ebac9838543535048c06d8335 100644
 --- a/src/models/qwen3_5/program/program_impl.h
 +++ b/src/models/qwen3_5/program/program_impl.h
 @@ -5,6 +5,10 @@
@@ -5112,7 +5150,7 @@ index b82aeb3..fe186ac 100644
                                     std::uint32_t backend_tokens = 0);
  
 diff --git a/src/models/qwen3_5/program/round_buffers.cpp b/src/models/qwen3_5/program/round_buffers.cpp
-index df8be40..c9edc61 100644
+index df8be40d3daf562945b8ed73f61ccde597f20441..c9edc61dc37218733c7af162ee99c36a21a9ed26 100644
 --- a/src/models/qwen3_5/program/round_buffers.cpp
 +++ b/src/models/qwen3_5/program/round_buffers.cpp
 @@ -124,6 +124,7 @@ OrdinaryDecodeState::OrdinaryDecodeState(DeviceSpan backing,
@@ -5133,7 +5171,7 @@ index df8be40..c9edc61 100644
          ingress_tensor(offsetof(MtpDecodeIngress, remaining_budgets), DType::I32, {batch});
      current_extents =
 diff --git a/src/models/qwen3_5/program/round_buffers.h b/src/models/qwen3_5/program/round_buffers.h
-index e0cbd44..f5db2ff 100644
+index e0cbd446d939222e66f578deba47f777c30b84d0..f5db2ffc28c4bd99edf266ba6e1a4fac460cf76d 100644
 --- a/src/models/qwen3_5/program/round_buffers.h
 +++ b/src/models/qwen3_5/program/round_buffers.h
 @@ -40,6 +40,7 @@ struct RoundStateSpec {
@@ -5169,7 +5207,7 @@ index e0cbd44..f5db2ff 100644
      Tensor current_extents;
      Tensor target_valid_columns;
 diff --git a/src/models/qwen3_5/program/speculative/mtp.cpp b/src/models/qwen3_5/program/speculative/mtp.cpp
-index 7e2d63c..8828469 100644
+index 7e2d63cf1bbbde9ca482b82be1f8a046444160c8..8828469bd8e0e6adc2f71a3a6ccd440955051587 100644
 --- a/src/models/qwen3_5/program/speculative/mtp.cpp
 +++ b/src/models/qwen3_5/program/speculative/mtp.cpp
 @@ -31,6 +31,7 @@ void mtp_bridge_and_propose(PrefillContext& state, const Tensor& next_token,
@@ -5190,7 +5228,7 @@ index 7e2d63c..8828469 100644
                                       .licensed_tokens         = licensed_tokens,
                                       .licensed_counts         = licensed_counts,
 diff --git a/src/models/qwen3_5/program/speculative/target_verification.cpp b/src/models/qwen3_5/program/speculative/target_verification.cpp
-index 6624ef8..db9046a 100644
+index 6624ef8f7ab1d0a1deb7d2190eba09a8018a5475..db9046a5c6658e48fccdcb85273934301ba88dc2 100644
 --- a/src/models/qwen3_5/program/speculative/target_verification.cpp
 +++ b/src/models/qwen3_5/program/speculative/target_verification.cpp
 @@ -12,6 +12,7 @@ void target_verify_accept(ExecutionCore& execution, Tensor& continuation_hidden_
@@ -5202,7 +5240,7 @@ index 6624ef8..db9046a 100644
          card.target_verify_batch(frame.ids, frame.cache_positions, frame.rope_positions,
                                   frame.valid_columns, frame.kv_table_rows, frame.state_source_slots,
 diff --git a/src/models/qwen3_5/program/storage/context.cpp b/src/models/qwen3_5/program/storage/context.cpp
-index 9085edc..5e011c5 100644
+index 9085edcc7beaa3649711d7695784d2494dea7755..5e011c51e9c8589b8f5474932ac83868e1393715 100644
 --- a/src/models/qwen3_5/program/storage/context.cpp
 +++ b/src/models/qwen3_5/program/storage/context.cpp
 @@ -6,6 +6,8 @@
@@ -5277,7 +5315,7 @@ index 9085edc..5e011c5 100644
      sequence.dflash_context_frontier = 0;
 diff --git a/src/models/qwen3_5/program/storage/kvmem_window.cpp b/src/models/qwen3_5/program/storage/kvmem_window.cpp
 new file mode 100644
-index 0000000..2ccc9eb
+index 0000000000000000000000000000000000000000..2ccc9eb5e80640560aea66b6ca436ad6938fc1bb
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/kvmem_window.cpp
 @@ -0,0 +1,975 @@
@@ -6258,7 +6296,7 @@ index 0000000..2ccc9eb
 +} // namespace ninfer::models::qwen3_5::detail
 diff --git a/src/models/qwen3_5/program/storage/memory_snapshot.cpp b/src/models/qwen3_5/program/storage/memory_snapshot.cpp
 new file mode 100644
-index 0000000..00e839c
+index 0000000000000000000000000000000000000000..00e839c1c0ef3515974a643c333df2f1bff3e736
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/memory_snapshot.cpp
 @@ -0,0 +1,350 @@
@@ -6614,7 +6652,7 @@ index 0000000..00e839c
 +} // namespace ninfer::models::qwen3_5::detail
 diff --git a/src/models/qwen3_5/program/storage/memory_statistics.cpp b/src/models/qwen3_5/program/storage/memory_statistics.cpp
 new file mode 100644
-index 0000000..43e655a
+index 0000000000000000000000000000000000000000..43e655ac3f8e9f572f5d0fd5283879a84fc2ada4
 --- /dev/null
 +++ b/src/models/qwen3_5/program/storage/memory_statistics.cpp
 @@ -0,0 +1,145 @@
@@ -6764,7 +6802,7 @@ index 0000000..43e655a
 +}
 +} // namespace ninfer::models::qwen3_5::detail
 diff --git a/src/models/qwen3_5/program/storage/state_store.h b/src/models/qwen3_5/program/storage/state_store.h
-index 4b55fec..d649126 100644
+index 4b55fec491e2f2f15258fafff61f074c6973c1cc..d649126916bfc9370fc3a36dc69b26af90e607af 100644
 --- a/src/models/qwen3_5/program/storage/state_store.h
 +++ b/src/models/qwen3_5/program/storage/state_store.h
 @@ -184,6 +184,19 @@ public:
@@ -6788,7 +6826,7 @@ index 4b55fec..d649126 100644
          Object& object       = require_copied_destination(handle);
          object.content_epoch = next_epoch();
 diff --git a/src/models/qwen3_5/program/transactions/commit.cpp b/src/models/qwen3_5/program/transactions/commit.cpp
-index 0280b9f..9b2b70b 100644
+index 0280b9f5f02f36a9e8e5b0f2b12ae407672b6c26..9b2b70bb641e0a40bfef0e654524fb2e649bd76e 100644
 --- a/src/models/qwen3_5/program/transactions/commit.cpp
 +++ b/src/models/qwen3_5/program/transactions/commit.cpp
 @@ -240,6 +240,12 @@ void ProgramImpl::commit_generated_prefix_identity(
@@ -6890,7 +6928,7 @@ index 0280b9f..9b2b70b 100644
      out.timings     = request.timings;
      out.speculative = std::move(request.speculative_stats);
 diff --git a/src/models/qwen3_5/program/transactions/materialization.cpp b/src/models/qwen3_5/program/transactions/materialization.cpp
-index 22b2009..93043db 100644
+index 22b200945fea940d985630bda0daba7de9e514b7..93043db03917af98b349ddc64cee3de778c94586 100644
 --- a/src/models/qwen3_5/program/transactions/materialization.cpp
 +++ b/src/models/qwen3_5/program/transactions/materialization.cpp
 @@ -341,11 +341,14 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
@@ -6909,7 +6947,7 @@ index 22b2009..93043db 100644
          };
          request.prefill.emplace(std::move(prefill));
 diff --git a/src/models/qwen3_5/program_sources.cmake b/src/models/qwen3_5/program_sources.cmake
-index 9d19d56..3f9d314 100644
+index 9d19d569e24b2aa6ca0232dee76c83313a534a65..3f9d3142a71bbe0316ac3a8684c3a5f9ede771ac 100644
 --- a/src/models/qwen3_5/program_sources.cmake
 +++ b/src/models/qwen3_5/program_sources.cmake
 @@ -17,6 +17,9 @@ target_sources(ninfer_model_runtime PRIVATE
@@ -6923,7 +6961,7 @@ index 9d19d56..3f9d314 100644
    "${CMAKE_CURRENT_LIST_DIR}/program/storage/session_snapshot.cpp"
    "${CMAKE_CURRENT_LIST_DIR}/program/transactions/commit.cpp"
 diff --git a/src/ops/CMakeLists.txt b/src/ops/CMakeLists.txt
-index 1a52554..c3a64d9 100644
+index 1a52554e241fa0bf48191f6dc59baa33aa9c02ec..c3a64d9c924104a3886d527ac9454ca44e85f19e 100644
 --- a/src/ops/CMakeLists.txt
 +++ b/src/ops/CMakeLists.txt
 @@ -21,6 +21,7 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
@@ -6935,7 +6973,7 @@ index 1a52554..c3a64d9 100644
  include("${CMAKE_CURRENT_LIST_DIR}/candidate_selector/sources.cmake")
  include("${CMAKE_CURRENT_LIST_DIR}/context_kv_materialize/sources.cmake")
 diff --git a/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_fast.cu b/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_fast.cu
-index a37cb7b..0572a5e 100644
+index a37cb7b529466b7a13281a77ee9b954eacc407cd..0572a5e515edc733c51a34bf6f0a7de341c8b5cb 100644
 --- a/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_fast.cu
 +++ b/src/ops/softmax_attention/dense/causal_cache/prompt_nvfp4_fast.cu
 @@ -41,14 +41,14 @@ void launch_fast_for(const Tensor& q, const Tensor& positions, const Tensor* val
@@ -6961,14 +6999,14 @@ index a37cb7b..0572a5e 100644
                  static_cast<float2*>(partials.stats.data));
 diff --git a/src/ops/token_sums/sources.cmake b/src/ops/token_sums/sources.cmake
 new file mode 100644
-index 0000000..f14957b
+index 0000000000000000000000000000000000000000..f14957b3c31fe64f3f59b3e673a5755834f6d71c
 --- /dev/null
 +++ b/src/ops/token_sums/sources.cmake
 @@ -0,0 +1 @@
 +target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/token_sums.cu")
 diff --git a/src/ops/token_sums/token_sums.cu b/src/ops/token_sums/token_sums.cu
 new file mode 100644
-index 0000000..2babaf6
+index 0000000000000000000000000000000000000000..2babaf6c913138a59714e56977f2d210097a9220
 --- /dev/null
 +++ b/src/ops/token_sums/token_sums.cu
 @@ -0,0 +1,70 @@
@@ -7044,7 +7082,7 @@ index 0000000..2babaf6
 +} // namespace ninfer::ops
 diff --git a/src/product/cuda_memory_options.h b/src/product/cuda_memory_options.h
 new file mode 100644
-index 0000000..6aec9a7
+index 0000000000000000000000000000000000000000..6aec9a7edb679d64ccf32c70ff4bd68afdc7edb0
 --- /dev/null
 +++ b/src/product/cuda_memory_options.h
 @@ -0,0 +1,68 @@
@@ -7117,7 +7155,7 @@ index 0000000..6aec9a7
 +
 +} // namespace ninfer::product
 diff --git a/src/runtime/contract/request.h b/src/runtime/contract/request.h
-index e47e8d0..5cc761d 100644
+index e47e8d08b61e5b2b3473afada7c1943db9d7b68b..5cc761d8360dc2d2b0adf4c904ef20f1689db43d 100644
 --- a/src/runtime/contract/request.h
 +++ b/src/runtime/contract/request.h
 @@ -26,9 +26,12 @@ struct ResolvedExecutionOptions {
@@ -7134,7 +7172,7 @@ index e47e8d0..5cc761d 100644
      StopPolicy stop;
      OutputOptions output;
 diff --git a/src/runtime/engine/context_cache/resource_manager.h b/src/runtime/engine/context_cache/resource_manager.h
-index 294d68f..227f6d6 100644
+index 294d68f5e6698accb30e039c34c0f87fb03522af..227f6d6592326a2372117358cadea76bab30db5f 100644
 --- a/src/runtime/engine/context_cache/resource_manager.h
 +++ b/src/runtime/engine/context_cache/resource_manager.h
 @@ -373,6 +373,9 @@ public:
@@ -7148,7 +7186,7 @@ index 294d68f..227f6d6 100644
          for (std::uint32_t lane = 0; lane < lane_count_; ++lane) {
              if (lanes_[lane] == LogicalLaneState::Free) {
 diff --git a/src/runtime/engine/engine.cpp b/src/runtime/engine/engine.cpp
-index 2ed9abd..af00edc 100644
+index 2ed9abd759dc23c12a125b7bdb6ae356b855231e..af00edcbbb499d5a2be4d4030e446a1e5ccf40a6 100644
 --- a/src/runtime/engine/engine.cpp
 +++ b/src/runtime/engine/engine.cpp
 @@ -43,17 +43,6 @@ DeviceContext initialize_device(const EngineOptions& options) {
@@ -7267,7 +7305,7 @@ index 2ed9abd..af00edc 100644
  
  bool Engine::is_available() const {
 diff --git a/src/runtime/engine/engine_core.h b/src/runtime/engine/engine_core.h
-index 33abd54..1304e85 100644
+index 33abd5406bcb855984ede5e0e9e344ab992b1aa6..1304e855d57d00a176ce709caa675078a9987b98 100644
 --- a/src/runtime/engine/engine_core.h
 +++ b/src/runtime/engine/engine_core.h
 @@ -3,6 +3,7 @@
@@ -7375,7 +7413,7 @@ index 33abd54..1304e85 100644
      const bool branch_anchors_;
      const bool endpoint_anchors_;
 diff --git a/src/runtime/engine/kv_capacity.cpp b/src/runtime/engine/kv_capacity.cpp
-index 9850bbd..bc30fb4 100644
+index 9850bbd4f061e805d24246a331abb48a04416362..bc30fb482d778cc43b1b193dcbcf369ce48996b8 100644
 --- a/src/runtime/engine/kv_capacity.cpp
 +++ b/src/runtime/engine/kv_capacity.cpp
 @@ -222,4 +222,63 @@ KvCapacityResolution resolve_kv_capacity(const KvCapacityPolicy& policy,
@@ -7443,7 +7481,7 @@ index 9850bbd..bc30fb4 100644
 +
  } // namespace ninfer::runtime
 diff --git a/src/runtime/engine/kv_capacity.h b/src/runtime/engine/kv_capacity.h
-index c056b1f..5332603 100644
+index c056b1f50025966fc6f804d680d2977ff73ae57a..5332603b7fa60096b0081b9fdebc008a981c4af2 100644
 --- a/src/runtime/engine/kv_capacity.h
 +++ b/src/runtime/engine/kv_capacity.h
 @@ -16,4 +16,13 @@ resolve_kv_capacity(const KvCapacityPolicy& policy, const SequenceCapacityCurve&
@@ -7461,7 +7499,7 @@ index c056b1f..5332603 100644
 +
  } // namespace ninfer::runtime
 diff --git a/src/runtime/engine/model_instance.cpp b/src/runtime/engine/model_instance.cpp
-index b4bb644..003d15b 100644
+index b4bb6440f6a7ea17f23a07ee0e1107198b528f1a..003d15ba052aa1a40aeacc0986fc40149e7e3de9 100644
 --- a/src/runtime/engine/model_instance.cpp
 +++ b/src/runtime/engine/model_instance.cpp
 @@ -8,6 +8,7 @@
@@ -7922,7 +7960,7 @@ index b4bb644..003d15b 100644
      const auto& stats = instance->model->storage_stats();
      LoadSummary summary;
 diff --git a/src/runtime/engine/model_instance.h b/src/runtime/engine/model_instance.h
-index cd7f87b..53c6ada 100644
+index cd7f87b002f20171e1106953d61a44411b3e15bf..53c6adac16c5487790f19fd6b1aaae9517fbc49a 100644
 --- a/src/runtime/engine/model_instance.h
 +++ b/src/runtime/engine/model_instance.h
 @@ -6,6 +6,7 @@
@@ -7943,7 +7981,7 @@ index cd7f87b..53c6ada 100644
      const models::qwen3_5::execution::Parameters parameters;
      models::qwen3_5::Frontend frontend;
 diff --git a/src/runtime/engine/qwen4_exp_core.cpp b/src/runtime/engine/qwen4_exp_core.cpp
-index 8a2ae2b..b5d2e4b 100644
+index 8a2ae2b30cba6f3a8cc9a7b44dcf443ce633f827..b5d2e4bbf24a40f9c78b28ce67d4b790043ba304 100644
 --- a/src/runtime/engine/qwen4_exp_core.cpp
 +++ b/src/runtime/engine/qwen4_exp_core.cpp
 @@ -339,7 +339,7 @@ struct Qwen4ExpCore::Impl {
@@ -7966,7 +8004,7 @@ index 8a2ae2b..b5d2e4b 100644
      request->options                          = std::move(options);
 diff --git a/src/runtime/speculative_limits.h b/src/runtime/speculative_limits.h
 new file mode 100644
-index 0000000..f3f0ba1
+index 0000000000000000000000000000000000000000..f3f0ba12ef0d63081f442aac893ecb90ae2e53f4
 --- /dev/null
 +++ b/src/runtime/speculative_limits.h
 @@ -0,0 +1,18 @@
@@ -7989,7 +8027,7 @@ index 0000000..f3f0ba1
 +
 +} // namespace ninfer::runtime
 diff --git a/src/serve/anthropic_messages_request.cpp b/src/serve/anthropic_messages_request.cpp
-index 20ef6e2..d6bea8d 100644
+index 20ef6e25974c1b5a2060aa8057c7d92e060c7ce2..d6bea8d3d1b31774f904773dea8b6fdb2237face 100644
 --- a/src/serve/anthropic_messages_request.cpp
 +++ b/src/serve/anthropic_messages_request.cpp
 @@ -784,6 +784,7 @@ std::vector<ParsedTool> parse_tool_definitions(const Json& body) {
@@ -8046,7 +8084,7 @@ index 20ef6e2..d6bea8d 100644
  
 diff --git a/src/serve/cuda_residency_json.h b/src/serve/cuda_residency_json.h
 new file mode 100644
-index 0000000..b3913db
+index 0000000000000000000000000000000000000000..b3913db7ca9028fa54bcfffb92fcb403b46fffcc
 --- /dev/null
 +++ b/src/serve/cuda_residency_json.h
 @@ -0,0 +1,23 @@
@@ -8074,7 +8112,7 @@ index 0000000..b3913db
 +
 +} // namespace ninfer::serve
 diff --git a/src/serve/generation_service.cpp b/src/serve/generation_service.cpp
-index 30ecf02..277c740 100644
+index 30ecf02b267c77ff1e725ef6f245a0210bfb94bc..277c740c7bb3b2c41aea9e68e2b738468f20d848 100644
 --- a/src/serve/generation_service.cpp
 +++ b/src/serve/generation_service.cpp
 @@ -56,6 +56,11 @@ ApiError request_error_to_api_error(const ninfer::RequestError& exception) {
@@ -8108,7 +8146,7 @@ index 30ecf02..277c740 100644
      engine_options.mlp_a8_decode            = options.mlp_a8_decode;
      engine_options.prefill_a8               = options.prefill_a8;
 diff --git a/src/serve/http_server.cpp b/src/serve/http_server.cpp
-index f078f6b..178cdf2 100644
+index f078f6b21321baa69015e3b235c2df30a7befcde..178cdf227102d7fd52dd6e2ba2b8e0e2662f49b9 100644
 --- a/src/serve/http_server.cpp
 +++ b/src/serve/http_server.cpp
 @@ -4,6 +4,7 @@
@@ -8164,7 +8202,7 @@ index f078f6b..178cdf2 100644
  
 diff --git a/src/serve/kvmem_status_json.h b/src/serve/kvmem_status_json.h
 new file mode 100644
-index 0000000..77812b7
+index 0000000000000000000000000000000000000000..77812b7099b11dc6cf930a6d21b57d34e1b8ce73
 --- /dev/null
 +++ b/src/serve/kvmem_status_json.h
 @@ -0,0 +1,22 @@
@@ -8191,7 +8229,7 @@ index 0000000..77812b7
 +}
 +} // namespace ninfer::serve
 diff --git a/src/serve/load_report.cpp b/src/serve/load_report.cpp
-index 3870cb4..cb71e1b 100644
+index 3870cb4ff6acf52e59e38f9079483eb563d3ec17..cb71e1b64bc5265a6682281739c6d95489bead1b 100644
 --- a/src/serve/load_report.cpp
 +++ b/src/serve/load_report.cpp
 @@ -1,4 +1,6 @@
@@ -8218,10 +8256,31 @@ index 3870cb4..cb71e1b 100644
          .interval_seconds = std::isfinite(sample.uptime_seconds) ? sample.uptime_seconds : 0.0,
          .computed_prefill_tokens = stats.computed_prefill_tokens,
 diff --git a/src/serve/openai_chat_request.cpp b/src/serve/openai_chat_request.cpp
-index c8277d4..4ba5d9d 100644
+index c8277d419ce722d59c57d550524358771b5e45d6..10dde595bcc65d67e72bc8e560364f3b9c7bb759 100644
 --- a/src/serve/openai_chat_request.cpp
 +++ b/src/serve/openai_chat_request.cpp
-@@ -693,26 +693,18 @@ void parse_tools(const Json& body, GenerationRequest& output) {
+@@ -265,19 +265,7 @@ ninfer::product::media_acquire::Source parse_media_url(const Json& part, const c
+             bad_request(std::string(field) + " must contain a string url", "messages");
+         }
+         url = value.at("url").get<std::string>();
+-        if (image && value.contains("detail") && !value.at("detail").is_null()) {
+-            if (!value.at("detail").is_string()) {
+-                bad_request("image_url.detail must be a string", "messages");
+-            }
+-            const std::string detail = value.at("detail").get<std::string>();
+-            if (detail != "auto") {
+-                bad_request(
+-                    "image_url.detail='" + detail +
+-                        "' requests an explicit preprocessing profile that NInfer's fixed Vision "
+-                        "frontend cannot apply; use 'auto'",
+-                    "messages", "image_detail_not_supported");
+-            }
+-        }
++        if (image) { validate_openai_image_detail(value, "image_url.detail", "messages"); }
+     } else {
+         bad_request(std::string(field) + " must be a URL string or object", "messages");
+     }
+@@ -693,26 +681,18 @@ void parse_tools(const Json& body, GenerationRequest& output) {
              if (!function.at("strict").is_boolean()) {
                  bad_request("function strict must be a boolean", prefix + ".function.strict");
              }
@@ -8252,7 +8311,7 @@ index c8277d4..4ba5d9d 100644
  }
  
  void apply_allowed_tools(const Json& config, GenerationRequest& output) {
-@@ -758,13 +750,10 @@ void apply_allowed_tools(const Json& config, GenerationRequest& output) {
+@@ -758,13 +738,10 @@ void apply_allowed_tools(const Json& config, GenerationRequest& output) {
          }
      }
  
@@ -8268,7 +8327,7 @@ index c8277d4..4ba5d9d 100644
      }
  }
  
-@@ -779,7 +768,7 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
+@@ -779,7 +756,7 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
              output.tool_choice.mode = ToolChoiceMode::None;
          } else if (value == "required") {
              output.tool_choice.mode = ToolChoiceMode::Auto;
@@ -8277,7 +8336,7 @@ index c8277d4..4ba5d9d 100644
          } else {
              bad_request("tool_choice must be 'auto', 'none', 'required', or a function choice",
                          "tool_choice");
-@@ -806,14 +795,18 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
+@@ -806,14 +783,18 @@ void parse_tool_choice(const Json& body, GenerationRequest& output) {
              }
              output.tool_choice.mode        = ToolChoiceMode::Auto;
              output.tool_choice.forced_name = name;
@@ -8299,7 +8358,7 @@ index c8277d4..4ba5d9d 100644
          } else {
              bad_request("unsupported tool_choice type: " + type, "tool_choice");
          }
-@@ -829,10 +822,7 @@ void parse_parallel_tool_calls(const Json& body, GenerationRequest& output) {
+@@ -829,10 +810,7 @@ void parse_parallel_tool_calls(const Json& body, GenerationRequest& output) {
      if (!body.at("parallel_tool_calls").is_boolean()) {
          bad_request("parallel_tool_calls must be a boolean", "parallel_tool_calls");
      }
@@ -8311,7 +8370,7 @@ index c8277d4..4ba5d9d 100644
      output.parallel_tool_calls = body.at("parallel_tool_calls").get<bool>();
  }
  
-@@ -999,6 +989,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
+@@ -999,6 +977,7 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
  
      parse_tools(body, output.generation);
      parse_tool_choice(body, output.generation);
@@ -8319,11 +8378,68 @@ index c8277d4..4ba5d9d 100644
      parse_parallel_tool_calls(body, output.generation);
      parse_messages(body, limits.assistant_prefill, output.generation);
      parse_stop(body, output.generation);
+diff --git a/src/serve/openai_common.cpp b/src/serve/openai_common.cpp
+index 2dcb4548d8fc0f5986eb6b40d3cf51a2128c9654..bf08c46635106b8f9a7a4f74ad2a68896da6135e 100644
+--- a/src/serve/openai_common.cpp
++++ b/src/serve/openai_common.cpp
+@@ -137,6 +137,19 @@ bool parse_openai_prompt_cache_breakpoint(const RequestJson& value, std::string_
+     return true;
+ }
+ 
++void validate_openai_image_detail(const RequestJson& image, std::string_view field,
++                                  std::string_view param) {
++    if (!image.contains("detail") || image.at("detail").is_null()) { return; }
++    if (!image.at("detail").is_string()) {
++        bad_request(std::string(field) + " must be a string", std::string(param));
++    }
++    const std::string& detail = image.at("detail").get_ref<const std::string&>();
++    if (detail != "auto" && detail != "low" && detail != "high" && detail != "original") {
++        bad_request(std::string(field) + " must be 'auto', 'low', 'high', or 'original'",
++                    std::string(param), "invalid_value");
++    }
++}
++
+ OpenAIPromptCachePolicy parse_openai_prompt_cache_policy(const RequestJson& body) {
+     auto require_string_hint = [&](const char* field, std::optional<std::size_t> maximum = {}) {
+         if (!body.contains(field) || body.at(field).is_null()) { return; }
+diff --git a/src/serve/openai_common.h b/src/serve/openai_common.h
+index ab01274c8a1f315ae3e86d0d48250cd990d3b114..d7927525b9b07fb98c2b665f8743ede535cf9edc 100644
+--- a/src/serve/openai_common.h
++++ b/src/serve/openai_common.h
+@@ -30,6 +30,11 @@ struct OpenAIPromptCachePolicy {
+ [[nodiscard]] OpenAIPromptCachePolicy parse_openai_prompt_cache_policy(const RequestJson& body);
+ void apply_openai_prompt_cache_policy(GenerationRequest& request, OpenAIPromptCachePolicy policy);
+ 
++// Recognized image detail levels all use the fixed, startup-configured Vision preprocessing.
++// Validate the wire value before lowering it to that same effective "auto" behavior.
++void validate_openai_image_detail(const RequestJson& image, std::string_view field,
++                                  std::string_view param);
++
+ // True for OpenAI tool types the *server* would have executed - hosted search, hosted code
+ // execution, hosted file search and the like. NInfer has no executor for any of them, and a client
+ // never waits on one itself, so declaring one is silently dropped rather than failing the request:
 diff --git a/src/serve/openai_responses_request.cpp b/src/serve/openai_responses_request.cpp
-index 3ba42f0..5e0e0be 100644
+index 3ba42f01dc15452752c2cef8953e64d9874e5e7a..444aec61475734a925a00a2f653d3bb8b9d4a981 100644
 --- a/src/serve/openai_responses_request.cpp
 +++ b/src/serve/openai_responses_request.cpp
-@@ -752,11 +752,7 @@ parse_function_tool(const Json& item, std::optional<std::string> wire_namespace,
+@@ -134,15 +134,7 @@ ninfer::product::media_acquire::Source parse_image_source(const Json& part) {
+         part.at("image_url").get_ref<const std::string&>().empty()) {
+         bad_request("input_image must contain a non-empty image_url", "input");
+     }
+-    if (part.contains("detail") && !part.at("detail").is_null()) {
+-        if (!part.at("detail").is_string()) {
+-            bad_request("input_image.detail must be a string", "input");
+-        }
+-        if (part.at("detail").get<std::string>() != "auto") {
+-            bad_request("only input_image detail 'auto' is supported", "input",
+-                        "image_detail_not_supported");
+-        }
+-    }
++    validate_openai_image_detail(part, "input_image.detail", "input");
+ 
+     ninfer::product::media_acquire::Source source;
+     source.value = part.at("image_url").get<std::string>();
+@@ -752,11 +744,7 @@ parse_function_tool(const Json& item, std::optional<std::string> wire_namespace,
          if (!item.at("strict").is_boolean()) {
              bad_request("function strict must be a boolean", "tools");
          }
@@ -8336,7 +8452,7 @@ index 3ba42f0..5e0e0be 100644
      }
      if (item.contains("defer_loading") && !item.at("defer_loading").is_null()) {
          if (!item.at("defer_loading").is_boolean()) {
-@@ -793,7 +789,7 @@ parse_function_tool(const Json& item, std::optional<std::string> wire_namespace,
+@@ -793,7 +781,7 @@ parse_function_tool(const Json& item, std::optional<std::string> wire_namespace,
      parsed.canonical                    = {{"type", "function"},
                                             {"name", identity.name},
                                             {"parameters", parameters},
@@ -8345,7 +8461,7 @@ index 3ba42f0..5e0e0be 100644
      if (!function_description.empty()) {
          parsed.canonical["description"] = std::move(function_description);
      }
-@@ -884,15 +880,10 @@ void parse_tools(const Json& body, ParsedPromptFields& out) {
+@@ -884,15 +872,10 @@ void parse_tools(const Json& body, ParsedPromptFields& out) {
  // A forced choice is executed by writing the call opener into the generation prompt, and that
  // opener carries the function name. One callable tool determines the name; several leave it to the
  // model, which is the part NInfer cannot constrain.
@@ -8363,7 +8479,7 @@ index 3ba42f0..5e0e0be 100644
  }
  
  void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
-@@ -933,14 +924,9 @@ void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
+@@ -933,14 +916,9 @@ void filter_allowed_tools(const Json& choice, ParsedPromptFields& out) {
          selected.insert(name);
      }
  
@@ -8380,7 +8496,7 @@ index 3ba42f0..5e0e0be 100644
      }
  }
  
-@@ -958,7 +944,7 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
+@@ -958,7 +936,7 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
              out.prompt.generation.tool_choice.mode = ToolChoiceMode::None;
          } else if (value == "required") {
              out.prompt.generation.tool_choice.mode = ToolChoiceMode::Auto;
@@ -8389,7 +8505,7 @@ index 3ba42f0..5e0e0be 100644
          } else {
              bad_request("tool_choice must be 'auto', 'none', or a supported object", "tool_choice");
          }
-@@ -987,6 +973,7 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
+@@ -987,6 +965,7 @@ void parse_tool_choice(const Json& body, ParsedPromptFields& out) {
          }
          out.prompt.generation.tool_choice.mode        = ToolChoiceMode::Auto;
          out.prompt.generation.tool_choice.forced_name = name;
@@ -8397,7 +8513,7 @@ index 3ba42f0..5e0e0be 100644
          out.wire_tool_choice                          = choice;
          return;
      }
-@@ -1137,6 +1124,7 @@ ParsedPromptFields parse_prompt_fields(const Json& body, const RequestLimits& li
+@@ -1137,6 +1116,7 @@ ParsedPromptFields parse_prompt_fields(const Json& body, const RequestLimits& li
  
      parse_tools(body, out);
      parse_tool_choice(body, out);
@@ -8405,7 +8521,7 @@ index 3ba42f0..5e0e0be 100644
      out.parallel_tool_calls = optional_bool(body, "parallel_tool_calls", true);
      // Honoured by trimming the response to one tool call rather than refused; see the chat parser.
      out.prompt.generation.parallel_tool_calls = out.parallel_tool_calls;
-@@ -1257,6 +1245,7 @@ void validate_common_top_level(const Json& body, bool create) {
+@@ -1257,6 +1237,7 @@ void validate_common_top_level(const Json& body, bool create) {
                                                                    "text",
                                                                    "thinking_budget",
                                                                    "tool_choice",
@@ -8413,7 +8529,7 @@ index 3ba42f0..5e0e0be 100644
                                                                    "tools",
                                                                    "top_logprobs",
                                                                    "top_p",
-@@ -1275,6 +1264,7 @@ void validate_common_top_level(const Json& body, bool create) {
+@@ -1275,6 +1256,7 @@ void validate_common_top_level(const Json& body, bool create) {
                                                                    "reasoning",
                                                                    "text",
                                                                    "tool_choice",
@@ -8422,7 +8538,7 @@ index 3ba42f0..5e0e0be 100644
                                                                    "truncation"};
      const auto& allowed = create ? create_fields : count_fields;
 diff --git a/src/serve/request.h b/src/serve/request.h
-index 89246fe..76e77b7 100644
+index 89246fedeb2c88e954a0c94baddb4d2eae9f8611..76e77b7d7d0c5db7cdf2414cdbb34c3aa9fc6116 100644
 --- a/src/serve/request.h
 +++ b/src/serve/request.h
 @@ -88,6 +88,7 @@ struct ToolDefinition {
@@ -8450,7 +8566,7 @@ index 89246fe..76e77b7 100644
      // exactly one callable tool. Empty leaves the choice to the model.
      std::string forced_name;
 diff --git a/src/serve/request_log.cpp b/src/serve/request_log.cpp
-index e9c5298..78c6dee 100644
+index e9c52989d4dec763e3dd744615ee55d1dcb09be0..78c6dee59ad1596d3d5b932dabc3622e36ee3a3f 100644
 --- a/src/serve/request_log.cpp
 +++ b/src/serve/request_log.cpp
 @@ -1,4 +1,6 @@
@@ -8492,7 +8608,7 @@ index e9c5298..78c6dee 100644
               {"workspace", arena_json(memory.workspace)},
               {"vision_workspace", vision_workspace_json(memory.vision_workspace)},
 diff --git a/src/serve/request_validation.cpp b/src/serve/request_validation.cpp
-index 9b67a8d..cccc0b2 100644
+index 9b67a8de94e2c14cfd02e0411d5bc35a674ff255..cccc0b25c2a295bbab58876b7b474368019bb152 100644
 --- a/src/serve/request_validation.cpp
 +++ b/src/serve/request_validation.cpp
 @@ -19,6 +19,14 @@ namespace ninfer::serve {
@@ -8511,7 +8627,7 @@ index 9b67a8d..cccc0b2 100644
      if (!object.contains(key) || object.at(key).is_null()) { return std::nullopt; }
      const RequestJson& value = object.at(key);
 diff --git a/src/serve/request_validation.h b/src/serve/request_validation.h
-index 44457ed..a7aac55 100644
+index 44457ed0408b4bf33d81a75656b50d832e8bfe8b..a7aac55d77cbfad1d7d2184e37bfc9414b37240e 100644
 --- a/src/serve/request_validation.h
 +++ b/src/serve/request_validation.h
 @@ -27,6 +27,8 @@ std::optional<std::string> parse_graft_field(const RequestJson& body);
@@ -8524,7 +8640,7 @@ index 44457ed..a7aac55 100644
  
  // An optional `post_thinking` object: temperature (up to `max_temperature`), top_p, top_k, min_p,
 diff --git a/src/serve/serve_options.cpp b/src/serve/serve_options.cpp
-index 64933ec..bd7ea81 100644
+index 64933ec105665b52e01c83f29acd1216e043c693..bd7ea810a5a565562faaad50e6c9fc0092a5d69c 100644
 --- a/src/serve/serve_options.cpp
 +++ b/src/serve/serve_options.cpp
 @@ -1,4 +1,6 @@
@@ -8892,7 +9008,7 @@ index 64933ec..bd7ea81 100644
  }
  
 diff --git a/src/serve/serve_options.h b/src/serve/serve_options.h
-index a8bb9f3..6b9b1d6 100644
+index a8bb9f3aacb0c026ae11bf9b3c2e538e5a4121ec..6b9b1d612f99cc9d481334cfa3c35a761adb4a0f 100644
 --- a/src/serve/serve_options.h
 +++ b/src/serve/serve_options.h
 @@ -19,6 +19,8 @@ inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;
@@ -8923,7 +9039,7 @@ index a8bb9f3..6b9b1d6 100644
      // device memory.
      ModelSuspendOptions suspend;
 diff --git a/src/serve/translate.cpp b/src/serve/translate.cpp
-index 4b33594..01d1ee9 100644
+index 4b335940410e15427c16a1262c416833f4054246..01d1ee983faa132e88761bc8d689b5886b2b4ea9 100644
 --- a/src/serve/translate.cpp
 +++ b/src/serve/translate.cpp
 @@ -119,7 +119,7 @@ resolve_post_thinking_overrides(const std::optional<SamplingParams>& request,
@@ -9009,7 +9125,7 @@ index 4b33594..01d1ee9 100644
          (request.uses_tools() || request.has_tool_history());
      options.output.tool_name_max_length = static_cast<std::uint32_t>(request.tool_name_max_length);
 diff --git a/src/text/structured_output.cpp b/src/text/structured_output.cpp
-index 491e297..34cbdcf 100644
+index 491e2970209fdf40d200274607864f32d8ea979e..34cbdcf87b1cf2c1fd52ea853ec75a121d4dd8f4 100644
 --- a/src/text/structured_output.cpp
 +++ b/src/text/structured_output.cpp
 @@ -391,4 +391,32 @@ StructuredCompiler::compile(const StructuredOutputOptions& options,
@@ -9046,7 +9162,7 @@ index 491e297..34cbdcf 100644
 +}
  } // namespace ninfer::text
 diff --git a/src/text/structured_output.h b/src/text/structured_output.h
-index f5c78a1..9b8ec97 100644
+index f5c78a177554ae8164f960ad7ad344639dc4dfe3..9b8ec97bacfa14cc13cf4730ccba34302fedbfac 100644
 --- a/src/text/structured_output.h
 +++ b/src/text/structured_output.h
 @@ -39,6 +39,10 @@ public:
@@ -9061,7 +9177,7 @@ index f5c78a1..9b8ec97 100644
      struct Impl;
      std::unique_ptr<Impl> impl_;
 diff --git a/src/text/unique_strings.cpp b/src/text/unique_strings.cpp
-index 59ef9fd..596321b 100644
+index 59ef9fdcc510f6f74b9b741ac4096e894b2f6ef8..596321bde5606296a17a442f36f7d9ce6b6b7046 100644
 --- a/src/text/unique_strings.cpp
 +++ b/src/text/unique_strings.cpp
 @@ -495,7 +495,7 @@ struct Parser {
@@ -9074,7 +9190,7 @@ index 59ef9fd..596321b 100644
              }
              ++parent.count;
 diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
-index e50c356..a84a5b2 100644
+index e50c356496b38df589bf4132db6d5ae93a583555..336e29f11ab38b9f2bd4426e86ff015b5c8aae00 100644
 --- a/tests/CMakeLists.txt
 +++ b/tests/CMakeLists.txt
 @@ -8,10 +8,21 @@ include(cmake/ProductTests.cmake)
@@ -9099,7 +9215,7 @@ index e50c356..a84a5b2 100644
  # Exit code 77 is a skip for every test (tests/cuda_availability.h). Without a usable CUDA device --
  # no GPU, no driver, or only the toolkit's stub driver, as on a CI runner -- a test that has no check
  # of its own fails on its first CUDA call with one of these runtime messages; report that as skipped
-@@ -20,8 +31,97 @@ ninfer_finalize_bundle(ninfer_tests)
+@@ -20,8 +31,101 @@ ninfer_finalize_bundle(ninfer_tests)
  get_property(_ninfer_all_tests DIRECTORY PROPERTY TESTS)
  set_tests_properties(${_ninfer_all_tests} PROPERTIES SKIP_RETURN_CODE 77 SKIP_REGULAR_EXPRESSION
    "CUDA driver is a stub library;no CUDA-capable device is detected;CUDA driver version is insufficient for CUDA runtime version")
@@ -9179,10 +9295,14 @@ index e50c356..a84a5b2 100644
 +ninfer_stage_runtime_dlls(ninfer_p4_quality)
 +
 +set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_kvmem_product_tests_PROGRAMS
-+  ninfer_serve_options_test ninfer_openai_schema_test ninfer_load_report_test
-+  ninfer_resource_manager_test)
++  ninfer_serve_options_test ninfer_openai_schema_test ninfer_openai_responses_test
++  ninfer_openai_responses_store_test ninfer_load_report_test ninfer_resource_manager_test)
 +ninfer_finalize_bundle(ninfer_kvmem_product_tests)
 +ninfer_stage_runtime_dlls(ninfer_kvmem_product_tests)
++add_test(NAME ninfer_openai_image_detail_chat_test
++  COMMAND ninfer_kvmem_product_tests ninfer_openai_schema_test --image-detail-only)
++add_test(NAME ninfer_openai_image_detail_responses_test
++  COMMAND ninfer_kvmem_product_tests ninfer_openai_responses_test --image-detail-only)
 +
 +# Reuse only the GGUF numerical test object for the focused format qualification.
 +set_property(GLOBAL PROPERTY NINFER_BUNDLE_ninfer_migration_gguf_tests_PROGRAMS
@@ -9198,7 +9318,7 @@ index e50c356..a84a5b2 100644
 +ninfer_finalize_bundle(ninfer_kvmem_nvfp4_tests)
 +ninfer_stage_runtime_dlls(ninfer_kvmem_nvfp4_tests)
 diff --git a/tests/README.md b/tests/README.md
-index da721c5..82d4876 100644
+index da721c59a23b167ff4f2c7eeeec14a554f8b3073..82d4876c963fb2dd0216c7cc6ac2209311efff0e 100644
 --- a/tests/README.md
 +++ b/tests/README.md
 @@ -351,6 +351,107 @@ boundary preservation. `--concurrency 8 --draft-tokens 15 --modes dflash2` exerc
@@ -9453,7 +9573,7 @@ index da721c5..82d4876 100644
 +and more decode row-rounds than decode rounds; exact token/byte/resource checks remain unchanged.
 +See the [fast-prefill report](../../../docs/fast-prefill-admission-validation-20261006.md).
 diff --git a/tests/artifact/test_materialization.cpp b/tests/artifact/test_materialization.cpp
-index 4fcd61b..7cccc59 100644
+index 4fcd61b237096e5a6f84ce2d800b7432b71b0da7..7cccc59f93d6eced7d475d37a92bfe78035ad0d5 100644
 --- a/tests/artifact/test_materialization.cpp
 +++ b/tests/artifact/test_materialization.cpp
 @@ -10,6 +10,7 @@
@@ -9571,7 +9691,7 @@ index 4fcd61b..7cccc59 100644
          ninfer::test::materialization_cuda_errors(device);
  #else
 diff --git a/tests/artifact/writer_interop.py b/tests/artifact/writer_interop.py
-index bab48b4..fa53426 100644
+index bab48b4b52f22ff615fffe6b897d47c0ffe24953..fa53426ace93322f6d7f07561fc8e0c1fd1cddb4 100644
 --- a/tests/artifact/writer_interop.py
 +++ b/tests/artifact/writer_interop.py
 @@ -9,6 +9,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -9605,7 +9725,7 @@ index bab48b4..fa53426 100644
  
  if __name__ == "__main__":
 diff --git a/tests/convert/test_gguf_blocks.py b/tests/convert/test_gguf_blocks.py
-index 5e8f824..4f33551 100644
+index 5e8f824da6962b08807f1ff6a9a0009bf6e882e2..4f335513a4f79361762fb029d9ed0ab713e2ba91 100644
 --- a/tests/convert/test_gguf_blocks.py
 +++ b/tests/convert/test_gguf_blocks.py
 @@ -1,5 +1,8 @@
@@ -9729,7 +9849,7 @@ index 5e8f824..4f33551 100644
 +        actual = source.rows(0, 48).view(torch.int16).numpy().view(np.uint16)
 +        assert np.array_equal(actual, expected)
 diff --git a/tests/convert/test_ternary.py b/tests/convert/test_ternary.py
-index 53fe913..c890d64 100644
+index 53fe91302de61b5e3f9d570543dcc54b375989c6..c890d64fbccdfe5638c7d66f7aa85b869c474971 100644
 --- a/tests/convert/test_ternary.py
 +++ b/tests/convert/test_ternary.py
 @@ -1,31 +1,36 @@
@@ -9777,7 +9897,7 @@ index 53fe913..c890d64 100644
          words = source.read_encoded(2, 7)
 diff --git a/tests/experimental/kvmem_test_options.h b/tests/experimental/kvmem_test_options.h
 new file mode 100644
-index 0000000..42a5eee
+index 0000000000000000000000000000000000000000..42a5eee03d1418dc8c1f30e54ed72f95a556da0d
 --- /dev/null
 +++ b/tests/experimental/kvmem_test_options.h
 @@ -0,0 +1,68 @@
@@ -9851,7 +9971,7 @@ index 0000000..42a5eee
 +} // namespace ninfer::test
 diff --git a/tests/experimental/memory_concurrency.cpp b/tests/experimental/memory_concurrency.cpp
 new file mode 100644
-index 0000000..7b88a46
+index 0000000000000000000000000000000000000000..7b88a46d2450d7aedaf31de3abcca4cba309238a
 --- /dev/null
 +++ b/tests/experimental/memory_concurrency.cpp
 @@ -0,0 +1,280 @@
@@ -10137,7 +10257,7 @@ index 0000000..7b88a46
 +}
 diff --git a/tests/experimental/memory_disk.cpp b/tests/experimental/memory_disk.cpp
 new file mode 100644
-index 0000000..5f16a28
+index 0000000000000000000000000000000000000000..5f16a2863f77d60a373ba7ff8f03ac70f88e4407
 --- /dev/null
 +++ b/tests/experimental/memory_disk.cpp
 @@ -0,0 +1,133 @@
@@ -10276,7 +10396,7 @@ index 0000000..5f16a28
 +}
 diff --git a/tests/experimental/memory_ngram.cpp b/tests/experimental/memory_ngram.cpp
 new file mode 100644
-index 0000000..a9f591a
+index 0000000000000000000000000000000000000000..a9f591a5073796b4a2c4d9c95d88bc9366d1ba62
 --- /dev/null
 +++ b/tests/experimental/memory_ngram.cpp
 @@ -0,0 +1,366 @@
@@ -10648,7 +10768,7 @@ index 0000000..a9f591a
 +}
 diff --git a/tests/experimental/memory_sessions.cpp b/tests/experimental/memory_sessions.cpp
 new file mode 100644
-index 0000000..fc8af13
+index 0000000000000000000000000000000000000000..fc8af13033606cb373ec4f2cb54b24106b6de7fd
 --- /dev/null
 +++ b/tests/experimental/memory_sessions.cpp
 @@ -0,0 +1,124 @@
@@ -10778,7 +10898,7 @@ index 0000000..fc8af13
 +}
 diff --git a/tests/experimental/memory_vision.cpp b/tests/experimental/memory_vision.cpp
 new file mode 100644
-index 0000000..0b7aadd
+index 0000000000000000000000000000000000000000..0b7aadd9ae3776ad42e505643b29b77286e94e40
 --- /dev/null
 +++ b/tests/experimental/memory_vision.cpp
 @@ -0,0 +1,266 @@
@@ -11050,7 +11170,7 @@ index 0000000..0b7aadd
 +}
 diff --git a/tests/experimental/migration_concurrency.cpp b/tests/experimental/migration_concurrency.cpp
 new file mode 100644
-index 0000000..ac81672
+index 0000000000000000000000000000000000000000..ac816726c383013471f88808d633d2d820f7014d
 --- /dev/null
 +++ b/tests/experimental/migration_concurrency.cpp
 @@ -0,0 +1,81 @@
@@ -11137,7 +11257,7 @@ index 0000000..ac81672
 +}
 diff --git a/tests/experimental/p1_engine.cpp b/tests/experimental/p1_engine.cpp
 new file mode 100644
-index 0000000..eee5674
+index 0000000000000000000000000000000000000000..eee56744a0ce72bd09681b0980f138a60bd340cf
 --- /dev/null
 +++ b/tests/experimental/p1_engine.cpp
 @@ -0,0 +1,99 @@
@@ -11242,7 +11362,7 @@ index 0000000..eee5674
 +}
 diff --git a/tests/experimental/p1_options.cpp b/tests/experimental/p1_options.cpp
 new file mode 100644
-index 0000000..203ca3b
+index 0000000000000000000000000000000000000000..203ca3b9833cd1dcf45b9476b262be14bcdd4973
 --- /dev/null
 +++ b/tests/experimental/p1_options.cpp
 @@ -0,0 +1,411 @@
@@ -11659,7 +11779,7 @@ index 0000000..203ca3b
 +}
 diff --git a/tests/experimental/p1_payload.cpp b/tests/experimental/p1_payload.cpp
 new file mode 100644
-index 0000000..47cdb8f
+index 0000000000000000000000000000000000000000..47cdb8fcdff6e7f7baff94888d7efe545f3d53db
 --- /dev/null
 +++ b/tests/experimental/p1_payload.cpp
 @@ -0,0 +1,93 @@
@@ -11758,7 +11878,7 @@ index 0000000..47cdb8f
 +}
 diff --git a/tests/experimental/p1_rope.cpp b/tests/experimental/p1_rope.cpp
 new file mode 100644
-index 0000000..0edc7e0
+index 0000000000000000000000000000000000000000..0edc7e07a8e1cf86aa4747e2d4ce2767226468f3
 --- /dev/null
 +++ b/tests/experimental/p1_rope.cpp
 @@ -0,0 +1,18 @@
@@ -11782,7 +11902,7 @@ index 0000000..0edc7e0
 +}
 diff --git a/tests/experimental/p1_sparse.cpp b/tests/experimental/p1_sparse.cpp
 new file mode 100644
-index 0000000..d286564
+index 0000000000000000000000000000000000000000..d286564fdf55343ed4fd0848b2e18a52f1937f32
 --- /dev/null
 +++ b/tests/experimental/p1_sparse.cpp
 @@ -0,0 +1,176 @@
@@ -11964,7 +12084,7 @@ index 0000000..d286564
 +}
 diff --git a/tests/experimental/p4_history.cpp b/tests/experimental/p4_history.cpp
 new file mode 100644
-index 0000000..97a97db
+index 0000000000000000000000000000000000000000..97a97db4bc2735fbeaf76c86a6378890851ff143
 --- /dev/null
 +++ b/tests/experimental/p4_history.cpp
 @@ -0,0 +1,444 @@
@@ -12414,7 +12534,7 @@ index 0000000..97a97db
 +}
 diff --git a/tests/experimental/p4_quality.cpp b/tests/experimental/p4_quality.cpp
 new file mode 100644
-index 0000000..d0cda6f
+index 0000000000000000000000000000000000000000..d0cda6f2ebfdfd70f19c20a6a917d2a4fe5dd96c
 --- /dev/null
 +++ b/tests/experimental/p4_quality.cpp
 @@ -0,0 +1,155 @@
@@ -12575,7 +12695,7 @@ index 0000000..d0cda6f
 +}
 diff --git a/tests/experimental/p4_retrieval.cpp b/tests/experimental/p4_retrieval.cpp
 new file mode 100644
-index 0000000..f9a2b11
+index 0000000000000000000000000000000000000000..f9a2b11d55c4b417900186dd89cf521377180311
 --- /dev/null
 +++ b/tests/experimental/p4_retrieval.cpp
 @@ -0,0 +1,67 @@
@@ -12648,7 +12768,7 @@ index 0000000..f9a2b11
 +}
 diff --git a/tests/experimental/token_sums.cpp b/tests/experimental/token_sums.cpp
 new file mode 100644
-index 0000000..dd5f610
+index 0000000000000000000000000000000000000000..dd5f61073c604a3a2c0ea2b968be070cdcde4893
 --- /dev/null
 +++ b/tests/experimental/token_sums.cpp
 @@ -0,0 +1,114 @@
@@ -12767,7 +12887,7 @@ index 0000000..dd5f610
 +    }
 +}
 diff --git a/tests/models/qwen3_5/test_engine_stages_real.cpp b/tests/models/qwen3_5/test_engine_stages_real.cpp
-index 08e0238..46a9d98 100644
+index 08e0238a5e4cd2356e2a8cb278cbd61a4daacd2e..46a9d98e11fad72c07b64c6d306be8683f6ce309 100644
 --- a/tests/models/qwen3_5/test_engine_stages_real.cpp
 +++ b/tests/models/qwen3_5/test_engine_stages_real.cpp
 @@ -100,6 +100,7 @@ bool flag(const char* name) {
@@ -12824,7 +12944,7 @@ index 08e0238..46a9d98 100644
              while (first < want.size() && first < got.size() && want[first] == got[first]) { ++first; }
              std::cerr << "  first difference at token " << first << '\n';
 diff --git a/tests/models/qwen3_5/test_frontend.cpp b/tests/models/qwen3_5/test_frontend.cpp
-index f558929..f54277b 100644
+index f5589293e7692d3686cde53909ad736c508bb598..f54277b2d5c00cb8afc8ab4821d4897320a85d92 100644
 --- a/tests/models/qwen3_5/test_frontend.cpp
 +++ b/tests/models/qwen3_5/test_frontend.cpp
 @@ -349,7 +349,7 @@ ninfer::PromptInput image_input() {
@@ -12909,7 +13029,7 @@ index f558929..f54277b 100644
 +    }
  }
 diff --git a/tests/models/qwen3_5/test_loading.cpp b/tests/models/qwen3_5/test_loading.cpp
-index 5210c7c..94a61a6 100644
+index 5210c7c6a53926cd360203f67fed844577f4670f..94a61a649b1211d00ecee30b27af27348b44d817 100644
 --- a/tests/models/qwen3_5/test_loading.cpp
 +++ b/tests/models/qwen3_5/test_loading.cpp
 @@ -2,6 +2,7 @@
@@ -12975,7 +13095,7 @@ index 5210c7c..94a61a6 100644
          std::cout << "model config, binding, resources and Use checks passed\n";
 diff --git a/tests/models/qwen3_5/test_tool_constraints.cpp b/tests/models/qwen3_5/test_tool_constraints.cpp
 new file mode 100644
-index 0000000..58dbcd1
+index 0000000000000000000000000000000000000000..58dbcd10fe913dc9fe465cb040e9483e98bfd660
 --- /dev/null
 +++ b/tests/models/qwen3_5/test_tool_constraints.cpp
 @@ -0,0 +1,145 @@
@@ -13125,7 +13245,7 @@ index 0000000..58dbcd1
 +    return 0;
 +} catch (const std::exception& e) { std::cerr << e.what()<<"\n"; return 1; }
 diff --git a/tests/ops/linear/test_gguf.cpp b/tests/ops/linear/test_gguf.cpp
-index f5c564d..a218135 100644
+index f5c564d456f683fe2679f6e6a1393991ef5d680f..a218135e78f7822c32ae6d7056f20c6df74384b6 100644
 --- a/tests/ops/linear/test_gguf.cpp
 +++ b/tests/ops/linear/test_gguf.cpp
 @@ -17,13 +17,17 @@
@@ -13286,7 +13406,7 @@ index f5c564d..a218135 100644
                            << '\n';
                  failures += f;
 diff --git a/tests/ops/softmax_attention/causal_cache.cpp b/tests/ops/softmax_attention/causal_cache.cpp
-index 4c652d2..585b51e 100644
+index 4c652d210dfb10ec1e7540ded0c6f023f558afc2..585b51e810485dfe44c70eba9d0a4e63745763b6 100644
 --- a/tests/ops/softmax_attention/causal_cache.cpp
 +++ b/tests/ops/softmax_attention/causal_cache.cpp
 @@ -4331,6 +4331,13 @@ int run_softmax_attention_dflash2_tests() {
@@ -13304,7 +13424,7 @@ index 4c652d2..585b51e 100644
      if (cuda_unavailable()) {
          std::cout << "SKIP: no usable CUDA device\n";
 diff --git a/tests/ops/softmax_attention/main.cpp b/tests/ops/softmax_attention/main.cpp
-index d691a5b..1522693 100644
+index d691a5bd989b2e7a96571236139d581dc1cd4f5c..15226932d25b55995c097f0110891d4fc00d6eb4 100644
 --- a/tests/ops/softmax_attention/main.cpp
 +++ b/tests/ops/softmax_attention/main.cpp
 @@ -9,6 +9,7 @@ int run_softmax_attention_int8_prompt_tests();
@@ -13335,7 +13455,7 @@ index d691a5b..1522693 100644
          return 2;
      }
 diff --git a/tests/test_cli_options.cpp b/tests/test_cli_options.cpp
-index 374f657..849ed35 100644
+index 374f657cee40bd0702c859e71dc5ca8a3abc450d..849ed35c8812e5fcc17ffb134c0364f1aa612110 100644
 --- a/tests/test_cli_options.cpp
 +++ b/tests/test_cli_options.cpp
 @@ -2,6 +2,7 @@
@@ -13439,7 +13559,7 @@ index 374f657..849ed35 100644
          for (unsigned width = 0; width <= 63; ++width) {
              const auto mixed =
 diff --git a/tests/test_context_cache_defaults.cpp b/tests/test_context_cache_defaults.cpp
-index 1217c4d..f5a0028 100644
+index 1217c4d7d2e73dab2d5597ef5c3a146e38438ee4..f5a002803458f55a80c0dc26879835bd6b566e2b 100644
 --- a/tests/test_context_cache_defaults.cpp
 +++ b/tests/test_context_cache_defaults.cpp
 @@ -69,6 +69,84 @@ int main() {
@@ -13528,7 +13648,7 @@ index 1217c4d..f5a0028 100644
      // distinct shared-prefix candidates on its own: four explicit markers plus the engine's
      // tool/leading-instruction/full-prompt automatic candidates. The default
 diff --git a/tests/test_kv_cache_ranks.cpp b/tests/test_kv_cache_ranks.cpp
-index 4202802..18aae4d 100644
+index 4202802dab819e816594d2d4cf7bad1c1de17b9e..18aae4d52560c6f7e6f1745b9a7f17bdcbf4a943 100644
 --- a/tests/test_kv_cache_ranks.cpp
 +++ b/tests/test_kv_cache_ranks.cpp
 @@ -19,12 +19,14 @@
@@ -13646,7 +13766,7 @@ index 4202802..18aae4d 100644
      std::cout << "multi-rank kv pool matches the single-rank pool\n";
      return 0;
 diff --git a/tests/test_kv_capacity.cpp b/tests/test_kv_capacity.cpp
-index 7284d51..695db76 100644
+index 7284d51c7766745daa1a0d116d0b18be16a2c6e8..695db764d87c78f9409ff8cb78ffbdb13f3f480b 100644
 --- a/tests/test_kv_capacity.cpp
 +++ b/tests/test_kv_capacity.cpp
 @@ -1,6 +1,7 @@
@@ -13746,8 +13866,145 @@ index 7284d51..695db76 100644
      if (failures == 0) { std::cout << "ok\n"; }
      return failures == 0 ? 0 : 1;
  }
+diff --git a/tests/test_openai_responses.cpp b/tests/test_openai_responses.cpp
+index 970f13e2c6a581e0e923dff0f4b4b4ed2cc4ebca..5675f599bb0bdc1d09dfa9780c51f41ef1abff19 100644
+--- a/tests/test_openai_responses.cpp
++++ b/tests/test_openai_responses.cpp
+@@ -288,6 +288,43 @@ int test_reasoning_encrypted_content_request() {
+     return failures;
+ }
+ 
++int test_image_detail_fallback() {
++    int failures = 0;
++    for (const char* role : {"user", "assistant"}) {
++        const Json image = {{"type", "input_image"},
++                            {"image_url", "data:image/png;base64,AA=="},
++                            {"detail", "auto"},
++                            {"prompt_cache_breakpoint", Json{{"mode", "explicit"}}}};
++        const Json message = {{"id", "msg_image"}, {"type", "message"}, {"role", role},
++                              {"content", Json::array({image})}};
++        Json body = {{"model", "m"}, {"input", Json::array({message})}};
++        const auto baseline = parse_openai_responses_create_request(body, limits());
++        for (const Json detail : {Json("auto"), Json("low"), Json("high"), Json("original"), Json(nullptr)}) {
++            body["input"][0]["content"][0]["detail"] = detail;
++            const auto request = parse_openai_responses_create_request(body, limits());
++            const auto& part = request.prompt.input_turns[0].content[0];
++            failures += check(request.prompt.input_items == baseline.prompt.input_items &&
++                                  part.kind == ContentKind::Image &&
++                                  part.source.value == "data:image/png;base64,AA==" &&
++                                  part.cache_boundary_after.has_value(),
++                              "image detail canonicalizes to auto without changing media or cache markers");
++        }
++        body["input"][0]["content"][0].erase("detail");
++        failures += check(parse_openai_responses_create_request(body, limits()).prompt.input_items ==
++                              baseline.prompt.input_items,
++                          "omitted image detail canonicalizes to auto");
++        for (const Json detail : {Json("medium"), Json("HIGH"), Json(""), Json(64), Json(true),
++                                  Json::object(), Json::array()}) {
++            body["input"][0]["content"][0]["detail"] = detail;
++            const auto error = api_error([&] { (void)parse_openai_responses_create_request(body, limits()); });
++            failures += check(error.status == 400 && error.param == "input" &&
++                                  (!detail.is_string() || error.code == "invalid_value"),
++                              "unknown or malformed image detail remains an HTTP 400 error");
++        }
++    }
++    return failures;
++}
++
+ int test_typed_items_and_cache_markers() {
+     const Json body = {
+         {"model", "m"},
+@@ -312,7 +349,7 @@ int test_typed_items_and_cache_markers() {
+                                       {"prompt_cache_breakpoint", Json{{"mode", "explicit"}}}},
+                                  Json{{"type", "input_image"},
+                                       {"image_url", "data:image/png;base64,AA=="},
+-                                      {"detail", "auto"}}})}},
++                                      {"detail", "original"}}})}},
+               Json{{"id", "msg_refusal"},
+                    {"type", "message"},
+                    {"role", "assistant"},
+@@ -1532,13 +1569,20 @@ int test_graft_extension() {
+ 
+ } // namespace
+ 
+-int main() {
++int main(int argc, char** argv) {
++    if (argc == 2 && std::string_view(argv[1]) == "--image-detail-only") {
++        const int failures = test_image_detail_fallback() + test_typed_items_and_cache_markers() +
++                             test_response_output_history_round_trip();
++        if (failures == 0) { std::cout << "OpenAI Responses image detail tests passed\n"; }
++        return failures == 0 ? 0 : 1;
++    }
+     int failures = 0;
+     failures += test_graft_extension();
+     failures += test_thinking_budget_extension();
+     failures += test_basic_request_and_resolution();
+     failures += test_budgets_and_nonsemantic_hints();
+     failures += test_reasoning_encrypted_content_request();
++    failures += test_image_detail_fallback();
+     failures += test_typed_items_and_cache_markers();
+     failures += test_contiguous_assistant_items();
+     failures += test_response_output_history_round_trip();
+diff --git a/tests/test_openai_schema.cpp b/tests/test_openai_schema.cpp
+index 357cf53386c4adc4894c62e081e69432ece1195a..f8fb42fcfe3c74fe483b67b39644e397f172a19b 100644
+--- a/tests/test_openai_schema.cpp
++++ b/tests/test_openai_schema.cpp
+@@ -701,9 +701,27 @@ int test_messages_and_media() {
+                           media.messages[0].content[1].kind == ContentKind::Video,
+                       "image and video compatibility inputs normalize to Engine media");
+ 
+-    body["messages"][0]["content"][0]["image_url"]["detail"] = "high";
+-    failures += check(api_error([&] { (void)parse(body); }).code == "image_detail_not_supported",
+-                      "explicit image preprocessing detail rejected");
++    for (const Json detail : {Json("auto"), Json("low"), Json("high"), Json("original"), Json(nullptr)}) {
++        body["messages"][0]["content"][0]["image_url"]["detail"] = detail;
++        const GenerationRequest lowered = parse(body).generation;
++        failures += check(lowered.media_item_count() == 2 &&
++                              lowered.messages[0].content[0].source.kind ==
++                                  media.messages[0].content[0].source.kind &&
++                              lowered.messages[0].content[0].source.value ==
++                                  media.messages[0].content[0].source.value,
++                          "recognized image detail falls back to the same auto media input");
++    }
++    body["messages"][0]["content"][0]["image_url"].erase("detail");
++    failures += check(parse(body).generation.media_item_count() == 2,
++                      "omitted image detail retains auto behavior");
++    for (const Json detail : {Json("medium"), Json("HIGH"), Json(""), Json(64), Json(true),
++                              Json::object(), Json::array()}) {
++        body["messages"][0]["content"][0]["image_url"]["detail"] = detail;
++        const ApiError error = api_error([&] { (void)parse(body); });
++        failures += check(error.status == 400 && error.param == "messages" &&
++                              (!detail.is_string() || error.code == "invalid_value"),
++                          "unknown or malformed image detail remains an HTTP 400 error");
++    }
+ 
+     auto content_rejected = [&](const char* role, const char* type) {
+         Json invalid                   = base_request();
+@@ -731,7 +749,7 @@ int test_messages_and_media() {
+                Json::array({Json{{"type", "text"}, {"text", "captured"}},
+                             Json{{"type", "image_url"},
+                                  {"image_url", Json{{"url", "https://example.test/capture.png"},
+-                                                    {"detail", "auto"}}}}})}}});
++                                                    {"detail", "original"}}}}})}}});
+     const GenerationRequest tool_image = parse(body).generation;
+     failures += check(tool_image.messages.back().role == ninfer::ChatRole::Tool &&
+                           tool_image.messages.back().tool_call_id == "call_capture" &&
+@@ -1465,7 +1483,12 @@ int test_assistant_continuation_mode() {
+     return failures;
+ }
+ 
+-int main() {
++int main(int argc, char** argv) {
++    if (argc == 2 && std::string_view(argv[1]) == "--image-detail-only") {
++        const int failures = test_messages_and_media();
++        if (failures == 0) { std::cout << "OpenAI Chat image detail tests passed\n"; }
++        return failures == 0 ? 0 : 1;
++    }
+     int failures = 0;
+     failures += test_graft_extension();
+     failures += test_thinking_budget_extension();
 diff --git a/tests/test_resource_manager.cpp b/tests/test_resource_manager.cpp
-index e31cb8b..3b8720d 100644
+index e31cb8bd58d242ffea785352d374d513ca1205dc..3b8720dfadc7ba108ad773ed14468b90ecb30e66 100644
 --- a/tests/test_resource_manager.cpp
 +++ b/tests/test_resource_manager.cpp
 @@ -722,6 +722,10 @@ public:
@@ -13812,7 +14069,7 @@ index e31cb8b..3b8720d 100644
      run_test("admission waits for Program boundary", test_admission_waits_for_program_boundary);
      run_test("session publication order", test_session_publication_order_controls_tied_source);
 diff --git a/tests/test_serve_options.cpp b/tests/test_serve_options.cpp
-index 095812a..7327a1a 100644
+index 095812ac8e02f7e504ea0da29be21288c7d3bab7..7327a1aeaaff0e43a5d045343cfd2e1a24173ecb 100644
 --- a/tests/test_serve_options.cpp
 +++ b/tests/test_serve_options.cpp
 @@ -2,9 +2,12 @@
@@ -14381,7 +14638,7 @@ index 095812a..7327a1a 100644
 +    }
 +}
 diff --git a/third_party/xgrammar/CMakeLists.txt b/third_party/xgrammar/CMakeLists.txt
-index 7a116b0..d9ec022 100644
+index 7a116b014e36d550fd3213979b35ed42b224e86b..d9ec02255fed0b69c34c36303dfb5aa707a85d1a 100644
 --- a/third_party/xgrammar/CMakeLists.txt
 +++ b/third_party/xgrammar/CMakeLists.txt
 @@ -13,6 +13,7 @@ add_library(ninfer_xgrammar STATIC
@@ -14393,7 +14650,7 @@ index 7a116b0..d9ec022 100644
    cpp/regex_converter.cc
    cpp/structural_tag.cc
 diff --git a/third_party/xgrammar/cpp/json_schema_converter_ext.cc b/third_party/xgrammar/cpp/json_schema_converter_ext.cc
-index 23b03e8..4604331 100644
+index 23b03e83ba7a07fc013e970d408b6df31c959f3a..4604331fe9823b771a2f70226de5cfb2faaa9a88 100644
 --- a/third_party/xgrammar/cpp/json_schema_converter_ext.cc
 +++ b/third_party/xgrammar/cpp/json_schema_converter_ext.cc
 @@ -4,6 +4,8 @@
@@ -14538,7 +14795,7 @@ index 23b03e8..4604331 100644
          ByteString(xml_wrapper_.key_wrapper_prefix),
          key_pattern_expr,
 diff --git a/third_party/xgrammar/cpp/json_schema_converter_ext.h b/third_party/xgrammar/cpp/json_schema_converter_ext.h
-index 1386225..52bd8b2 100644
+index 1386225d184b9850d45d404032675981f9457fba..52bd8b2b932752fc44b6981c1bad1d56da247a9a 100644
 --- a/third_party/xgrammar/cpp/json_schema_converter_ext.h
 +++ b/third_party/xgrammar/cpp/json_schema_converter_ext.h
 @@ -88,6 +88,8 @@ class XMLToolCallingConverter : public JSONSchemaConverter {
@@ -14552,7 +14809,7 @@ index 1386225..52bd8b2 100644
        const ObjectSpec& spec, const std::string& rule_name, bool dummy_need_braces = false
 diff --git a/third_party/xgrammar/cpp/json_string_grammar.cc b/third_party/xgrammar/cpp/json_string_grammar.cc
 new file mode 100644
-index 0000000..f5513e6
+index 0000000000000000000000000000000000000000..f5513e698c48e7164903761d7a288b3a36f15b55
 --- /dev/null
 +++ b/third_party/xgrammar/cpp/json_string_grammar.cc
 @@ -0,0 +1,447 @@
@@ -15005,7 +15262,7 @@ index 0000000..f5513e6
 +}  // namespace xgrammar
 diff --git a/third_party/xgrammar/cpp/json_string_grammar.h b/third_party/xgrammar/cpp/json_string_grammar.h
 new file mode 100644
-index 0000000..f6fb5b5
+index 0000000000000000000000000000000000000000..f6fb5b54fad4206e56297688f70806cf7d6ae9a8
 --- /dev/null
 +++ b/third_party/xgrammar/cpp/json_string_grammar.h
 @@ -0,0 +1,26 @@
@@ -15036,7 +15293,7 @@ index 0000000..f6fb5b5
 +}  // namespace xgrammar
 +#endif
 diff --git a/tools/convert/gguf_blocks.py b/tools/convert/gguf_blocks.py
-index 52035bc..8f02057 100644
+index 52035bc6ff956685025ad0ba46da7c798409bbaf..8f020576b863e030583a7569ae205745c9a220b0 100644
 --- a/tools/convert/gguf_blocks.py
 +++ b/tools/convert/gguf_blocks.py
 @@ -1,10 +1,12 @@
@@ -15162,7 +15419,7 @@ index 52035bc..8f02057 100644
  
  
 diff --git a/tools/convert/ternary.py b/tools/convert/ternary.py
-index 204dda3..66a2c33 100644
+index 204dda382192976fcdb89849ba9dcff701baa275..66a2c33803585445f82729fc32f2e4072d869e2b 100644
 --- a/tools/convert/ternary.py
 +++ b/tools/convert/ternary.py
 @@ -157,7 +157,10 @@ def validate(gguf: GGUFFile) -> None:
