@@ -1,6 +1,6 @@
 # KVMem 两后端实现差异
 
-更新日期：2026 年 10 月 7 日。适用于 `feat/multi-backend-framework` 当前工作区的 KVMem 集成。主仓库提交 `98b5910` 之后的 ninfer 改动在 `backends/patches/ninfer-kvmem.patch`，准备后的树哈希在 `backends/versions.json`。
+更新日期：2026 年 10 月 10 日。适用于多后端分支的活跃 KV 分层候选集成（本次工作分支 `feat/active-kv-tiering`，基线 `eb98424e7654`）。两个后端的完整集成改动在 `backends/patches/`，准备后的精确树哈希在 `backends/versions.json`。
 
 迁移候选的 ninfer 上游为 `iamwavecut/ninfer-all`，固定在 `8319e8f51247`。KVMem 保留 Qwen3.5/3.8 Dense 的既有边界，新增的 `qwen4_exp`、suspend、graft 和 router 尚未适配，组合会被拒绝。Q2_0/Q4_0/Q5_0 是权重量化格式，不能据此推断新的模型架构已经支持 KVMem。新基线的实际验证范围见 [迁移记录](ninfer-all-migration-validation.md)。
 
@@ -22,7 +22,7 @@ llama.cpp 与 ninfer 共用 KVMem 策略和内存契约，但保留各自的推�
 
 block 是检索统计和选中历史的单位，page 是原生 KV 分配和搬运的单位，两者概念不同。保留 ninfer 的 block=64。`--kvmem-recent-tokens 1024` 在这个粒度下保留最新 16 页；不足一页的余数被舍去。ninfer 必须保留至少一页 recent，以维护尚未写满的追加页；0–63 会被启动脚本、服务参数和 Engine 校验拒绝。
 
-代码位置：[llama 参数](../tools/llama-kvmem-server.cpp)、[llama block 与保留量映射](../src/adapter/llama-memory-kvmem.cpp)、[ninfer 原生页约束](../backends/ninfer/src/core/paged_kv_cache.cpp)、[ninfer 检索配置](../backends/ninfer/src/models/qwen3_5/program/storage/memory_statistics.cpp)、[ninfer 快照恢复配置](../backends/ninfer/src/models/qwen3_5/program/storage/memory_snapshot.cpp)。
+代码位置：[llama 参数](../tools/llama-kvmem-server.cpp)、[llama block 与保留量映射](../src/adapter/llama-memory-kvmem.cpp)、[ninfer 原生页约束](../backends/ninfer/src/core/paged_kv_cache.cpp)、[ninfer 检索配置](../backends/ninfer/src/models/qwen3_5/program/storage/memory_statistics.cpp)、[ninfer 快照恢复配置](../backends/ninfer/src/models/qwen3_5/program/storage/kvmem_window.cpp)。
 
 ## 工作集和检索行为
 
@@ -106,7 +106,7 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 | 自适应 MTP | 当前 worker 未开放对应参数 | `--adaptive-mtp`，必须启用 MTP，并遵守各组合限制 |
 | ngram 草稿 | 当前 worker 未开放 ninfer 的对应参数 | `--ngram-draft-tokens` / `--ngram-min-match`；KVMem 要求 MTP；1..8路可用，启动并发大于1时，配置的16..63自动降至15并提示；单路保留宽度，文本及 resident/CPU 图片均放行九种原生 KV |
 | MTP 隐含的 ngram 默认值 | 启用本 worker 的 MTP 不会接通 ninfer ngram | 直接启动时，启用 spec 且未指定 ngram 宽度会默认 15；统一脚本的 `NgramDrafts` 默认 0 并显式传入 |
-| 活动请求数 | `-np` / `--parallel`，默认 1，开放 1..4；NVMe/冷会话磁盘与部分设备组合受限制 | `--max-concurrency`，默认 1；KVMem 开放文本及 resident/CPU 图像 1..8，多路 ngram 宽度上限15；磁盘冷快照当前暂时禁用 |
+| 活动请求数 | `-np` / `--parallel`，默认 1，开放 1..4；公共 RAM/SSD 分层支持并发，旧 NVMe 与部分设备组合仍受限制 | `--max-concurrency`，默认 1；KVMem 开放文本及 resident/CPU 图像 1..8，多路 ngram 宽度上限15；公共 RAM/SSD 分层支持并发 |
 
 固定草稿长度、自适应上限和 ngram 草稿长度是不同配置。比较两个后端的 MTP 时，应显式列出这些设置，不能仅用“MTP 已开启”代表同一执行方式。
 
@@ -118,9 +118,9 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 |---|---|---|
 | Host 历史数量 | `--kvmem-conversations N`，默认 1；计活动和非活动 Host stores，并发时至少为 lane 数 | `--kvmem-sessions N`，默认 4，范围 1..16；计保留的非活动 Host 历史，活动请求另占原生资源 |
 | Host 历史预算 | `--kvmem-conversations-gb` / `--kvmem-session-ram-gb`，单位 GiB；会话 RAM 软上限，默认 0 不限，活动会话可能超过软上限 | `--kvmem-host-mib`，单位 MiB；Main/MTP 原生 KV payload 的全局硬预算，KVMem 下必须非零；不含 mean 索引、GDN checkpoint、模型及其他缓冲 |
-| 在线 KV 存储层 | 原有 `--kvmem-cpu-gb`、`--kvmem-nvme-gb`、raw-K/V 等配置；含义与冷会话配额分开 | 当前集成采用 Host KV 归档和有界 pinned 搬运缓冲；冷磁盘不是在线 NVMe 换页层 |
-| 非活动会话冷缓存 | `--kvmem-session-cache-dir` + `--kvmem-session-nvme-gb`，单位 GiB；要求多会话，不能与在线 CPU/NVMe arena 配置混用 | 当前按用户要求暂时禁用；启动器、serve CLI、Engine 均拒绝开启，内存历史复用仍可用 |
-| 冷快照身份 | llama 的会话存储与 checkpoint 规则 | ninfer 的模型、原生布局、执行配置、精确前缀及完整状态点；不能跨后端读取 |
+| 公共 RAM/SSD 层 | `--kvmem-host-mib H` 限定原生 K/V 的 RAM payload；`--kvmem-disk-path PATH --kvmem-disk-mib D` 开启 SSD，不能与旧在线 NVMe 或旧会话磁盘配置同时开启 | 相同参数和公共存储实现；Main/MTP 原生 K/V 均可下沉，mean-K 留 RAM；引擎通过异步 CPU I/O 队列接入 |
+| 非活动会话冷缓存 | 公共层保留同一份 KV 所有权，只将 checkpoint 附件另行写入共享 D；旧 `--kvmem-session-cache-dir` 路径仍可单独使用 | 公共层保留原生 KV 所有权，将非活动历史的状态 checkpoint 写入同一 D；不再序列化一份重复 KV |
+| 生命周期和身份 | 公共层只在当前进程内复用；会话恢复仍遵守 llama 的 checkpoint 规则 | 公共层只在当前进程内复用；恢复仍校验原生布局、执行配置、精确前缀及状态点；不能跨后端读取 |
 
 会话数量、Host KV payload 预算和进程总 RAM 是三个不同指标。统一界面可以统一单位和展示方式，但应保留各预算的覆盖范围、硬软限制及活动会话计数规则。
 
@@ -145,9 +145,9 @@ KV 格式名称代表不同字节布局和量化方法。例如 ninfer int8 与 
 
 | 入口配置 | 当前映射和限制 |
 |---|---|
-| 两边共用 | Backend、Model、Worker、Gpu、ListenHost、Port、Context、Budget、Reserve、Prefill、MaxTokens、KvType，以及 WorkerArgs。ninfer 的 `-Gpu` 接受 1–8 个不重复 UUID，顺序即 layer stage 顺序 |
+| 两边共用 | Backend、Model、Worker、Gpu、ListenHost、Port、Context、Budget、Reserve、Prefill、MaxTokens、KvType、HostMiB、DiskPath、DiskMiB，以及 WorkerArgs。ninfer 的 `-Gpu` 接受 1–8 个不重复 UUID，顺序即 layer stage 顺序 |
 | 共用脚本默认值 | 端口 18200、Context=262144、B=4096、R=1024、Prefill=128、MaxTokens=1024、Concurrency=1；KV 默认 llama q8_0 / ninfer int8；ninfer 视觉 token 默认 1024。相同 MaxTokens 仍受各后端的输出限制 |
-| 只为 ninfer 映射 | HostMiB、StageLayers、MtpDrafts、AdaptiveMtp、FastPrefill、NgramDrafts/MinMatch、Concurrency、RetainedSessions、Vision/Residency/Tokens、DeviceProfile、ThinkingBudget、SinkTokens、RecentTokens；显式传给 llama 会被脚本拒绝。省略 ThinkingBudget 不限制思考。SinkTokens 默认 0（一页），RecentTokens 默认 64（一页）。DiskPath/MiB 当前暂时禁用。设备参数只能走 `-Gpu` 和 `-StageLayers`，思考预算只能走 `-ThinkingBudget`，sink/recent 只能走 `-SinkTokens` 和 `-RecentTokens`，不能再从 WorkerArgs 传 `--device`、`--devices`、`--stage-layers`、`--default-thinking-budget`、`--kvmem-sink-tokens` 或 `--kvmem-recent-tokens` |
+| 只为 ninfer 映射 | StageLayers、MtpDrafts、AdaptiveMtp、FastPrefill、NgramDrafts/MinMatch、Concurrency、RetainedSessions、Vision/Residency/Tokens、DeviceProfile、ThinkingBudget、SinkTokens、RecentTokens；显式传给 llama 会被脚本拒绝。省略 ThinkingBudget 不限制思考。SinkTokens 默认 0（一页），RecentTokens 默认 64（一页）。DiskPath/MiB 现映射到两后端的公共进程内 SSD 分层，必须通过顶层参数传入。设备参数只能走 `-Gpu` 和 `-StageLayers`，思考预算只能走 `-ThinkingBudget`，sink/recent 只能走 `-SinkTokens` 和 `-RecentTokens`，不能再从 WorkerArgs 传 `--device`、`--devices`、`--stage-layers`、`--default-thinking-budget`、`--kvmem-sink-tokens` 或 `--kvmem-recent-tokens` |
 | llama 的对应能力 | MTP、lane、会话、视觉和冷磁盘等已有能力仍可用，当前需要通过 WorkerArgs 传原生参数；脚本拒绝对应入口选项不表示后端没有该能力 |
 | 默认 ninfer 快捷脚本 | `start-ninfer.ps1` 调用统一启动器。Context=204800、B=36864、R=16384、Host=12288MiB、Prefill=256、输出上限16384、思考预算8192、sink 0（一页）、recent 64（一页）、单路、INT8、自适应MTP上限4、ngram31、CPU视觉、每图1024 tokens、保留1个非活动 Host 会话。可用 `-Gpu`、`-StageLayers`、`-SinkTokens` 和 `-RecentTokens`。这些值与共用脚本默认值不同 |
 

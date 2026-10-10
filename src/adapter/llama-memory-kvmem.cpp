@@ -24,6 +24,7 @@
 #include "kvmem/snapshot.hpp"
 #include "kvmem/native_kv_payload.hpp"
 #include "kvmem/snapshot_buffer.hpp"
+#include "kvmem/spill_io.hpp"
 
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
@@ -123,6 +124,36 @@ llama_kvmem_execution_state::~llama_kvmem_execution_state() {
 llama_kvmem_execution_state & kvmem_current_execution() {
     static llama_kvmem_execution_state legacy;
     return active_execution ? *active_execution : legacy;
+}
+
+std::shared_ptr<kvmem::HostKvStorage> kvmem_execution_payload_storage() {
+    auto & execution = kvmem_current_execution();
+    if (!execution.payload_storage) {
+        const auto & p = execution.params;
+        std::shared_ptr<kvmem::SpillFile> spill;
+        if (p.payload_disk_bytes) {
+            if (!p.payload_host_bytes || !p.payload_disk_dir || !*p.payload_disk_dir)
+                throw std::invalid_argument("shared KV SSD requires RAM quota and directory");
+            if (p.raw_k_nvme || p.nvme_bytes || p.cpu_bytes)
+                throw std::invalid_argument("shared KV storage cannot be combined with legacy spill arenas");
+            spill = std::make_shared<kvmem::SpillFile>(
+                std::filesystem::u8path(p.payload_disk_dir), p.payload_disk_bytes);
+        }
+        execution.payload_storage = std::make_shared<kvmem::HostKvStorage>(
+            p.payload_host_bytes ? p.payload_host_bytes : UINT64_MAX, std::move(spill));
+    }
+    return execution.payload_storage;
+}
+
+llama_kvmem_storage_stats llama_kvmem_execution_storage_stats(const llama_kvmem_execution_state * state) {
+    if (!state || !state->payload_storage) return {};
+    const auto & storage = *state->payload_storage;
+    const auto io = storage.io_stats();
+    return {storage.charged_bytes(), storage.capacity_bytes(), storage.disk_bytes(), storage.disk_capacity_bytes(),
+        io.read_bytes, io.written_bytes, io.reads, io.writes, io.errors};
+}
+std::shared_ptr<kvmem::SpillFile> kvmem_execution_spill_file(const llama_kvmem_execution_state * state) {
+    return state && state->payload_storage ? state->payload_storage->spill_file() : nullptr;
 }
 
 llama_kvmem_execution_state * llama_kvmem_execution_create() {
@@ -427,6 +458,8 @@ static bool kvmem_env_perf() {
 }
 
 void llama_kvmem_set_params(const struct llama_kvmem_params * params) {
+    auto & execution = kvmem_current_execution();
+    if (!execution.memory && !execution.mtp) execution.payload_storage.reset();
     if (params) {
         kvmem_current_execution().params = *params;
     } else {
@@ -949,6 +982,9 @@ llama_memory_kvmem::llama_memory_kvmem(
     query_end_ = kvmem_current_execution().params.query_end;
     force_pos_ = kvmem_current_execution().params.force_pos;
     kvmem::RawKvStoreConfig & rcfg = raw_cfg_;
+    if (kvmem_current_execution().params.payload_disk_bytes && v_trans_)
+        throw std::invalid_argument("shared KV SSD requires Flash Attention native packed K/V");
+    rcfg.payload_storage = kvmem_execution_payload_storage();
     rcfg.n_layer = n_layer_;
     rcfg.n_embd_k = n_embd_k_;
     rcfg.n_embd_v = n_embd_v_;
@@ -1205,6 +1241,25 @@ uint64_t llama_memory_kvmem::host_bytes() const {
     bytes += q_sum_.capacity()*sizeof(std::vector<float>);
     for (const auto & q : q_sum_) bytes += q.capacity()*sizeof(float);
     return bytes;
+}
+uint64_t llama_memory_kvmem::payload_bytes(bool disk_only) const {
+    return (raw_ ? raw_->payload_bytes(disk_only) : 0) + (mtp_ ? mtp_->payload_bytes(disk_only) : 0);
+}
+uint64_t llama_memory_kvmem::payload_capacity_bytes(uint32_t tokens) const {
+    return (raw_ ? raw_->payload_capacity_bytes(tokens, uint32_t(kv_->get_layer_ids().size())) : 0) +
+        (mtp_ ? mtp_->payload_capacity_bytes(tokens) : 0);
+}
+uint64_t llama_memory_kvmem::payload_budget() const {
+    const auto storage = raw_cfg_.payload_storage;
+    if (!storage) return UINT64_MAX;
+    const auto h = storage->capacity_bytes(), d = storage->disk_capacity_bytes();
+    if (!d) return h;
+    const auto per_domain = payload_capacity_bytes(kv_size_ + block_tokens_);
+    const auto domains = kvmem_current_execution().payload_domains;
+    if (!domains || per_domain > UINT64_MAX / domains) return 0;
+    const auto headroom = per_domain * domains;
+    if (h < headroom || h > UINT64_MAX - d) return 0;
+    return std::max(h, h + d - headroom);
 }
 
 uint64_t llama_memory_kvmem::host_capacity(uint32_t tokens) const {
@@ -5265,6 +5320,7 @@ void llama_kvmem_store_bundle_reset(llama_kvmem_store_bundle * bundle) {
     if (store.mtp_raw) store.mtp_raw->truncate_to(0);
     store.row_positions.clear();
     store.resident.clear();
+    store.cold = false;
     for (auto & sum : store.q_sum) std::fill(sum.begin(), sum.end(), 0.0f);
     std::fill(store.q_count.begin(), store.q_count.end(), 0);
 }
@@ -5451,6 +5507,27 @@ bool llama_kvmem_store_park() {
     }
 }
 
+uint64_t llama_kvmem_store_payload_bytes(int32_t store_id, bool disk_only) {
+    auto * mem = kvmem_capture_active();
+    if (!mem) return 0;
+    const auto & pool = *kvmem_current_execution().conversations;
+    if (pool.owner != mem) return store_id == 0 ? mem->payload_bytes(disk_only) : 0;
+    if (store_id == pool.active) return mem->payload_bytes(disk_only);
+    const auto * entry = kvmem_conv_find(store_id);
+    if (!entry || !entry->store) return 0;
+    const auto & store = *entry->store;
+    return (store.raw ? store.raw->payload_bytes(disk_only) : 0) +
+        (store.mtp_raw ? store.mtp_raw->payload_bytes(disk_only) : 0);
+}
+uint64_t llama_kvmem_store_payload_capacity(uint32_t tokens) {
+    const auto * mem = kvmem_capture_active();
+    return mem ? mem->payload_capacity_bytes(tokens) : 0;
+}
+uint64_t llama_kvmem_payload_budget() {
+    const auto * mem = kvmem_capture_active();
+    return mem ? mem->payload_budget() : 0;
+}
+
 static llama_memory_kvmem::ConvStore & kvmem_detached(int32_t id) {
     if ((*kvmem_current_execution().conversations).owner != kvmem_capture_active() || id == (*kvmem_current_execution().conversations).active)
         throw std::runtime_error("session snapshot requires a detached store");
@@ -5459,12 +5536,28 @@ static llama_memory_kvmem::ConvStore & kvmem_detached(int32_t id) {
     return *e->store;
 }
 
-void llama_kvmem_store_freeze(int32_t id, std::vector<kvmem::SnapshotBuffer> & buffers) {
-    auto & s = kvmem_detached(id);
+static void kvmem_freeze_store(llama_memory_kvmem::ConvStore & s, std::vector<kvmem::SnapshotBuffer> & buffers) {
     if (s.cold) throw std::runtime_error("session is already frozen");
     s.raw->snapshot_buffers(buffers);
     if (s.mtp_raw) s.mtp_raw->snapshot_buffers(buffers);
     s.cold = true; // partial stores must never be attached to inference
+}
+
+void llama_kvmem_store_freeze(int32_t id, std::vector<kvmem::SnapshotBuffer> & buffers) {
+    kvmem_freeze_store(kvmem_detached(id), buffers);
+}
+void llama_kvmem_store_bundle_freeze(llama_kvmem_store_bundle * bundle, std::vector<kvmem::SnapshotBuffer> & buffers) {
+    if (!bundle || !bundle->store) throw std::invalid_argument("missing parked KV owner");
+    kvmem_freeze_store(*bundle->store, buffers);
+}
+void llama_kvmem_store_bundle_thaw(llama_kvmem_store_bundle * bundle) {
+    if (!bundle || !bundle->store) throw std::invalid_argument("missing parked KV owner");
+    bundle->store->cold = false;
+}
+uint64_t llama_kvmem_store_bundle_payload_bytes(const llama_kvmem_store_bundle * bundle) {
+    if (!bundle || !bundle->store) return 0;
+    const auto & s = *bundle->store;
+    return (s.raw ? s.raw->payload_bytes() : 0) + (s.mtp_raw ? s.mtp_raw->payload_bytes() : 0);
 }
 
 void llama_kvmem_store_thaw(int32_t id) {

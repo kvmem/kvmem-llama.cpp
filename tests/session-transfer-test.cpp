@@ -253,7 +253,73 @@ static void raw_roundtrip() {
     std::filesystem::remove(root);
 }
 
+static void shared_native_and_idle() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("kvmem-shared-idle-" + std::to_string(std::random_device{}()));
+    {
+        auto disk = std::make_shared<kvmem::SpillFile>(root, 4096);
+        auto storage = std::make_shared<kvmem::HostKvStorage>(128, disk);
+        kvmem::RawKvStoreConfig cfg;
+        cfg.n_layer = 1; cfg.n_embd_k = cfg.n_embd_v = 4; cfg.block_tokens = 4;
+        cfg.k_gpu_row_bytes = cfg.v_gpu_row_bytes = 8; cfg.payload_storage = storage;
+        kvmem::RawKvStore raw(cfg);
+        std::vector<uint8_t> native(96, 71), copy(32);
+        std::vector<float> means(12 * 4, 2.0f);
+        raw.write_layer_k_gpu(0, 12, 0, native.data());
+        raw.write_layer_v_gpu(0, 12, 0, native.data());
+        raw.write_layer_mean_k(0, 12, 0, means.data());
+        std::vector<kvmem::SnapshotBuffer> buffers;
+        raw.snapshot_buffers(buffers);
+        check(buffers.size() == 3, "idle serializer duplicated shared native K/V");
+        kvmem_session_payload payload(7, 1, buffers);
+        kvmem_session_files files(root, 4096, {}, disk);
+        const auto native_disk = raw.payload_bytes(true);
+        files.fault = [](const char * point, int, uint32_t) {
+            if (std::string(point) == "write_data") throw std::runtime_error("injected idle write failure");
+        };
+        rejects([&] { payload.spill(files, 0); });
+        check(payload.complete() && files.bytes() == native_disk, "failed idle write leaked quota or lost source");
+        files.fault = {};
+        payload.spill(files, 0);
+        check(files.bytes() == native_disk + payload.disk_bytes(), "native/idle D charges are separate");
+        storage->trim(0);
+        check(storage->charged_bytes() == 0 && raw.payload_bytes(true) == native.size() * 2,
+              "idle native records did not remain independently tierable");
+        const auto cold_bytes = files.bytes();
+        files.fault = [](const char * point, int, uint32_t) {
+            if (std::string(point) == "read_data") throw std::runtime_error("injected idle read failure");
+        };
+        rejects([&] { payload.restore(files, 0); });
+        check(!payload.complete() && files.bytes() == cold_bytes,
+              "failed idle read released the valid disk attachment");
+        files.fault = {};
+        payload.restore(files, 0);
+        check(payload.complete() && files.bytes() == native.size() * 2,
+              "restoring idle state copied or released native disk records");
+        check(storage->charged_bytes() == 0, "idle restore eagerly promoted all native KV");
+        for (uint32_t block = 0; block < 3; ++block) {
+            check(raw.copy_k_gpu(block, 0, copy.data(), 4), "missing shared K");
+            check(std::all_of(copy.begin(), copy.end(), [](uint8_t value) { return value == 71; }), "changed shared K");
+            check(raw.copy_v_gpu(block, 0, copy.data(), 4), "missing shared V");
+            check(std::all_of(copy.begin(), copy.end(), [](uint8_t value) { return value == 71; }), "changed shared V");
+            float mean[4]; raw.mean_k(block, 0, mean);
+            check(std::all_of(std::begin(mean), std::end(mean), [](float value) { return value == 2.0f; }),
+                  "idle mean-K restore changed values");
+        }
+        // Restoring the attachment leaves a reusable hole between native
+        // extents; exhaust the quota without assuming all free space is contiguous.
+        std::vector<kvmem::SpillExtent> remaining;
+        while (files.bytes() < 4096) remaining.push_back(disk->reserve(8));
+        rejects([&] { payload.spill(files, 0); });
+        check(payload.complete(), "shared D exhaustion released valid idle RAM");
+    }
+    std::filesystem::remove(root / kvmem_session_cache_dir::root_lock_name());
+    check(std::filesystem::is_empty(root), "shared spill file leaked");
+    std::filesystem::remove(root);
+}
+
 int main(int argc, char ** argv) {
+    try {
     if (argc == 2 && std::string(argv[1]) == "--scale-1to10") {
         scale_1to10();
         return 0;
@@ -263,5 +329,10 @@ int main(int argc, char ** argv) {
         return 2;
     }
     routes(); failure_matrix(); corruption_and_pressure(); partial_io_and_cleanup(); raw_roundtrip();
+    shared_native_and_idle();
     std::cout << "session exchange paths, 10/15/20 peaks, fault recovery, identity and raw KV passed\n";
+    } catch (const std::exception & error) {
+        std::cerr << "session transfer failure: " << error.what() << '\n';
+        return 1;
+    }
 }

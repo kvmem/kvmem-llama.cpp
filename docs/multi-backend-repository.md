@@ -132,7 +132,9 @@ the active patches live under `backends/patches/`.
 The current branch is a development candidate. P6-P10 and the later source
 admissions are in this tree: nine KV types, text and resident/CPU vision at up
 to eight requests, ngram, fast prefill on the admitted formats, and the ninfer
-layer pipeline. Cold snapshots stay disabled at the entry points. The release
+layer pipeline. Active KV tiering replaces the disabled ninfer disk entry with
+process-local storage shared by active and idle histories; it does not support
+restart persistence. See [tiering qualification](active-kv-tiering-plan.md). The release
 matrix and a package that matches this source are not finished. Current patch
 hashes are in `backends/versions.json`. See [validation status](multi-backend-validation.md)
 and [supported backend combinations](multi-backend.md). Once accepted, merge into

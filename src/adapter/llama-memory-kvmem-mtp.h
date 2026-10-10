@@ -127,6 +127,8 @@ public:
         return std::make_unique<kvmem::RawKvStore>(raw_cfg_);
     }
     uint64_t host_bytes() const { return raw_ ? raw_->allocated_bytes() : 0; }
+    uint64_t payload_bytes(bool disk_only = false) const { return raw_ ? raw_->payload_bytes(disk_only) : 0; }
+    uint64_t payload_capacity_bytes(uint32_t tokens) const { return raw_ ? raw_->payload_capacity_bytes(tokens) : 0; }
     uint64_t capacity_bytes(uint32_t tokens) const { return raw_ ? raw_->capacity_bytes(tokens) : 0; }
     // Empty the draft cells but keep the mirror, unlike clear(bool) which also
     // wipes raw_. Called from the target's detach after its own drain, which

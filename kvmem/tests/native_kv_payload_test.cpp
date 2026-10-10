@@ -112,7 +112,31 @@ static void raw_bridge(uint32_t block_tokens, uint32_t valid_tokens) {
     incomplete.write_layer_k_gpu(block_tokens, valid_tokens, 1, k.data());
     rejects(MemoryErrorCode::Stale, [&] { export_raw_kv_payload(incomplete, identity, layout, b); });
 }
+static void shared_ram_limit() {
+    RawKvStoreConfig cfg;
+    cfg.n_layer = 1; cfg.block_tokens = 4;
+    cfg.k_gpu_row_bytes = 4; cfg.v_gpu_row_bytes = 4;
+    cfg.payload_storage = std::make_shared<HostKvStorage>(64);
+    RawKvStore main(cfg), draft(cfg);
+    std::vector<uint8_t> bytes(16, 37), restored(16);
+    main.write_layer_k_gpu(0, 4, 0, bytes.data());
+    main.write_layer_v_gpu(0, 4, 0, bytes.data());
+    draft.write_layer_k_gpu(0, 4, 0, bytes.data());
+    draft.write_layer_v_gpu(0, 4, 0, bytes.data());
+    CHECK(cfg.payload_storage->charged_bytes() == 64);
+    rejects(MemoryErrorCode::BudgetExceeded, [&] { main.write_layer_k_gpu(4, 4, 0, bytes.data()); });
+    CHECK(main.copy_k_gpu(0, 0, restored.data(), 4) && restored == bytes);
+    draft.clear();
+    CHECK(cfg.payload_storage->charged_bytes() == 32);
+    main.write_layer_k_gpu(4, 4, 0, bytes.data());
+    main.write_layer_v_gpu(4, 4, 0, bytes.data());
+    main.truncate_to(4);
+    CHECK(cfg.payload_storage->charged_bytes() == 32);
+    main.clear();
+    CHECK(cfg.payload_storage->charged_bytes() == 0);
+}
 int main() {
+    shared_ram_limit();
     for (int profile = 0; profile < 3; ++profile) native_planes(profile);
     invalid_layouts();
     for (uint32_t bt : {32u, 64u, 128u}) {

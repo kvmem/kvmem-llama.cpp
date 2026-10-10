@@ -66,15 +66,31 @@ try {
         if (!$rejected) { throw 'Invalid stage layer counts accepted' }
     }
     foreach ($diskCase in @(
-        @{DiskPath='cache with spaces'; DiskMiB=1024}, @{DiskPath=''}, @{DiskMiB=4096},
+        @{DiskPath=''}, @{DiskMiB=4096},
         @{WorkerArgs=@('--kvmem-disk-path', 'cache')},
         @{WorkerArgs=@('--kvmem-disk-mib', '0')},
         @{WorkerArgs=@('--kvmem-disk-path=cache')}
     )) {
         $disabled = $false
         try { $null = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') @diskCase }
-        catch { $disabled = $_.Exception.Message -match 'cold snapshots are temporarily disabled' }
-        if (!$disabled) { throw 'Launcher allowed disabled ninfer cold snapshots' }
+        catch { $disabled = $_.Exception.Message -match 'DiskPath|DiskMiB' }
+        if (!$disabled) { throw 'Launcher allowed ambiguous SSD configuration' }
+    }
+    foreach ($backend in 'ninfer', 'llamacpp') {
+        $model = if ($backend -eq 'ninfer') { 'model with spaces.ninfer' } else { 'model.gguf' }
+        $disk = & $launcher @common -Backend $backend -Model (Join-Path $testDir $model) `
+            -DiskPath 'cache with spaces' -DiskMiB 1024 -HostMiB 512 | ConvertFrom-Json
+        if ($disk.argv[[array]::IndexOf($disk.argv, '--kvmem-disk-path') + 1] -ne 'cache with spaces' -or
+            $disk.argv[[array]::IndexOf($disk.argv, '--kvmem-disk-mib') + 1] -ne '1024' -or
+            $disk.argv[[array]::IndexOf($disk.argv, '--kvmem-host-mib') + 1] -ne '512' -or
+            !$disk.capabilities.active_kv_tiering -or $disk.capabilities.ssd_persistence -ne 'process') {
+            throw 'Shared H/D launcher mapping changed ownership or path boundaries'
+        }
+    }
+    $fastDisk = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
+        -FastPrefill -DiskPath 'cache' -MtpDrafts 3 -AdaptiveMtp | ConvertFrom-Json
+    if ($fastDisk.argv -notcontains '--kvmem-disk-path' -or $fastDisk.argv -notcontains '--fast-prefill-kernel') {
+        throw 'SSD mapping incorrectly rejected independent prefill configuration'
     }
     $mtp = & $launcher @common -Backend ninfer -Model (Join-Path $testDir 'model with spaces.ninfer') `
         -MtpDrafts 3 -Concurrency 2 -RetainedSessions 8 | ConvertFrom-Json
@@ -263,15 +279,13 @@ try {
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; KvType='bf16'; Vision=$true},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; KvType='fp8'},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; KvType='nvfp4'},
-        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); FastPrefill=$true; DiskPath='cache'},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='nvfp4'; Vision=$true; Concurrency=9},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='nvfp4'; NgramDrafts=31},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='unknown-kv'},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); KvType='nvpf4'},
-        @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); DiskPath='cache'; DeviceProfile='auto'},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); NgramDrafts=31},
         @{Backend='ninfer'; Model=(Join-Path $testDir 'model with spaces.ninfer'); MtpDrafts=3; NgramDrafts=64; Concurrency=2},
-        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); HostMiB=1024}
+        @{Backend='llamacpp'; Model=(Join-Path $testDir 'model.gguf'); DiskMiB=1024}
     )
     foreach ($argsCase in $bad) {
         $rejected = $false

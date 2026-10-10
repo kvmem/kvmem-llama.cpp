@@ -11,11 +11,13 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+#include "kvmem/host_kv_storage.hpp"
 
 namespace kvmem {
 
@@ -35,6 +37,7 @@ struct RawKvStoreConfig {
     uint64_t nvme_bytes = 0;
     std::string nvme_dir;
     std::string nvme_file = "kvmem_raw_k.bin";
+    std::shared_ptr<HostKvStorage> payload_storage;
 };
 
 class RawKvStore {
@@ -87,6 +90,8 @@ public:
     size_t bytes_k() const;
     size_t bytes_v() const;
     size_t allocated_bytes() const;
+    uint64_t payload_bytes(bool disk_only = false) const;
+    uint64_t payload_capacity_bytes(uint32_t tokens, uint32_t populated_layers = UINT32_MAX) const;
     uint64_t capacity_bytes(uint32_t tokens, uint32_t populated_layers = UINT32_MAX) const;
     void snapshot_write(SnapshotWriter & out);
     void snapshot_read(SnapshotReader & in, uint32_t max_blocks);
@@ -114,8 +119,8 @@ private:
         uint32_t mean_tokens = 0;
         std::vector<uint8_t> k;
         std::vector<uint16_t> v;
-        std::vector<uint8_t> k_gpu;
-        std::vector<uint8_t> v_gpu;
+        HostKvRecord k_gpu;
+        HostKvRecord v_gpu;
         std::vector<float> k_sum;
         bool k_on_nvme = false;
         bool v_on_nvme = false;
@@ -141,21 +146,23 @@ private:
     bool load_k_nvme(uint32_t block_id, uint32_t il, uint8_t * dst) const;
     bool load_v_nvme(uint32_t block_id, uint32_t il, uint16_t * dst) const;
     bool load_v_gpu_nvme(uint32_t block_id, uint32_t il, uint8_t * dst) const;
-    void enqueue_flush(uint32_t key, std::vector<uint8_t> && data, uint64_t bytes,
+    void enqueue_flush(uint32_t key, const void * data, uint64_t bytes,
                        uint32_t block_id, uint32_t il, bool is_v);
     void io_loop();
     bool io_sync_inline() const;
 
     struct IoJob {
-        uint32_t key = 0;
+        int32_t slot = -1;
         uint32_t block_id = 0;
         uint32_t il = 0;
         bool is_v = false;
         uint64_t bytes = 0;
-        std::vector<uint8_t> data;
+        // Flushing excludes mutation. Clear and destruction drain the worker.
+        const uint8_t * data = nullptr;
     };
 
     RawKvStoreConfig cfg_;
+    std::shared_ptr<HostKvStorage> payload_storage_;
     std::vector<BlockRaw> blocks_;
     std::unique_ptr<NvmeKvTier> nvme_;
     mutable std::vector<uint16_t> io_;
@@ -168,6 +175,7 @@ private:
     mutable std::condition_variable cv_;
     std::vector<IoJob> q_;
     size_t inflight_ = 0;
+    std::exception_ptr io_error_;
     std::thread io_thread_;
     std::atomic<bool> stop_io_{false};
 };

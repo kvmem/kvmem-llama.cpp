@@ -35,6 +35,9 @@ struct llama_kvmem_params {
     const char * nvme_dir;         // directory for the ephemeral NVMe file
     bool     raw_k_nvme;           // put raw-K/V authority on NVMe (qw3-style)
     bool     harvest_v;            // prefill D2H V with K (default off; not implied by raw_k_nvme)
+    uint64_t payload_host_bytes;   // shared native K/V RAM quota; 0 = unlimited RAM
+    uint64_t payload_disk_bytes;   // shared active/idle SSD quota; 0 = disabled
+    const char * payload_disk_dir; // process-local spill directory, UTF-8
     int32_t  mtp_state;            // 0 snapshots, 1 auto, 2 replay
 };
 
@@ -53,6 +56,13 @@ LLAMA_API struct llama_kvmem_execution_state * llama_kvmem_execution_create(void
 LLAMA_API void llama_kvmem_execution_free(struct llama_kvmem_execution_state * state);
 LLAMA_API struct llama_kvmem_execution_state * llama_kvmem_execution_exchange(
         struct llama_kvmem_execution_state * state);
+struct llama_kvmem_storage_stats {
+    uint64_t host_bytes, host_capacity, disk_bytes, disk_capacity;
+    uint64_t read_bytes, written_bytes, reads, writes, errors;
+};
+// Read-only accounting; the execution state must remain alive during the call.
+LLAMA_API struct llama_kvmem_storage_stats llama_kvmem_execution_storage_stats(
+        const struct llama_kvmem_execution_state * state);
 
 // Legacy eval-callback entry. Always returns false so ggml does not split the
 // graph. Capture harvest runs after the full ubatch compute instead.
@@ -199,6 +209,9 @@ LLAMA_API void llama_kvmem_store_bundle_reset(llama_kvmem_store_bundle * bundle)
 LLAMA_API uint64_t llama_kvmem_store_active_bytes();
 LLAMA_API uint32_t llama_kvmem_store_bundle_rows(const llama_kvmem_store_bundle * bundle);
 LLAMA_API uint64_t llama_kvmem_store_bundle_bytes(const llama_kvmem_store_bundle * bundle);
+LLAMA_API uint64_t llama_kvmem_store_bundle_payload_bytes(const llama_kvmem_store_bundle * bundle);
+LLAMA_API void llama_kvmem_store_bundle_freeze(llama_kvmem_store_bundle * bundle, std::vector<kvmem::SnapshotBuffer> & buffers);
+LLAMA_API void llama_kvmem_store_bundle_thaw(llama_kvmem_store_bundle * bundle);
 // Process-local disk-cache hooks. Park leaves an empty, valid execution store
 // attached so the outgoing RAM can be released before a cold store is read.
 LLAMA_API bool llama_kvmem_store_park();
@@ -208,6 +221,9 @@ LLAMA_API void llama_kvmem_store_snapshot_write(int32_t id, kvmem::SnapshotWrite
 LLAMA_API void llama_kvmem_store_snapshot_read(int32_t id, kvmem::SnapshotReader & in);
 LLAMA_API void llama_kvmem_store_release_payload(int32_t id);
 LLAMA_API uint64_t llama_kvmem_store_capacity(uint32_t tokens);
+LLAMA_API uint64_t llama_kvmem_store_payload_capacity(uint32_t tokens);
+LLAMA_API uint64_t llama_kvmem_payload_budget(void);
+LLAMA_API uint64_t llama_kvmem_store_payload_bytes(int32_t store_id, bool disk_only);
 
 struct llama_kvmem_row_range {
     int32_t begin = 0;

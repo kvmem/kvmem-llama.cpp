@@ -78,7 +78,31 @@ foreach ($entry in @(@('llamacpp', $LlamaWorker, 'llama-kvmem-server.exe'),
 foreach ($script in 'start-backend.ps1', 'start-ninfer.ps1', 'native-process.ps1') {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $script) -Destination (Join-Path $OutputDir 'scripts/windows')
 }
-Copy-Item -LiteralPath (Join-Path $source 'docs/multi-backend.md') -Destination (Join-Path $OutputDir 'README.md')
+Copy-Item -LiteralPath (Join-Path $source 'docs') -Destination (Join-Path $OutputDir 'docs') -Recurse
+$packageReadme = @'
+# KVMem Windows workers
+
+This package contains llama.cpp and ninfer workers, their runtime dependencies and
+the common launcher. Models are supplied separately. Install the NVIDIA driver
+and Microsoft Visual C++ 2015-2022 x64 Runtime before starting a worker.
+
+See [launch and backend options](docs/multi-backend.md) and
+[active RAM/SSD storage](docs/active-kv-tiering.md). Use `-Describe` to inspect
+launcher capabilities, and `-DryRun` to inspect the exact worker arguments.
+
+```powershell
+./scripts/windows/start-backend.ps1 -Backend ninfer -Model 'D:/models/model.ninfer' -DryRun
+```
+
+`-HostMiB`, `-DiskPath` and `-DiskMiB` configure shared native KV RAM and process-local
+SSD storage for either backend. SSD contents live only for the worker lifetime;
+they cannot restore a session after restart or transfer it between backends.
+
+`BUILD-INFO.json` records the source versions and dependency-loading checks.
+`provenance/validation.json`, when present, records the actual runtime acceptance
+scope. Dependency packaging alone does not qualify every model or configuration.
+'@
+[IO.File]::WriteAllText((Join-Path $OutputDir 'README.md'), $packageReadme, [Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath (Join-Path $CudaPath 'EULA.txt') -Destination (Join-Path $OutputDir 'licenses/CUDA-EULA.txt')
 Copy-Item -LiteralPath (Join-Path $source 'backends/llamacpp/LICENSE') -Destination (Join-Path $OutputDir 'licenses/llama-MIT.txt')
 Copy-Item -LiteralPath (Join-Path $source 'README.md') -Destination (Join-Path $OutputDir 'licenses/KVMem-README.md')

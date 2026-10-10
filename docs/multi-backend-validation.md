@@ -4,6 +4,11 @@ This is a development candidate, not a final P6–P10 release qualification.
 The repository consolidation changes source ownership and build entry points;
 it does not establish new GPU performance numbers.
 
+2026-10-10: The active KV tiering candidate replaces the disabled ninfer disk
+entry below with shared process-local RAM/SSD storage. Current qualification and
+remaining gates are in [the tiering plan](active-kv-tiering-plan.md). Earlier disk
+results remain historical; they do not qualify this replacement.
+
 2026-10-06: KVMem cold snapshots in ninfer are temporarily disabled at the launcher,
 serve CLI and Engine option boundaries by user request. Disk results below are prior
 evidence, not currently enabled functionality. Host history reuse remains available.

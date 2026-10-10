@@ -70,6 +70,8 @@ struct kvmem_server_options {
     uint64_t conversation_bytes = 0; // Accounted host store bytes; zero = count cap only.
     uint64_t session_disk_bytes = 0;
     std::string session_cache_dir;
+    uint64_t payload_host_bytes = 0, payload_disk_bytes = 0;
+    std::string payload_disk_dir;
     int verbosity = 3; // Same default and levels as llama-server.
     int trace = -1; // -1 inherits KVMEM_TRACE; CLI overrides only after parsing.
     int threads = -1;
@@ -160,7 +162,13 @@ struct kvmem_server_options {
 
     template<typename Need>
     bool parse(const std::string & arg, const Need & need) {
-        if (arg == "--kvmem-sink-tokens") {
+        if (arg == "--kvmem-host-mib" || arg == "--kvmem-disk-mib") {
+            const auto mib = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);
+            (arg == "--kvmem-host-mib" ? payload_host_bytes : payload_disk_bytes) = uint64_t(mib) << 20;
+        } else if (arg == "--kvmem-disk-path") {
+            payload_disk_dir = need(arg.c_str());
+            if (payload_disk_dir.empty()) throw std::invalid_argument("KVMem spill directory is empty");
+        } else if (arg == "--kvmem-sink-tokens") {
             sink_tokens = kvmem_cli_int(arg.c_str(), need(arg.c_str()));
         } else if (arg == "--kvmem-conversations") {
             conversations = kvmem_cli_int(arg.c_str(), need(arg.c_str()), 1);

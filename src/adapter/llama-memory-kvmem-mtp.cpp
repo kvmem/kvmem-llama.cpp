@@ -6,6 +6,7 @@
 #include "llama-impl.h"
 #include "llama-kvmem-capture.h"
 #include "llama-kvmem-hooks.h"
+#include "llama-kvmem-execution.h"
 #include "llama-kvmem-stagein.h"
 #include "llama-kvmem-transfer.h"
 #include "llama-model.h"
@@ -144,6 +145,7 @@ llama_memory_kvmem_mtp::llama_memory_kvmem_mtp(
     // Kept as a member so a sibling mirror for another conversation is
     // configured identically.
     kvmem::RawKvStoreConfig & rcfg = raw_cfg_;
+    rcfg.payload_storage = kvmem_execution_payload_storage();
     rcfg.n_layer = std::max(1u, model.hparams.n_layer_nextn);
     rcfg.n_embd_k = n_embd_k_;
     rcfg.n_embd_v = n_embd_v_;

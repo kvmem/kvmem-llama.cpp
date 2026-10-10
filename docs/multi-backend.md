@@ -1,6 +1,6 @@
 # KVMem 多后端运行
 
-本文对应 `feat/multi-backend-framework` 工作区 2026-10-07 的源码。已发布 ZIP 早于这些能力。两后端参数差异见 [实现差异](multi-backend-differences.md)。
+本文对应多后端分支及 2026-10-10 的活跃 KV 分层候选源码。已发布 ZIP 早于这些能力。两后端参数差异见 [实现差异](multi-backend-differences.md)，本次验收进度见 [分层实现计划](active-kv-tiering-plan.md)。
 
 迁移候选改用 `iamwavecut/ninfer-all` 的固定提交 `8319e8f51247`，llama.cpp 基线保持原值。当前迁移验收进度见 [迁移记录](ninfer-all-migration-validation.md)；下文各有日期的实验是旧基线证据，不能视为新基线已经完成同等覆盖。KVMem 暂不支持新增的 `qwen4_exp`、模型 suspend、prompt graft 和 router，开启这些组合时明确报错。
 
@@ -47,11 +47,11 @@ llama.cpp 示例：
   -Budget 4096 -Reserve 1024 -KvType q8_0
 ```
 
-已有的 llama.cpp 可执行文件、`start-server.ps1`、IQ3/IQ4 启动脚本仍可使用。原生参数通过 `-WorkerArgs @('--flag', 'value')` 传入，例如 llama 的 MTP、mmproj 和会话配置。后端参数保留各自含义；`.gguf` 与 `.ninfer` 不互换，也不迁移跨引擎 KV。`-HostMiB` 只对应 ninfer 的原生 KV payload 预算。
+已有的 llama.cpp 可执行文件、`start-server.ps1`、IQ3/IQ4 启动脚本仍可使用。原生参数通过 `-WorkerArgs @('--flag', 'value')` 传入，例如 llama 的 MTP、mmproj 和会话配置。后端参数保留各自含义；`.gguf` 与 `.ninfer` 不互换，也不迁移跨引擎 KV。当前源码的 `-HostMiB` 对应两个后端共用的原生 KV payload RAM 预算；llama 仅在显式指定或启用 SSD 时传入，保持未配置时的行为。
 
 ## ninfer 功能与组合
 
-当前源码支持固定 MTP1–15、多个 Host 会话、最多八条文本或 resident/CPU 图像请求，可在同一服务中混合图文；BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 沿用相同的请求预算规则。2026-10-06 按用户要求暂时禁用 ninfer 的 KVMem 磁盘冷快照入口，内存中的 Host 历史复用继续可用。自适应 MTP 允许文本及 resident/CPU 图片 C1–8；ngram1–15 可用于九种 KV 的多路文本及 resident/CPU 图片，启动并发大于1时，配置的 ngram16–63 自动降至15并提示，单路保留原宽度。快速 prefill 允许 INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 的文本及 resident/CPU 图片。CPU 图片编码沿用原生串行编码器，八条活动请求不表示八张图片同时编码。冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
+当前源码支持固定 MTP1–15、多个 Host 会话、最多八条文本或 resident/CPU 图像请求，可在同一服务中混合图文；BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 沿用相同的请求预算规则。2026-10-10 起，磁盘入口接入公共进程内 RAM/SSD 分层，活动 KV 和非活动历史共享 D 配额；旧持久化快照已被替换。自适应 MTP 允许文本及 resident/CPU 图片 C1–8；ngram1–15 可用于九种 KV 的多路文本及 resident/CPU 图片，启动并发大于1时，配置的 ngram16–63 自动降至15并提示，单路保留原宽度。快速 prefill 允许 INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 的文本及 resident/CPU 图片。CPU 图片编码沿用原生串行编码器，八条活动请求不表示八张图片同时编码。冻结的 P5 运行包仍只有单请求文本能力；新源码的参数不适用于旧包。最终可用组合以随包验收报告为准。原生非 KVMem 模式保持原来的参数入口。
 
 双 NVFP4 已接入源码，5050 上的聚焦数值／页搬运测试及 Bonsai B128/R128 ordinary、MTP1 eager、MTP4 Graph 功能检查已通过。
 两个 MTP 用例使用现有 D3D12/WDDM 选项、FP16 GDN 和关闭的 ngram；默认 CUDA 预算下 Q8 MTP 装载仍被容量检查拒绝。
@@ -89,7 +89,7 @@ ngram 默认关闭。
   -MtpDrafts 2 -NgramDrafts 0 -KvType nvfp4 -Budget 32768 -Reserve 16384
 ```
 
-`-MtpDrafts` 默认 0，可选固定 1–15；`-AdaptiveMtp` 要求 MTP，允许文本/图片 C1–8；`-FastPrefill` 允许 INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 的文本及 resident/CPU 图片 C1–8，冷快照保持禁用；`-VisionResidency cpu` 要求 `-Vision`；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP：宽度 1–15 允许 C1–8；启动并发 C2–8 时，配置的 16–63 自动降至15并提示，C1 保留原宽度。文本及 resident/CPU 图片均允许 BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 九种 KV。多路上限 15 来自原生 GDN 验证工作区的 16 列容量；本次移除了 KVMem 额外的单路门禁。`-NgramMinMatch` 默认 12，可选 4–64。例如八路文本用 `-Concurrency 8 -MtpDrafts 3 -NgramDrafts 15 -KvType int8`，图片再加 `-Vision`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。直接运行 server 开启 MTP 时，默认 ngram15 可用于多路；统一脚本默认仍显式传入 ngram0。快捷脚本默认单路/ngram31，改成多路时会自动使用 ngram15；以启动并发上限为准，当时只有一条活动请求也不改变宽度。MTP 独立 attention window、视频、overlay Vision、并行 prefill 和冷快照仍被拒绝。`-DeviceProfile auto` 可选原生设备配置；磁盘冷快照当前暂时禁用。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
+`-MtpDrafts` 默认 0，可选固定 1–15；`-AdaptiveMtp` 要求 MTP，允许文本/图片 C1–8；`-FastPrefill` 允许 INT8/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 的文本及 resident/CPU 图片 C1–8，可组合公共 SSD 分层；`-VisionResidency cpu` 要求 `-Vision`；`-NgramDrafts` 默认 0，可选 1–63，非零时要求 MTP：宽度 1–15 允许 C1–8；启动并发 C2–8 时，配置的 16–63 自动降至15并提示，C1 保留原宽度。文本及 resident/CPU 图片均允许 BF16/INT8/FP8/NVFP4/K8V4/RK8V4/RK4V4/RK4V4-E8/RK2V4-E8 九种 KV。多路上限 15 来自原生 GDN 验证工作区的 16 列容量；本次移除了 KVMem 额外的单路门禁。`-NgramMinMatch` 默认 12，可选 4–64。例如八路文本用 `-Concurrency 8 -MtpDrafts 3 -NgramDrafts 15 -KvType int8`，图片再加 `-Vision`。ngram 使用完整已提交 token 历史提出复制草稿，仍由目标模型验证；重复文本或代码更容易获益，不能承诺所有输入都加速。直接运行 server 开启 MTP 时，默认 ngram15 可用于多路；统一脚本默认仍显式传入 ngram0。快捷脚本默认单路/ngram31，改成多路时会自动使用 ngram15；以启动并发上限为准，当时只有一条活动请求也不改变宽度。MTP 独立 attention window、视频、overlay Vision、并行 prefill 仍被拒绝。`-DeviceProfile auto` 可选原生设备配置；公共 SSD 分层不提供重启恢复。`-RetainedSessions` 控制非活动 Host 历史数量，默认 4，上限 16。
 
 本次 ninfer 实测制品是 Qwen3.8-27B-GSQ-RCO-IQ3_S，设备为 RTX 5060 Ti 16GB、CUDA 13.2、`sm_120a`。8K/64K/128K/256K 档的早期口令检索和后续追问通过；这组人工构造用例不代表通用长文问答质量，也不表示其他 GPU 架构已验收。示例的 B=2048、R=512、H=12 GiB 是实际通过的配置。
 
@@ -119,9 +119,23 @@ ninfer 直接启动参数为 `--kvmem-budget B --kvmem-gen-reserve R --kvmem-hos
 
 ninfer 保留四种用途独立的完整状态点：输入/查询前 Base、正常生成结束的已执行端点、Frontend 确认的输入回退边界、生成内容的模板重建边界。输入回退点不会被生成阶段的思考结束状态覆盖，下一轮丢弃或替换生成答案、继续追加相同工具历史时，仍可复用此前输入。未改写的 assistant/工具回放可复用生成内容；最后一个尚未执行的输出 token 留给下一轮计算。每个会话共用一份 Host KV 历史，最多四个完整状态点。长历史工具续写在查询 span 和精确输入身份一致时保留原 Q/选页，只计算新增尾部；新用户查询重新执行检索，改写后的历史仅恢复仍精确匹配的完整状态点。恢复更早状态时放弃较晚状态点，防止共享历史被覆写后仍错误命中。此补全属于 ninfer 适配，llamacpp 路径保持原有行为。
 
-KVMem 磁盘冷快照已暂时禁用。启动器显式传入 `-DiskPath`、`-DiskMiB` 或经 `WorkerArgs` 传入对应原生参数都会被拒绝；服务端直接传入 `--kvmem-disk-path`、`--kvmem-disk-mib` 也明确报错；Engine 配置的非空 `disk_path` 或非零 `disk_bytes` 同样被拒绝。能力描述中的 `disk_restore` 为 false。内存会话复用和 `--derive-session-keys` 保持可用；llama.cpp 的 conversation SSD 缓存保持原有行为。
+当前源码使用进程内活跃 KV 分层替代已禁用的 ninfer KVMem 冷快照实现。
+两个后端的统一启动器均接受 `-HostMiB H -DiskPath 'D:/kv-cache' -DiskMiB D`；
+直接启动 worker 时使用 `--kvmem-host-mib H --kvmem-disk-path PATH --kvmem-disk-mib D`。
+启动器要求磁盘参数经上述顶层选项传入，不通过 WorkerArgs 重复设置。
+省略 DiskPath 则不启用 SSD；仅指定 DiskMiB 或空路径会报错。
 
-已有快照文件和底层实现保留，当前入口不会读写它们。此前的 `ninfer-kvmem-v5` 格式保存原生 KV、四种状态点、mean 统计与冻结 Q/选页，支持匹配配置的文本历史跨进程恢复；此前验收记录仅描述禁用前的行为。它不是在线 NVMe 分层，也不使用 DirectStorage。
+即使只有一条活跃请求，超过 H 的已完成原生 K/V 块也可放入 SSD，检索选中的块按需读取。
+K、V、scale 和 MTP 数据保持原格式，活跃 mean-K 留在 RAM。H 是原生 KV 驻留预算，
+不包含 recurrent checkpoint、统计、传输暂存或系统文件缓存。D 是活跃原生 KV 与闲置
+会话附件共用的额度；会话转为闲置时移动原记录所有权，不再复制一份 KV。
+H 必须容纳所有并发 lane 的基本工作区，H+D 还需为换页预留余量；容量不足会明确拒绝。
+
+文件属于当前服务进程，正常退出或进程结束后释放，不导入旧 ninfer-kvmem-v5 文件，
+不提供重启恢复。ninfer 的 `disk_restore=false` 保留这一含义；`active_kv_tiering=true`
+和 `ssd_enabled` 分别表示分层能力及是否启用。既有 llama 会话磁盘入口保留，不能与新的
+共享 SSD 配置混用。Windows 和 Linux 使用同一存储契约；当前验收状态与性能限制见
+[活跃 KV 分层计划](active-kv-tiering-plan.md)，不能将 WSL 主机测试当作 Linux CUDA 验收。
 
 已知 H 或逻辑上下文不足会在请求执行前返回错误，服务可以继续使用。实际 CUDA 驱动/设备错误仍沿用原生 ninfer 的失败处理，可能需要重启 worker；没有承诺在设备故障后继续复用同一会话。
 

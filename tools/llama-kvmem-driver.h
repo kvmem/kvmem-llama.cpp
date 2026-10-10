@@ -209,6 +209,7 @@ std::vector<llama_token> llama_driver_tokenize(const llama_vocab * vocab, const 
 void llama_driver_swap_conversation(LlamaEngineState & st, kvmem_conversation & conv);
 
 void llama_driver_drop_conversation(kvmem_conversation & conv);
+void llama_driver_conversation_buffers(kvmem_conversation & conv, std::vector<kvmem::SnapshotBuffer> & buffers);
 
 void llama_driver_publish_conversations(LlamaEngineState & st);
 
@@ -219,6 +220,7 @@ void llama_driver_begin_request(LlamaEngineState & st, const kvmem_prompt & prom
 
 void llama_driver_begin_disk_request(LlamaEngineState & st, const kvmem_prompt & prompt,
                                   const std::string & client_id, int predict);
+void llama_driver_check_payload_budget(LlamaEngineState & st, const kvmem_prompt & prompt, int predict);
 
 void llama_driver_commit(LlamaEngineState & st, const std::vector<llama_token> & prompt,
                           const std::vector<llama_token> & gen);

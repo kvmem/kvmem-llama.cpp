@@ -219,6 +219,9 @@ public:
     uint32_t conv_n_tokens(const ConvStore & conv) const;
     uint64_t conv_host_bytes(const ConvStore & conv) const;
     uint64_t host_bytes() const;
+    uint64_t payload_bytes(bool disk_only) const;
+    uint64_t payload_capacity_bytes(uint32_t tokens) const;
+    uint64_t payload_budget() const;
     uint64_t host_capacity(uint32_t tokens) const;
 
 private:

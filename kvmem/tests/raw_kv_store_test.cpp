@@ -11,6 +11,10 @@
 #include <cstring>
 #include <memory>
 #include <vector>
+#if KVMEM_ENABLE_NVME
+#include <csignal>
+#include <sys/resource.h>
+#endif
 
 #define CHECK(cond)                                                            \
     do {                                                                       \
@@ -186,7 +190,105 @@ static void test_store_bytes() {
     CHECK(raw.bytes_k() == 0 && raw.bytes_v() == 0);
 }
 
+#if KVMEM_ENABLE_NVME
+static kvmem::RawKvStoreConfig failure_config() {
+    kvmem::RawKvStoreConfig cfg;
+    cfg.n_layer = 1; cfg.n_embd_k = cfg.n_embd_v = 4;
+    cfg.block_tokens = 4; cfg.k_gpu_row_bytes = cfg.v_gpu_row_bytes = 8;
+    cfg.nvme_bytes = 64;
+    cfg.nvme_dir = (std::filesystem::temp_directory_path() /
+        ("kvmem-raw-failure-" + std::to_string(getpid()))).string();
+    return cfg;
+}
+
+static void test_capacity_failure() {
+    const auto cfg = failure_config();
+    // Exercise all three legacy writer sources, including inline writes.
+    for (bool sync : {false, true}) for (int kind = 0; kind < 3; ++kind) {
+        CHECK(setenv("KVMEM_HARVEST_SYNC", sync ? "1" : "0", 1) == 0);
+        kvmem::RawKvStore raw(cfg);
+        std::vector<uint8_t> packed(32), got(32);
+        std::vector<uint16_t> f16(16);
+        const auto write = [&](unsigned id) {
+            std::fill(packed.begin(), packed.end(), uint8_t(id + 1));
+            std::fill(f16.begin(), f16.end(), uint16_t(0x3c00 + id));
+            if (kind == 0) raw.write_layer_v_gpu(id * 4, 4, 0, packed.data());
+            else if (kind == 1) raw.write_layer_k_rows(id * 4, 4, 0, packed.data(), nullptr);
+            else raw.write_layer_tokens_f16(id * 4, 4, 0, nullptr, f16.data());
+        };
+        write(0); write(1);
+        bool rejected = false;
+        try { write(2); } catch (const std::runtime_error&) { rejected = true; }
+        CHECK(rejected);
+        raw.wait_writes();
+        CHECK(raw.nvme_bytes_written() == 64);
+        for (unsigned id = 0; id < 3; ++id) {
+            if (kind == 2) {
+                std::vector<float> values(16);
+                CHECK(raw.copy_v(id, 0, values.data()));
+                for (auto value : values) CHECK(value == 1.0f + float(id) / 1024.0f);
+            } else {
+                CHECK(kind == 0 ? raw.copy_v_gpu(id, 0, got.data(), 4)
+                                : raw.copy_k_rows(id, 0, got.data(), 4));
+                for (auto value : got) CHECK(value == id + 1);
+            }
+        }
+        raw.clear();
+        write(0); raw.wait_writes();
+        CHECK(raw.nvme_bytes_written() == 32);
+    }
+    CHECK(setenv("KVMEM_HARVEST_SYNC", "0", 1) == 0);
+    std::filesystem::remove(cfg.nvme_dir);
+}
+
+static void test_write_failure() {
+    const auto cfg = failure_config();
+    for (bool recover : {false, true}) {
+        kvmem::RawKvStore raw(cfg);
+        std::vector<uint8_t> packed(32, 17), got(32);
+        struct rlimit previous;
+        CHECK(getrlimit(RLIMIT_FSIZE, &previous) == 0);
+        const auto old_handler = std::signal(SIGXFSZ, SIG_IGN);
+        CHECK(old_handler != SIG_ERR);
+        auto limit = previous;
+        limit.rlim_cur = 0; // Deterministic pwrite failure after arena creation.
+        CHECK(setrlimit(RLIMIT_FSIZE, &limit) == 0);
+        bool failed = false;
+        try {
+            raw.write_layer_v_gpu(0, 4, 0, packed.data());
+            raw.wait_writes();
+        } catch (const std::runtime_error&) { failed = true; }
+        CHECK(setrlimit(RLIMIT_FSIZE, &previous) == 0);
+        CHECK(std::signal(SIGXFSZ, old_handler) != SIG_ERR);
+        CHECK(failed && raw.nvme_bytes_written() == 0);
+        CHECK(raw.has_v_gpu(0, 0, 4) && raw.copy_v_gpu(0, 0, got.data(), 4));
+        CHECK(got == packed);
+        bool repeated = false;
+        try { raw.wait_writes(); } catch (const std::runtime_error&) { repeated = true; }
+        CHECK(repeated);
+        if (recover) {
+            raw.clear();
+            raw.write_layer_v_gpu(0, 4, 0, packed.data());
+            raw.wait_writes();
+            CHECK(raw.nvme_bytes_written() == 32);
+            CHECK(raw.copy_v_gpu(0, 0, got.data(), 4) && got == packed);
+        } // The other case destroys a failed store without terminating or hanging.
+    }
+    std::filesystem::remove(cfg.nvme_dir);
+}
+#endif
+
 int main() {
+#if KVMEM_ENABLE_NVME
+    const char * previous_sync = std::getenv("KVMEM_HARVEST_SYNC");
+    const bool had_sync = previous_sync != nullptr;
+    const std::string saved_sync = previous_sync ? previous_sync : "";
+    test_capacity_failure();
+    test_write_failure();
+    if (had_sync) CHECK(setenv("KVMEM_HARVEST_SYNC", saved_sync.c_str(), 1) == 0);
+    else CHECK(unsetenv("KVMEM_HARVEST_SYNC") == 0);
+    std::puts("raw NVMe: capacity refusal, failed-write retention, drain and clear recovery passed");
+#endif
     test_sum_only(32);
     test_sum_only(128);
     test_sibling_stores_are_independent();

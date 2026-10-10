@@ -22,6 +22,16 @@ int main() {
         check(o.parse(flag, [&](const char *) { return value; }));
     };
     check(o.sink_tokens == 0);
+    check(o.payload_host_bytes == 0 && o.payload_disk_bytes == 0 && o.payload_disk_dir.empty());
+    parse("--kvmem-host-mib", "64"); parse("--kvmem-disk-mib", "256");
+    parse("--kvmem-disk-path", "spill directory");
+    check(o.payload_host_bytes == (64ULL << 20) && o.payload_disk_bytes == (256ULL << 20));
+    check(o.payload_disk_dir == "spill directory");
+    for (const char * bad : {"0", "-1", "1.5", "1x", "2147483648"}) {
+        rejects([&] { parse("--kvmem-host-mib", bad); });
+        rejects([&] { parse("--kvmem-disk-mib", bad); });
+    }
+    rejects([&] { parse("--kvmem-disk-path", ""); });
     for (const char * value : {"0", "1", "128", "129", "1024", "2147483647"}) {
         parse("--kvmem-sink-tokens", value);
         check(o.sink_tokens == std::stoi(value));

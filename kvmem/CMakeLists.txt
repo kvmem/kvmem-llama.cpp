@@ -16,6 +16,8 @@ add_library(kvmem
     src/host/memory_contract.cpp
     src/host/kv_content.cpp
     src/host/native_kv_payload.cpp
+    src/host/host_kv_storage.cpp
+    src/host/spill_io.cpp
     src/host/session_memory.cpp
     src/host/rope.cpp
 )
@@ -51,6 +53,9 @@ kvmem_add_test(kvmem_store_test)
 kvmem_add_test(pinned_kv_tier_test)
 kvmem_add_test(memory_contract_test)
 kvmem_add_test(native_kv_payload_test)
+kvmem_add_test(host_kv_storage_test)
+kvmem_add_test(spill_io_test)
+kvmem_add_test(tiered_kv_storage_test)
 kvmem_add_test(native_residency_test)
 kvmem_add_test(kv_content_test)
 kvmem_add_test(mean_key_retrieval_test)

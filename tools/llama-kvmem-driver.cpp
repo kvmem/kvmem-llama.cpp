@@ -323,11 +323,7 @@ void llama_driver_clear(LlamaEngineState & st);
 // Included after LlamaEngineState and conversation bookkeeping. Frozen allocations
 // stay in place; failures leave resumable RAM/disk manifests, never attached
 // partial stores. No whole-session serialization buffer is allocated.
-static kvmem_session_payload & session_freeze(LlamaEngineState & st, int id) {
-    auto & conv = st.conv.at(id);
-    if (conv.payload) return *conv.payload;
-    if (id == st.conv_active) throw std::runtime_error("cannot freeze active session");
-    std::vector<kvmem::SnapshotBuffer> buffers;
+void llama_driver_conversation_buffers(kvmem_conversation & conv, std::vector<kvmem::SnapshotBuffer> & buffers) {
     std::set<const MultimodalCheckpointData *> unique;
     auto checkpoint = [&](const std::shared_ptr<const MultimodalCheckpointData> & p) {
         if (!p || !unique.insert(p.get()).second) return;
@@ -352,6 +348,14 @@ static kvmem_session_payload & session_freeze(LlamaEngineState & st, int id) {
     checkpoint(conv.mm_live_checkpoint);
     for (auto * v : {&conv.gdn_ckpt, &conv.gdn_carry, &conv.gdn_query_carry, &conv.gdn_ckpt_query})
         if (v->capacity()) buffers.push_back(kvmem::SnapshotBuffer::bind(*v));
+}
+
+static kvmem_session_payload & session_freeze(LlamaEngineState & st, int id) {
+    auto & conv = st.conv.at(id);
+    if (conv.payload) return *conv.payload;
+    if (id == st.conv_active) throw std::runtime_error("cannot freeze active session");
+    std::vector<kvmem::SnapshotBuffer> buffers;
+    llama_driver_conversation_buffers(conv, buffers);
     const int32_t store = st.conv_table.find(id)->store_id;
     llama_kvmem_store_freeze(store, buffers);
     try {
@@ -415,9 +419,11 @@ static void session_balance(LlamaEngineState & st, int target) {
         if (final_disk <= disk_limit) break;
         if (id == target || id == st.conv_active) continue;
         const auto it = std::find_if(outgoing.begin(), outgoing.end(), [&](auto * p) { return p->id == id; });
-        const uint64_t saved = it != outgoing.end() ? (*it)->disk_bytes() : files.session_bytes(id);
+        const uint64_t native_disk = st.kparams.payload_disk_bytes
+            ? llama_kvmem_store_payload_bytes(st.conv_table.find(id)->store_id, true) : 0;
+        const uint64_t saved = (it != outgoing.end() ? (*it)->disk_bytes() : files.session_bytes(id)) + native_disk;
         if (!saved) continue;
-        final_disk -= saved; disk_used -= files.session_bytes(id);
+        final_disk -= saved; disk_used -= files.session_bytes(id) + native_disk;
         evicted_ram += conversation_bytes(st, id); evictions.push_back(id);
         if (it != outgoing.end()) outgoing.erase(it);
     }
@@ -527,6 +533,32 @@ void llama_driver_begin_disk_request(LlamaEngineState & st, const kvmem_prompt &
     llama_driver_publish_conversations(st);
     kvmem_diag("KVMEM_TRACE session_select id=%d keep=%d reserve=%llu\n", target,
         selection.id == target ? selection.keep : 0, (unsigned long long)reserve);
+}
+
+void llama_driver_check_payload_budget(LlamaEngineState & st, const kvmem_prompt & prompt, int predict) {
+    if (!st.kparams.payload_disk_bytes) return;
+    const uint64_t rows = uint64_t(prompt.tokens.size()) + uint64_t(std::max(0, predict)) +
+        (st.spec.ok ? uint64_t(std::max(0, st.spec_n_max)) + 1 : 0);
+    if (rows > UINT32_MAX) throw std::invalid_argument("native KV token count overflow");
+    const auto required = llama_kvmem_store_payload_capacity(uint32_t(rows));
+    const auto budget = llama_kvmem_payload_budget();
+    if (required > budget)
+        throw std::invalid_argument("request exceeds the combined native KV RAM/SSD history budget");
+    const auto fits = [&] {
+        const auto physical = llama_kvmem_execution_storage_stats(st.execution.get());
+        const auto used = physical.host_bytes + physical.disk_bytes;
+        const auto own = llama_kvmem_store_payload_bytes(llama_kvmem_store_current(), false);
+        if (own > used) throw std::logic_error("native KV owner exceeds shared account");
+        return used - own <= budget && required <= budget - (used - own);
+    };
+    // The request's history reservation includes its output bound. Retained state
+    // attachments count in D too; reclaim whole idle owners before new KV writes.
+    for (int victim : st.conv_table.lru_order()) {
+        if (fits()) return;
+        if (victim != st.conv_active && !conversation_evict(st, victim, "payload_capacity"))
+            throw std::runtime_error("cannot reclaim idle native KV capacity");
+    }
+    if (!fits()) throw std::runtime_error("native KV capacity is still held by another owner");
 }
 
 
