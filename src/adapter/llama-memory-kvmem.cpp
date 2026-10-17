@@ -458,6 +458,24 @@ static bool kvmem_env_perf() {
     return v == 1;
 }
 
+// Staging budget for one raw-K harvest window. The buffer used to be sized to the
+// whole turn, so it ratcheted up to the largest harvest ever seen and never came
+// back down; a large turn is now submitted as several windows instead. Override
+// with KVMEM_D2H_MB. A single tensor is copied whole, so the effective size is
+// raised to the largest one when needed.
+static size_t kvmem_d2h_staging_budget() {
+    static size_t v = 0;
+    if (v == 0) {
+        const char * e = getenv("KVMEM_D2H_MB");
+        long mb = (e && e[0] != '\0') ? std::strtol(e, nullptr, 10) : 96;
+        if (mb <= 0) {
+            mb = 96;
+        }
+        v = static_cast<size_t>(mb) * 1024 * 1024;
+    }
+    return v;
+}
+
 void llama_kvmem_set_params(const struct llama_kvmem_params * params) {
     auto & execution = kvmem_current_execution();
     if (!execution.memory && !execution.mtp) execution.payload_storage.reset();
@@ -3092,15 +3110,42 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     if (!d2h_init() || pending_capture_.empty() || pos_queue_.empty()) {
         return false;
     }
+    // Nodes moved this turn ('v' rows stay in the cache).
+    std::vector<const CaptureNode *> nodes;
+    nodes.reserve(pending_capture_.size());
     size_t bytes = 0;
+    size_t largest = 0;
     for (const CaptureNode & n : pending_capture_) {
         if (n.t && n.which != 'v') {
-            bytes += ggml_nbytes(n.t);
+            nodes.push_back(&n);
+            const size_t nb = ggml_nbytes(n.t);
+            bytes += nb;
+            largest = std::max(largest, nb);
         }
     }
     if (bytes == 0) {
         return false;
     }
+    // A single tensor is copied whole, so a window can never be smaller than the
+    // largest one. Only RDNA2 is capped: elsewhere budget == bytes, which yields
+    // exactly one window and the previous behaviour unchanged.
+    const size_t budget = kvmem_gpu_is_rdna2(d2h_->device)
+            ? std::max(kvmem_d2h_staging_budget(), largest)
+            : bytes;
+    // One pos entry describes the whole batch: harvest_from_host() reads only
+    // cur_pos_[0] and its length, so every window may share this copy.
+    std::vector<llama_pos> batch_pos = std::move(pos_queue_.front());
+    pos_queue_.erase(pos_queue_.begin());
+    bool submitted_any = false;
+    for (size_t first = 0, last = 0; first < nodes.size(); first = last) {
+        size_t chunk_bytes = 0;
+        for (last = first; last < nodes.size(); ++last) {
+            const size_t nb = ggml_nbytes(nodes[last]->t);
+            if (last > first && chunk_bytes + nb > budget) {
+                break;
+            }
+            chunk_bytes += nb;
+        }
     auto & s = d2h_->slots[d2h_->next];
     if (s.inflight) {
         if (harvest_worker_on()) {
@@ -3117,7 +3162,7 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
     perf_.last_snap_wait_us = 0;
     perf_.last_d2h_submit_us = 0;
     const int64_t t_submit0 = ggml_time_us();
-    if (s.cap < bytes) {
+    if (s.cap < budget) {
         if (s.gpu) {
             cudaFree(s.gpu);
             s.gpu = nullptr;
@@ -3126,14 +3171,15 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
             cudaFreeHost(s.pin);
             s.pin = nullptr;
         }
-        if (!kvmem_cuda_ok(cudaMalloc(reinterpret_cast<void **>(&s.gpu), bytes), "gpu staging") ||
-            !kvmem_cuda_ok(cudaMallocHost(reinterpret_cast<void **>(&s.pin), bytes), "pinned host")) {
+        if (!kvmem_cuda_ok(cudaMalloc(reinterpret_cast<void **>(&s.gpu), budget), "gpu staging") ||
+            !kvmem_cuda_ok(cudaMallocHost(reinterpret_cast<void **>(&s.pin), budget), "pinned host")) {
             s.cap = 0;
             return false;
         }
-        s.cap = bytes;
-        kvmem_diag("KVMEM_CAPTURE_MEMORY mode=raw slot0_bytes=%zu slot1_bytes=%zu last_bytes=%zu pinned_bytes=%zu\n",
-                d2h_->slots[0].cap, d2h_->slots[1].cap, bytes, d2h_->slots[0].cap + d2h_->slots[1].cap);
+        s.cap = budget;
+        kvmem_diag("KVMEM_CAPTURE_MEMORY mode=raw slot0_bytes=%zu slot1_bytes=%zu window_bytes=%zu turn_bytes=%zu pinned_bytes=%zu\n",
+                d2h_->slots[0].cap, d2h_->slots[1].cap, budget, bytes,
+                d2h_->slots[0].cap + d2h_->slots[1].cap);
     }
     if (be && !d2h_->compute_done) {
         ggml_backend_dev_t dev = ggml_backend_get_device(be);
@@ -3165,12 +3211,12 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
         perf_.sync_us += perf_.last_sync_us;
     }
     s.items.clear();
-    s.pos = std::move(pos_queue_.front());
-    pos_queue_.erase(pos_queue_.begin());
+    s.pos = batch_pos;
     size_t off = 0;
     uint32_t n_q = 0, n_k = 0, n_v = 0, n_host = 0, n_dev = 0;
     const int64_t t_d2d = ggml_time_us();
-    for (const CaptureNode & n : pending_capture_) {
+    for (size_t ni = first; ni < last; ++ni) {
+        const CaptureNode & n = *nodes[ni];
         if (!n.t || n.which == 'v') {
             continue;
         }
@@ -3273,7 +3319,9 @@ bool llama_memory_kvmem::d2h_submit(ggml_backend_t be) {
                 s.items.size(), n_q, n_k, n_v, n_host, n_dev, off, s.pos.size(), submitted);
     }
     d2h_->next = 1 - d2h_->next;
-    return true;
+    submitted_any = true;
+    } // end window loop
+    return submitted_any;
 }
 
 void llama_memory_kvmem::harvest_pending(ggml_backend_sched_t sched) {

@@ -72,10 +72,31 @@ typedef __hip_bfloat16 nv_bfloat16;
 #define cudaPointerGetAttributes   hipPointerGetAttributes
 #define cudaMemoryTypeDevice       hipMemoryTypeDevice
 
+// --- device architecture ---------------------------------------------------
+// True for RDNA2 (gfx1030..gfx1036). The raw-K harvest staging buffer is capped
+// only there: on Windows the uncapped buffer ratchets up to the largest harvest
+// ever seen, and once it outgrows the card the surplus lands in shared memory
+// and every driven-off access is charged to the host. Other backends keep the
+// previous single-window behaviour, byte for byte.
+inline bool kvmem_gpu_is_rdna2(int device) {
+    hipDeviceProp_t prop{};
+    if (hipGetDeviceProperties(&prop, device) != hipSuccess) {
+        (void) hipGetLastError();
+        return false;
+    }
+    const char * arch = prop.gcnArchName;
+    return arch[0] == 'g' && arch[1] == 'f' && arch[2] == 'x' &&
+           arch[3] == '1' && arch[4] == '0' && arch[5] == '3';
+}
+
 #else
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+
+// CUDA builds are not arch-gated: the harvest staging cap stays off so the
+// behaviour on this backend is unchanged. See the HIP branch for the why.
+inline bool kvmem_gpu_is_rdna2(int /*device*/) { return false; }
 
 #endif  // GGML_USE_HIP
